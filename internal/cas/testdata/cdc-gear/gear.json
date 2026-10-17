@@ -1,0 +1,9 @@
+{
+  "domain_sep": "p37-cdc-gear-v1",
+  "formula": "GEAR[i] = LE64( BLAKE3_256(\"p37-cdc-gear-v1\" || uint8(i))[0:8] )",
+  "count": 256,
+  "gear_0": "0xeb55b387f6fb0e01",
+  "gear_1": "0xe5d8f8864f86ad39",
+  "gear_255": "0x414ed4acf8ab5f33",
+  "table_blake3": "b9c951a899dc226cf10264b99e310c3faf92ba525e2efb6b5d20a730c6941172"
+}

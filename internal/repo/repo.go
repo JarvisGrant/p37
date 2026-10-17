@@ -1,0 +1,383 @@
+// Package repo 实现仓库级操作：init / import / land / revert / 状态（§2、§7）。
+package repo
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/chenyiwen/p37/internal/capture"
+	"github.com/chenyiwen/p37/internal/cas"
+	"github.com/chenyiwen/p37/internal/hash"
+	"github.com/chenyiwen/p37/internal/meta"
+	"github.com/chenyiwen/p37/internal/mountmgr"
+	"github.com/chenyiwen/p37/internal/op"
+	"github.com/chenyiwen/p37/internal/tree"
+	"github.com/chenyiwen/p37/internal/version"
+	"github.com/chenyiwen/p37/internal/workspace"
+)
+
+// EpochSize 是 epoch 的版本数（§9.4，附录 B 的 retention.epoch_size）。
+const EpochSize = 50
+
+// AgentImporter 是 import 产生的版本的 agent 名。
+const AgentImporter = "p37-import"
+
+// Repo 是一个已打开的仓库。
+type Repo struct {
+	Root  string
+	DB    *meta.DB
+	Store *cas.Store
+	MM    *mountmgr.Manager
+	WS    *workspace.Manager
+	// Ignore 是生效的忽略规则。
+	Ignore *tree.Ignore
+	// CaptureOpt 是采集参数。
+	CaptureOpt capture.Options
+
+	// landSem 限制并发进入 land 流水线的请求数（超出即拒绝）。
+	landSem chan struct{}
+	// landMu 串行化整条 land 流水线（§7.4：一条全局 land 队列）。
+	landMu sync.Mutex
+}
+
+// Errors
+var (
+	// ErrAlreadyInitialized 表示仓库已存在。
+	ErrAlreadyInitialized = errors.New("repo: 仓库已初始化")
+	// ErrNotInitialized 表示仓库不存在或未初始化。
+	ErrNotInitialized = errors.New("repo: 仓库未初始化")
+	// ErrLandConflict 表示 land 时存在未决冲突。
+	ErrLandConflict = errors.New("repo: land 存在未决冲突")
+	// ErrNotDirty 表示没有改动可落地。
+	ErrNotDirty = errors.New("repo: 无改动")
+	// ErrLandQueueFull 表示 land 队列已满。
+	ErrLandQueueFull = errors.New("repo: land 队列已满")
+)
+
+// Options 配置打开仓库。
+type Options struct {
+	Ignore         *tree.Ignore
+	ExtraIgnore    []string
+	Capture        capture.Options
+	Materialize    mountmgr.Mode
+	InodeReliable  bool
+	BaseCacheBytes int64
+	// LandQueueMax 是 land 队列容量；超出即拒绝（LAND_QUEUE_FULL，§11.5）。
+	// 0 表示使用 DefaultLandQueueMax。
+	LandQueueMax int
+}
+
+// DefaultLandQueueMax 是 land 队列的默认容量（附录 B 的 daemon.land_queue_max）。
+const DefaultLandQueueMax = 256
+
+// Open 打开一个已初始化的仓库，并做启动自检与 land 修复（§7.7）。
+func Open(root string, opt Options) (*Repo, error) {
+	p37 := filepath.Join(root, ".p37")
+	if _, err := os.Stat(p37); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrNotInitialized, root)
+	}
+
+	db, err := meta.Open(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.CheckFormat(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	bs, err := cas.NewLocalFS(p37)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	store := cas.NewStore(bs, db.ObjectIndex())
+
+	mm, err := mountmgr.New(root, mountmgr.Options{
+		BaseCacheBytes: opt.BaseCacheBytes,
+		InodeReliable:  opt.InodeReliable,
+	})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	ig := opt.Ignore
+	if ig == nil {
+		ig, err = tree.NewIgnore(true, opt.ExtraIgnore)
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+
+	copt := opt.Capture
+	if copt.ProbeBytes == 0 {
+		copt = capture.DefaultOptions()
+	}
+
+	ws := workspace.New(root, db, store, mm, workspace.Options{
+		Ignore:             ig,
+		Capture:            copt,
+		MaterializeDefault: opt.Materialize,
+		InodeReliable:      opt.InodeReliable,
+	})
+
+	// 启动修复：补做/回滚未完成的 land（§7.7 步骤 2）。
+	if _, err := db.ReconcileLand(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	qmax := opt.LandQueueMax
+	if qmax <= 0 {
+		qmax = DefaultLandQueueMax
+	}
+	return &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
+		Ignore: ig, CaptureOpt: copt, landSem: make(chan struct{}, qmax)}, nil
+}
+
+// enterLand 取得一个 land 名额；队列满时立即失败（不阻塞）。
+func (r *Repo) enterLand() (release func(), err error) {
+	select {
+	case r.landSem <- struct{}{}:
+		return func() { <-r.landSem }, nil
+	default:
+		return nil, fmt.Errorf("%w（上限 %d）", ErrLandQueueFull, cap(r.landSem))
+	}
+}
+
+// Init 创建一个空仓库，并写入 v0（空树）。
+func Init(root string, opt Options) (*Repo, error) {
+	p37 := filepath.Join(root, ".p37")
+	if _, err := os.Stat(filepath.Join(p37, "p37.db")); err == nil {
+		return nil, fmt.Errorf("%w: %s", ErrAlreadyInitialized, root)
+	}
+	for _, d := range []string{p37, filepath.Join(p37, "tmp")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return nil, err
+		}
+	}
+
+	db, err := meta.Open(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Init(root); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	_ = db.Close()
+
+	r, err := Open(root, opt)
+	if err != nil {
+		return nil, err
+	}
+
+	// 覆盖初始 v0（空树）。
+	empty := &tree.Tree{}
+	tid, err := r.Store.PutTree(empty)
+	if err != nil {
+		return nil, err
+	}
+	v := version.New(hash.Zero, tid, 0, "p37-init", "init", time.Now().UnixMilli(), "init")
+	if err := r.DB.InsertVersion(v); err != nil {
+		return nil, err
+	}
+	if err := r.writeHead(v.ID()); err != nil {
+		return nil, err
+	}
+	if err := r.DB.SetMainlineHead(v.ID(), 1, 0); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// Import 把 srcdir 的目录树作为 v0 导入（§2.1）。
+//
+// 覆盖已有的 v0（空树），因此只能在尚无后续版本时调用。
+func (r *Repo) Import(srcDir string) (hash.ID, error) {
+	head, ok, err := r.DB.Head()
+	if err != nil {
+		return hash.ID{}, err
+	}
+	if !ok {
+		return hash.ID{}, ErrNotInitialized
+	}
+	n, err := r.DB.CountVersions()
+	if err != nil {
+		return hash.ID{}, err
+	}
+	if n > 1 {
+		return hash.ID{}, errors.New("repo: 只能在尚无后续版本时 import")
+	}
+	// 删除初始 v0，避免留下两条互不相连的根。
+	if err := r.DB.DeleteVersion(head); err != nil {
+		return hash.ID{}, err
+	}
+
+	stat := r.DB.StatCache()
+	t, err := capture.Build("__import__", srcDir, r.Ignore, r.Store, stat,
+		capture.InodeReliable(false), r.CaptureOpt)
+	if err != nil {
+		return hash.ID{}, err
+	}
+	r.DB.StatCache().DeleteUnder("__import__", "")
+
+	v := version.New(hash.Zero, t.ID(),
+		0, AgentImporter, "import "+srcDir, time.Now().UnixMilli(), "import")
+	if err := r.DB.InsertVersion(v); err != nil {
+		return hash.ID{}, err
+	}
+	if err := r.writeHead(v.ID()); err != nil {
+		return hash.ID{}, err
+	}
+	if err := r.DB.SetMainlineHead(v.ID(), 1, 0); err != nil {
+		return hash.ID{}, err
+	}
+	_ = head
+	return v.ID(), nil
+}
+
+// writeHead 原子写入 refs/mainline（§7.3）。
+func (r *Repo) writeHead(id hash.ID) error {
+	key := "refs/mainline"
+	cur, err := r.Store.BlobStore().Stat(key)
+	etag := ""
+	if err == nil {
+		etag = cur.ETag
+	} else if !errors.Is(err, cas.ErrNotExist) {
+		return err
+	}
+	_, err = r.Store.BlobStore().PutIfMatch(key, etag, []byte(id.String()+"\n"))
+	return err
+}
+
+// Head 返回主干 head。
+func (r *Repo) Head() (hash.ID, bool, error) { return r.DB.Head() }
+
+// Close 关闭仓库。
+func (r *Repo) Close() error { return r.DB.Close() }
+
+// VersionSummary 是 version_log 的一项。
+type VersionSummary struct {
+	ID        hash.ID
+	Parent    hash.ID
+	TS        int64
+	Agent     string
+	Task      string
+	Epoch     uint64
+	Files     int
+	Additions int
+	Deletions int
+}
+
+// Log 返回版本列表。
+func (r *Repo) Log(limit int, beforeTS int64) ([]VersionSummary, error) {
+	rows, err := r.DB.ListVersions(limit, beforeTS)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VersionSummary, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, VersionSummary{
+			ID: row.ID, Parent: row.Parent, TS: row.TS,
+			Agent: row.Agent, Task: row.Task, Epoch: row.Epoch,
+		})
+	}
+	return out, nil
+}
+
+// Status 是 repo_status 的仓库部分。
+type Status struct {
+	Root         string
+	MainlineHead hash.ID
+	HasHead      bool
+	VersionCount int64
+	Epoch        uint64
+	LastLandTS   int64
+	FormatVer    int
+	Workspaces   int
+}
+
+// Status 返回仓库状态。
+func (r *Repo) Status() (*Status, error) {
+	rp, err := r.DB.GetRepo()
+	if err != nil {
+		return nil, err
+	}
+	nWS, err := r.DB.CountWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	var lastTS int64
+	if !rp.MainlineHead.IsZero() {
+		if v, err := r.DB.GetVersion(rp.MainlineHead); err == nil {
+			lastTS = v.TS
+		}
+	}
+	return &Status{
+		Root:         rp.Root,
+		MainlineHead: rp.MainlineHead,
+		HasHead:      !rp.MainlineHead.IsZero(),
+		VersionCount: rp.VersionCount,
+		Epoch:        rp.Epoch,
+		LastLandTS:   lastTS,
+		FormatVer:    rp.FormatVer,
+		Workspaces:   nWS,
+	}, nil
+}
+
+// journalOps 构造 journal 的 ops_json（§12.1）。
+func journalOps(ops []op.Op) string {
+	type item struct {
+		OpID    string `json:"op_id"`
+		Path    string `json:"path"`
+		Kind    string `json:"kind"`
+		Added   int    `json:"added"`
+		Removed int    `json:"removed"`
+	}
+	items := make([]item, 0, len(ops))
+	for i := range ops {
+		o := &ops[i]
+		add, del := 0, 0
+		for _, h := range o.Hunks {
+			add += len(h.Insert)
+			del += len(h.Remove)
+		}
+		items = append(items, item{OpID: o.ID, Path: o.Path, Kind: string(o.Kind),
+			Added: add, Removed: del})
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// toJSONLines / toJSONStrings 把行序列编码为 JSON 字符串数组（用于冲突展示）。
+func toJSONLines(ls [][]byte) string {
+	ss := make([]string, len(ls))
+	for i, l := range ls {
+		ss[i] = string(l)
+	}
+	return toJSONStrings(ss)
+}
+
+func toJSONStrings(ss []string) string {
+	b, err := json.Marshal(ss)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// captureDiff 是 capture.Diff 的薄包装，避免 repo 直接依赖 capture 的类型别名。
+func captureDiff(src capture.ObjectWriter, wsID string, base, next *tree.Tree, opt capture.Options) ([]op.Op, error) {
+	return capture.Diff(wsID, base, next, src, opt)
+}

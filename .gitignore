@@ -1,0 +1,25 @@
+# p37 运行时数据（仓库元数据、对象库、工作区）
+.p37/
+workspaces/
+
+# 构建产物
+/p37
+/p37d
+/bin/
+/dist/
+*.test
+
+# 覆盖率与 profiling
+*.out
+coverage.txt
+*.prof
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# 本地临时目录
+/tmp/

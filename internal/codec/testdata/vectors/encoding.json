@@ -1,0 +1,84 @@
+{
+  "algo": "blake3-256",
+  "frozen_at": "M1",
+  "note": "格式资产：任何变化都是格式破坏，必须升 format_ver 并提供迁移（§2.2、附录 A.5）",
+  "cases": [
+    {
+      "name": "blob_empty",
+      "description": "空分片：id = BLAKE3(空字节)",
+      "input": "raw = (empty)",
+      "encoding_hex": "",
+      "id": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    },
+    {
+      "name": "filecontent_1chunk",
+      "description": "单 chunk 文件：total=11, eol=lf, chunks=[BLAKE3(\"hello world\")]",
+      "input": "total_size=11 eol=lf chunks=[blob(\"hello world\")]",
+      "encoding_hex": "020b0100d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24",
+      "id": "db6a6558e4587ebda76268fe526355b2a7fc6b9bdd2b24924c4877fe1d90e09e"
+    },
+    {
+      "name": "filecontent_3chunk",
+      "description": "三 chunk 文件：total=30, eol=crlf, chunks=[a,b,c]",
+      "input": "total_size=30 eol=crlf chunks=[blob(\"a\"), blob(\"b\"), blob(\"c\")]",
+      "encoding_hex": "021e030117762fddd969a453925d65717ac3eea21320b66b54342fde15128d6caf21215f10e5cf3d3c8a4f9f3468c8cc58eea84892a22fdadbc1acb22410190044c1d553ea7aa1fc9efdbe106dbb70369a75e9671fa29d52bd55536711bf197477b8f021",
+      "id": "a3f9950b4ccf3d8c5d91b8727ca78bc8b9c3575e5bd5128cca2babace4968d9c"
+    },
+    {
+      "name": "filecontent_empty_file",
+      "description": "空文件：0 个 chunk（附录 H.5）",
+      "input": "total_size=0 eol=lf chunks=[]",
+      "encoding_hex": "02000000",
+      "id": "f03bf86f79d121cbfd774dec4a65912e99f5f17c33852bbc45e819160e62b53b"
+    },
+    {
+      "name": "tree_empty",
+      "description": "空树（v0 的根）",
+      "input": "entries=[]",
+      "encoding_hex": "0300",
+      "id": "fd07e5b69bfa982855889ce70a028ccba18098d71529ec8d4367bb5d86c8ac98"
+    },
+    {
+      "name": "tree_flat3",
+      "description": "三个平级文件，按字节序排序",
+      "input": "entries=[Dir(Tree), a.txt(File,0644), b.go(File,0755)]",
+      "encoding_hex": "030303446972000164862c6b5357f1cd4c9056e3fa760b38b56afa3a04b1e64196071beee67e477f05612e747874000064862c6b5357f1cd4c9056e3fa760b38b56afa3a04b1e64196071beee67e477f04622e676f010064862c6b5357f1cd4c9056e3fa760b38b56afa3a04b1e64196071beee67e477f",
+      "id": "85cc76eb723737b718b5c42f093001e9e36fa660a9be7632961063a7f01bf047"
+    },
+    {
+      "name": "tree_symlink",
+      "description": "含符号链接的树：mode 恒为 0",
+      "input": "entries=[link(Symlink -\u003e blob(\"target\"))]",
+      "encoding_hex": "0301046c696e6b0002ff2f93d50d44841205d987fb24ba10d956ecb35998a4931f7bef74e6319cce0a",
+      "id": "1281a70cc608c8358948d119ffff07069a3150288cedf08c1ba3220d6fa16cc7"
+    },
+    {
+      "name": "tree_unicode_nfc",
+      "description": "路径做 NFC 归一化：输入为 NFD 时编码结果与 NFC 相同（§3.3）",
+      "input": "entries=[name=\"caf\\u00e9\"(NFC)\\u2190\\u8f93\\u5165\\u4e3a NFD \"cafe\\u0301\"]",
+      "encoding_hex": "030105636166c3a9000064862c6b5357f1cd4c9056e3fa760b38b56afa3a04b1e64196071beee67e477f",
+      "id": "fb979f8efba017a1e21c820d605cb164b111b948fe1fb0abb5d5cbd3ef71bff5"
+    },
+    {
+      "name": "tree_case_sensitive",
+      "description": "大小写敏感排序：Foo.go(0x46) 排在 foo.go(0x66) 之前（§3.3）",
+      "input": "entries=[\"Foo.go\",\"foo.go\"]",
+      "encoding_hex": "030206466f6f2e676f000064862c6b5357f1cd4c9056e3fa760b38b56afa3a04b1e64196071beee67e477f06666f6f2e676f000064862c6b5357f1cd4c9056e3fa760b38b56afa3a04b1e64196071beee67e477f",
+      "id": "5226cab393b1993780bfbdd42eb248f2baad7702620c8c816b85b490e642f7e7"
+    },
+    {
+      "name": "version_first",
+      "description": "首版本：parent 为全零 32 字节（附录 A.3）",
+      "input": "parent=0x00*32 tree=root-tree epoch=0 agent=\"p37-import\" task=\"import\" ts=0 msg=\"\"",
+      "encoding_hex": "040000000000000000000000000000000000000000000000000000000000000000e6ddbc02241119a7868fef17ce506caa31578dadbdd08774abb2eb779c9299c8000a7033372d696d706f72746b042a837f1d2dd20622c2847db98bc267711d7a2c5673f729a2940604065911000000000000000000",
+      "id": "a9e6cd24f3b8408669567d2777ca05c1aaec7638fb283d4bfc54163b4655770d"
+    },
+    {
+      "name": "version_normal",
+      "description": "普通版本：含 epoch / agent / task_hash / ts / msg",
+      "input": "parent=H(v_prev) tree=root-tree epoch=3 agent=\"agent-A\" task=\"实现登录\" ts=1700000000000 msg=\"feat: login\"",
+      "encoding_hex": "048c0a5ad82acef548539e9a2ed40322ab804113deb083ca8f9c98b9b773cd873fe6ddbc02241119a7868fef17ce506caa31578dadbdd08774abb2eb779c9299c803076167656e742d41abae2843b95504b1d548555259011ef996f310fe26b819a613d9f83ebfb42e9a0068e5cf8b0100000b666561743a206c6f67696e",
+      "id": "dfbd527175da7cd14a29bd7f30838f18bc1847ae04bcd69976ac293c2ea27cd9"
+    }
+  ]
+}
