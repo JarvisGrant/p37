@@ -3,7 +3,6 @@ package mountmgr
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 )
 
@@ -17,17 +16,11 @@ func (m *Manager) fsCaseSensitive(dir string) bool {
 	return CaseSensitiveProbe(dir)
 }
 
-// CaseSensitiveProbe 是平台无关的大小写敏感性探测（Linux 与 macOS 同实现）。
+// CaseSensitiveProbe 探测目标目录所在文件系统是否区分大小写（§3.3）。
+//
+// 通过创建一个临时文件、再检查其大小写变体是否存在来判断。macOS 默认不区分
+// 大小写，Linux 默认区分——但不要假设，一律实测。
 func CaseSensitiveProbe(dir string) bool {
-	if runtime.GOOS == "linux" {
-		return probeCase(dir)
-	}
-	// macOS 默认不区分大小写（HFS+/APFS 常见配置），必须探测而非假设。
-	return probeCase(dir)
-}
-
-// probeCase 通过创建一个临时文件并检查其大小写变体是否存在来探测。
-func probeCase(dir string) bool {
 	f, err := os.CreateTemp(dir, "P37case-*")
 	if err != nil {
 		return false // 保守：假设不区分，从而多执行一次冲突检查

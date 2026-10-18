@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/chenyiwen/p37/internal/hash"
@@ -105,27 +104,6 @@ func (m *Manager) Remount(wsID string, newBase hash.ID, src ContentSource,
 		return err
 	}
 	return nil
-}
-
-// CaseSensitiveProbe 返回目标路径所在文件系统是否区分大小写（§3.3）。
-func CaseSensitiveProbe(dir string) bool {
-	f, err := os.CreateTemp(dir, "P37-CASE-*")
-	if err != nil {
-		// 保守假设：不区分大小写（宁可多查一次冲突）。
-		return false
-	}
-	name := f.Name()
-	_ = f.Close()
-	defer func() { _ = os.Remove(name) }()
-
-	alt := strings.ToLower(name)
-	if alt == name {
-		alt = strings.ToUpper(name)
-	}
-	if _, err := os.Stat(alt); err == nil {
-		return false // 大小写不同的路径指向同一文件 → 不区分
-	}
-	return true
 }
 
 // ProbeOverlay 尝试在 dir 下做一次真实的 OverlayFS 挂载，用于部署自检
