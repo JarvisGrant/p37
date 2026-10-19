@@ -64,15 +64,10 @@ func runDaemon(root string, serveHTTP bool) error {
 	defer func() { _ = flockRelease(lock) }()
 
 	// 2. 打开仓库（内部会做格式校验与 land 修复，§7.7）。
-	r, err := repo.Open(root, repo.Options{
-		ExtraIgnore:    cfg.Repo.IgnoreExtra,
-		Capture:        cfg.CaptureOptions(),
-		Materialize:    cfg.MountMode(),
-		BaseCacheBytes: cfg.Workspace.BaseCacheBytes,
-		LandQueueMax:   cfg.Daemon.LandQueueMax,
-		// 常驻 daemon 负责恢复活跃工作区的挂载（§7.7 步骤 3）。
-		RemountWorkspaces: true,
-	})
+	repoOpt := cfg.RepoOptions()
+	// 常驻 daemon 负责恢复活跃工作区的挂载（§7.7 步骤 3）。
+	repoOpt.RemountWorkspaces = true
+	r, err := repo.Open(root, repoOpt)
 	if err != nil {
 		return err
 	}
@@ -99,7 +94,10 @@ func runDaemon(root string, serveHTTP bool) error {
 		FallbackToRoot: watchFallbackNeeded(),
 		Logger:         logger,
 		OnSync: func(wsID string, took time.Duration) {
-			logger.Printf("自动采集 %s 完成（%s）", wsID, took.Round(time.Millisecond))
+			// 只有 info 及以上才逐条打印：debug 级别下采集很频繁。
+			if cfg.LogLevel() == "info" || cfg.LogLevel() == "debug" {
+				logger.Printf("自动采集 %s 完成（%s）", wsID, took.Round(time.Millisecond))
+			}
 		},
 	})
 	if err != nil {

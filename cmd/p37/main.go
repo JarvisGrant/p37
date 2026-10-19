@@ -147,12 +147,7 @@ func openRepo(root string) (*repo.Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return repo.Open(root, repo.Options{
-		ExtraIgnore:    cfg.Repo.IgnoreExtra,
-		Capture:        cfg.CaptureOptions(),
-		Materialize:    cfg.MountMode(),
-		BaseCacheBytes: cfg.Workspace.BaseCacheBytes,
-	})
+	return repo.Open(root, cfg.RepoOptions())
 }
 
 func fail(errw io.Writer, err error) int {
@@ -242,6 +237,12 @@ func cmdStatus(root string, out, errw io.Writer) int {
 }
 
 func cmdDoctor(root string, out, errw io.Writer) int {
+	// 自检读配置：磁盘阈值与其它建议值都来自配置，不能在这里另写一套常量
+	// （那正是「配置改了不生效」的来源）。
+	cfg, err := config.Load(root)
+	if err != nil {
+		return fail(errw, err)
+	}
 	ok := true
 	report := func(name string, good bool, detail string) {
 		mark := "OK  "
@@ -307,13 +308,14 @@ func cmdDoctor(root string, out, errw io.Writer) int {
 	}
 
 	// 6. 磁盘可用空间。
-	avail, err := diskAvailable(root)
-	if err != nil {
+	avail, err2 := diskAvailable(root)
+	if err2 != nil {
 		report("磁盘可用空间", true, "无法探测")
 	} else {
 		// 磁盘空间是**建议值**，不是硬性错误：空间偏小只是意味着并发工作区
-		// 或仓库规模要相应收敛，不影响正确性。
-		warnBytes := int64(40 << 30)
+		// 或仓库规模要相应收敛，不影响正确性。阈值取配置的
+		// workspace.warn_disk_bytes（默认 50 GiB）。
+		warnBytes := cfg.WarnDiskBytes()
 		if avail >= warnBytes {
 			report("磁盘可用空间", true, humanBytes(avail))
 		} else {

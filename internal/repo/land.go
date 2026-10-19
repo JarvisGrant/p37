@@ -186,7 +186,7 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	epoch := rp.VersionCount / EpochSize
+	epoch := uint64(rp.VersionCount / int64(r.epochSize))
 	agent := leaf.Name
 	if agent == "" {
 		agent = "p37"
@@ -357,7 +357,7 @@ func (r *Repo) Revert(versionID hash.ID) (hash.ID, error) {
 	if err != nil {
 		return hash.ID{}, err
 	}
-	epoch := rp.VersionCount / EpochSize
+	epoch := uint64(rp.VersionCount / int64(r.epochSize))
 	msg := "revert " + versionID.String()[:16]
 	v := version.New(head, res.Tree.ID(), uint64(epoch), "p37-revert", msg,
 		time.Now().UnixMilli(), msg)

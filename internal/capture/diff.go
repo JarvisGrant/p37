@@ -303,7 +303,7 @@ func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func
 		}, nil
 	}
 
-	hs := tree.Hunks(tree.SplitLines(oldData), tree.SplitLines(newData), opt.ContextLines)
+	hs := tree.HunksWith(tree.SplitLines(oldData), tree.SplitLines(newData), opt.ContextLines, opt.MaxChain)
 	if len(hs) > 0 {
 		out := make([]op.Hunk, len(hs))
 		for i, h := range hs {

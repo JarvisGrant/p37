@@ -157,10 +157,15 @@ const DefaultContextLines = 3
 //
 // 面向展示的「合并大块」由 HunksMerged 提供，不影响 op 的内容。
 func Hunks(a, b [][]byte, ctx int) []Hunk {
+	return HunksWith(a, b, ctx, DefaultMaxChainLength)
+}
+
+// HunksWith 与 Hunks 相同，但可指定 histogram 的链长上限（附录 I.3）。
+func HunksWith(a, b [][]byte, ctx, maxChain int) []Hunk {
 	if ctx < 0 {
 		ctx = 0
 	}
-	regions := mergeAdjacent(Histogram(a, b))
+	regions := mergeAdjacent(HistogramWith(a, b, maxChain))
 	if len(regions) == 0 {
 		return nil
 	}

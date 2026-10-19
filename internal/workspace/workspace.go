@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
@@ -21,10 +22,14 @@ import (
 )
 
 // 硬上限（§4.2、D20）。
+//
+// 这三个值是**不可逾越的天花板**：配置只能把它们调小，不能调大。
+// D20 明确 max_active 是硬上限 64（64 并发 × 10 万文件的物化成本已经按
+// 这个数算过），调大它会让 §4.8 的磁盘预算与 §4.7 的扫描调度失效。
 const (
-	MaxActive = 64
-	MaxDepth  = 32
-	MaxFanout = 16
+	HardMaxActive = 64
+	HardMaxDepth  = 32
+	HardMaxFanout = 16
 )
 
 // Errors
@@ -53,6 +58,37 @@ type Options struct {
 	Capture            capture.Options
 	MaterializeDefault mountmgr.Mode
 	InodeReliable      bool
+	// MaxActive / MaxDepth / MaxFanout 覆盖硬上限（附录 B 的 workspace.*）。
+	// 0 或超过硬上限时取硬上限；只能调小，不能调大（D20）。
+	MaxActive int
+	MaxDepth  int
+	MaxFanout int
+	// MaxMatches 是 place 的匹配上限（附录 B 的 merge.max_matches）。
+	// 0 表示 op.DefaultMaxMatches。
+	MaxMatches int
+}
+
+// maxMatches 返回生效的 place 匹配上限。
+func (m *Manager) maxMatches() int {
+	if m.opt.MaxMatches <= 0 {
+		return op.DefaultMaxMatches
+	}
+	return m.opt.MaxMatches
+}
+
+// limits 返回生效的上限（已按硬上限钳制）。
+func (m *Manager) limits() (active, depth, fanout int) {
+	return clampLimit(m.opt.MaxActive, HardMaxActive),
+		clampLimit(m.opt.MaxDepth, HardMaxDepth),
+		clampLimit(m.opt.MaxFanout, HardMaxFanout)
+}
+
+// clampLimit 把配置值钳到 [1, hard]；非法值取 hard。
+func clampLimit(v, hard int) int {
+	if v <= 0 || v > hard {
+		return hard
+	}
+	return v
 }
 
 // DefaultOptions 返回默认配置。
@@ -71,6 +107,11 @@ type Manager struct {
 	mm       *mountmgr.Manager
 	opt      Options
 	now      func() int64
+
+	// lastUnstable 记录每个工作区**最近一次采集**里被稳定点判定跳过的路径
+	// （§5.2）。只用于可观测性，不参与任何判定。
+	unstableMu   sync.Mutex
+	lastUnstable map[string][]string
 }
 
 // New 创建 Manager。ig 为 nil 时使用内置忽略集。
@@ -107,8 +148,8 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	if n >= MaxActive {
-		return nil, fmt.Errorf("%w: 活跃工作区已达 %d", ErrLimitExceeded, MaxActive)
+	if limit, _, _ := m.limits(); n >= limit {
+		return nil, fmt.Errorf("%w: 活跃工作区已达 %d", ErrLimitExceeded, limit)
 	}
 
 	parentKind, parentID, baseTree, baseVersion, err := m.resolveParent(req.Parent)
@@ -225,15 +266,15 @@ func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID
 	if err != nil {
 		return "", "", hash.ID{}, hash.ID{}, err
 	}
-	if depth+1 >= MaxDepth {
+	if _, maxDepth, _ := m.limits(); depth+1 >= maxDepth {
 		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 栈深将达 %d", ErrLimitExceeded, depth+1)
 	}
 	kids, err := m.db.Children(pw.ID)
 	if err != nil {
 		return "", "", hash.ID{}, hash.ID{}, err
 	}
-	if len(kids) >= MaxFanout {
-		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 子工作区已达 %d", ErrLimitExceeded, MaxFanout)
+	if _, _, maxFanout := m.limits(); len(kids) >= maxFanout {
+		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 子工作区已达 %d", ErrLimitExceeded, maxFanout)
 	}
 	return meta.ParentWorkspace, pw.ID, et, pw.BaseVersion, nil
 }
@@ -252,7 +293,7 @@ func (m *Manager) depthOf(wsID string) (int, error) {
 		}
 		depth++
 		cur = w.ParentID
-		if depth > MaxDepth+2 {
+		if _, maxDepth, _ := m.limits(); depth > maxDepth+2 {
 			return depth, errors.New("workspace: 父链存在环")
 		}
 	}
@@ -345,6 +386,11 @@ func (m *Manager) Sync(wsID string) error {
 	// 那一份，可直接复用其对象 id（不读、不哈希）。
 	copt := m.opt.Capture
 	copt.MaterializedNS = w.MaterializedTS
+	// §5.2 稳定点判定：把被跳过的文件记下来，供 ws_sync 回报。
+	var skipped []string
+	if copt.StableRetries > 0 {
+		copt.OnUnstable = func(p string) { skipped = append(skipped, p) }
+	}
 	if copt.MaterializedNS > 0 {
 		ids, err := m.flattenTreeIDs(w.BaseTree)
 		if err != nil {
@@ -355,6 +401,7 @@ func (m *Manager) Sync(wsID string) error {
 	stat := m.db.StatCache()
 	nowTree, err := capture.Build(wsID, m.mm.WorkspaceDir(wsID), m.opt.Ignore, m.store, stat,
 		capture.InodeReliable(m.opt.InodeReliable), copt)
+	m.setLastUnstable(wsID, skipped)
 	if err != nil {
 		return err
 	}
@@ -385,6 +432,26 @@ func (m *Manager) Sync(wsID string) error {
 		_ = m.db.UpdateWorkspaceState(wsID, meta.StateActive, ts)
 	}
 	return nil
+}
+
+// LastUnstable 返回某工作区最近一次采集里被稳定点判定跳过的路径（§5.2）。
+func (m *Manager) LastUnstable(wsID string) []string {
+	m.unstableMu.Lock()
+	defer m.unstableMu.Unlock()
+	return m.lastUnstable[wsID]
+}
+
+func (m *Manager) setLastUnstable(wsID string, skipped []string) {
+	m.unstableMu.Lock()
+	defer m.unstableMu.Unlock()
+	if m.lastUnstable == nil {
+		m.lastUnstable = map[string][]string{}
+	}
+	if len(skipped) == 0 {
+		delete(m.lastUnstable, wsID)
+		return
+	}
+	m.lastUnstable[wsID] = skipped
 }
 
 // RemountAll 在 daemon 启动时恢复全部活跃工作区的挂载（§7.7 步骤 3）。
@@ -450,7 +517,7 @@ func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
 		return hash.ID{}, err
 	}
 	res, err := op.Replay(base, ops, m.store, op.Options{
-		WsID: wsID, MaxMatches: op.DefaultMaxMatches, Resolver: m.db.Resolver(),
+		WsID: wsID, MaxMatches: m.maxMatches(), Resolver: m.db.Resolver(),
 	})
 	if err != nil {
 		return hash.ID{}, err
@@ -668,7 +735,7 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 		return nil, err
 	}
 	res, err := op.Replay(newTree, ops, m.store, op.Options{
-		WsID: wsID, MaxMatches: op.DefaultMaxMatches, Resolver: m.db.Resolver(),
+		WsID: wsID, MaxMatches: m.maxMatches(), Resolver: m.db.Resolver(),
 	})
 	if err != nil {
 		return nil, err

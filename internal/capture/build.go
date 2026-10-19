@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
@@ -29,6 +30,18 @@ type Options struct {
 	MaxFileSize int64
 	// ContextLines 是 hunk 的上下文行数（§5.3）。
 	ContextLines int
+	// MaxChain 是 histogram diff 的链长上限（附录 I.3，merge.max_chain_length）。
+	// 0 表示 tree.DefaultMaxChainLength。
+	MaxChain int
+	// MoveSimilarity 是「相似度移动」的判定阈值（§5.3 第 2 趟，
+	// merge.move_similarity）。0 表示用 DefaultMoveSimilarity。
+	MoveSimilarity float64
+	// StableDelay / StableRetries 是采集的**稳定点判定**（§5.2）。
+	// StableRetries <= 0 表示关闭（import 等离线场景用）。
+	StableDelay   time.Duration
+	StableRetries int
+	// OnUnstable 在某个文件连续多轮仍不稳定、本轮被跳过时回调（可观测性用）。
+	OnUnstable func(path string)
 
 	// BaseEntries 是基准树的扁平视图（仓库相对路径 -> 对象 id，不含目录）。
 	//
@@ -43,12 +56,17 @@ type Options struct {
 // DefaultOptions 返回 §3.5、附录 B 的默认取值。
 func DefaultOptions() Options {
 	return Options{
-		ProbeBytes:   tree.DefaultBinaryProbeBytes,
-		MaxTextSize:  4 << 20,
-		MaxFileSize:  2 << 30,
-		ContextLines: tree.DefaultContextLines,
+		ProbeBytes:     tree.DefaultBinaryProbeBytes,
+		MaxTextSize:    4 << 20,
+		MaxFileSize:    2 << 30,
+		ContextLines:   tree.DefaultContextLines,
+		MaxChain:       tree.DefaultMaxChainLength,
+		MoveSimilarity: DefaultMoveSimilarity,
 	}
 }
+
+// DefaultMoveSimilarity 是「相似度移动」的默认阈值（附录 B 的 merge.move_similarity）。
+const DefaultMoveSimilarity = 0.6
 
 // ErrFileTooLarge 表示单文件超过上限。
 var ErrFileTooLarge = errors.New("capture: 单文件超过上限")
@@ -104,6 +122,10 @@ func Build(wsID, root string, ig *tree.Ignore, ow ObjectWriter,
 		opt = DefaultOptions()
 	}
 	b := &builder{wsID: wsID, rootDir: root, ig: ig, ow: ow, stat: stat, inodeOK: inodeOK, opt: opt}
+	// §5.2 稳定点判定：必须在正式遍历之前，且必须在任何对象写入之前。
+	if err := b.stabilize(); err != nil {
+		return nil, err
+	}
 	entries, err := b.dir(root)
 	if err != nil {
 		return nil, err
@@ -156,6 +178,168 @@ type builder struct {
 	// cache 是本次构建用的 stat 缓存快照（惰性载入一次）。
 	cache     map[string]StatEntry
 	cacheOnce bool
+
+	// stable 是稳定点判定**确认过**的文件内容（§5.2）：主遍历直接取用，
+	// 不再重新读取，避免又读到中途状态。
+	stable map[string][]byte
+	// unstable 是连续多轮仍不稳定的文件，本轮跳过。
+	unstable map[string]bool
+}
+
+// BuildStats 汇总一次采集的判定统计（可观测性用）。
+type BuildStats struct {
+	// SkippedUnstable 是连续多轮不稳定、本轮被跳过的路径。
+	SkippedUnstable []string
+}
+
+// candidate 是一个「可能正在被写」的待确认文件。
+type candidate struct {
+	path  string // 仓库相对路径
+	abs   string
+	mtime int64
+	size  int64
+	hash  hash.ID
+}
+
+// stabilize 是 §5.2 的**稳定点判定**。
+//
+// 背景：agent 直接改工作区目录，采集可能在文件**正被写入**时撞上去，
+// 于是把一个被截断的内容当成新版本落进 op —— 这一步就是防它。
+//
+// 判定规则（§5.2）：
+//
+//	对疑似变更的文件，读到 (hash, mtime, size)；
+//	隔 stable_delay 再读一次；三元组一致才算稳定。
+//	连续 stable_retries 轮仍不一致 -> 跳过该文件本轮，下一轮再试。
+//
+// 两个工程上的关键点：
+//
+//  1. **只检查「刚被写过」的文件**（mtime 距今 < stable_delay）。mtime 已经
+//     很久没动的文件不可能正在被写，无需付等待成本。
+//  2. **等待是批量的**：先把所有候选读一遍，再睡一次，再统一复核。
+//     否则「一次改了 1000 个文件」会变成 1000 × 200ms = 200 秒。
+func (b *builder) stabilize() error {
+	if b.opt.StableRetries <= 0 || b.opt.StableDelay <= 0 {
+		return nil
+	}
+	pending, err := b.collectCandidates()
+	if err != nil || len(pending) == 0 {
+		return err
+	}
+
+	// 第 0 轮：把候选读一遍作为基线。
+	live := pending[:0]
+	for i := range pending {
+		c := &pending[i]
+		data, err := os.ReadFile(c.abs)
+		if err != nil {
+			continue // 采集期间消失/不可读：交给主遍历处理
+		}
+		c.hash = hash.Sum(data)
+		live = append(live, *c)
+	}
+	pending = live
+
+	for round := 0; round < b.opt.StableRetries && len(pending) > 0; round++ {
+		time.Sleep(b.opt.StableDelay)
+		still := pending[:0]
+		for i := range pending {
+			c := &pending[i]
+			info, err := os.Lstat(c.abs)
+			if err != nil {
+				continue
+			}
+			data, err := os.ReadFile(c.abs)
+			if err != nil {
+				continue
+			}
+			h := hash.Sum(data)
+			if info.ModTime().UnixNano() == c.mtime && info.Size() == c.size && h == c.hash {
+				if b.stable == nil {
+					b.stable = make(map[string][]byte, len(pending))
+				}
+				b.stable[c.path] = data
+				continue
+			}
+			c.mtime, c.size, c.hash = info.ModTime().UnixNano(), info.Size(), h
+			still = append(still, *c)
+		}
+		pending = still
+	}
+
+	for i := range pending {
+		if b.unstable == nil {
+			b.unstable = make(map[string]bool, len(pending))
+		}
+		b.unstable[pending[i].path] = true
+		if b.opt.OnUnstable != nil {
+			b.opt.OnUnstable(pending[i].path)
+		}
+	}
+	return nil
+}
+
+// collectCandidates 找出「需要真正读取、且刚被写过」的文件。
+func (b *builder) collectCandidates() ([]candidate, error) {
+	var out []candidate
+	var walk func(dir string) error
+	walk = func(dir string) error {
+		des, err := os.ReadDir(dir)
+		if err != nil {
+			return nil // 单个子目录读不了不影响其它
+		}
+		for _, de := range des {
+			child := filepath.Join(dir, de.Name())
+			rp := b.rel(child)
+			info, err := os.Lstat(child)
+			if err != nil {
+				continue
+			}
+			if b.ig != nil && b.ig.Match(rp, info.IsDir()) {
+				continue
+			}
+			switch {
+			case info.IsDir():
+				if err := walk(child); err != nil {
+					return err
+				}
+			case !info.Mode().IsRegular():
+				// 符号链接等不读内容，无关稳定点。
+			default:
+				if info.Size() > b.opt.MaxFileSize {
+					continue
+				}
+				if time.Since(info.ModTime()) >= b.opt.StableDelay {
+					continue // 很久没动 -> 不可能正在被写
+				}
+				if b.isFastPath(rp, info) {
+					continue // 快路径命中 -> 根本不会读
+				}
+				out = append(out, candidate{
+					path: rp, abs: child,
+					mtime: info.ModTime().UnixNano(), size: info.Size(),
+				})
+			}
+		}
+		return nil
+	}
+	err := walk(b.rootDir)
+	return out, err
+}
+
+// isFastPath 报告该文件是否会命中「不读取」的快路径。
+func (b *builder) isFastPath(repoPath string, info os.FileInfo) bool {
+	if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
+		b.sameStat(prev, info) && !prev.ObjectID.IsZero() {
+		return true
+	}
+	if b.opt.MaterializedNS > 0 {
+		if id, found := b.opt.BaseEntries[repoPath]; found && !id.IsZero() &&
+			info.ModTime().UnixNano() <= b.opt.MaterializedNS {
+			return true
+		}
+	}
+	return false
 }
 
 // loadCache 惰性载入 stat 缓存快照（一次查询）。
@@ -324,6 +508,27 @@ func (b *builder) file(p, repoPath string, info os.FileInfo) (hash.ID, bool, err
 		}
 	}
 
+	// 稳定点判定已经确认过的内容：直接用，不重读（§5.2）。
+	if data, ok := b.stable[repoPath]; ok {
+		return b.commitFile(repoPath, info, data)
+	}
+	// 连续多轮都不稳定 -> 本轮跳过。
+	//
+	// 「跳过」的正确含义是**让这一轮看不到它**，而不是把它当成已删除：
+	//   - 基准里有这个路径 -> 沿用基准条目（Diff 于是看不到变化）
+	//   - 否则不产出条目（下轮再采）
+	// 两种情况都**不更新 stat 缓存**，下一轮才会重新检查。
+	if b.unstable[repoPath] {
+		if id, found := b.opt.BaseEntries[repoPath]; found && !id.IsZero() {
+			return id, true, nil
+		}
+		if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
+			!prev.ObjectID.IsZero() {
+			return prev.ObjectID, true, nil
+		}
+		return hash.ID{}, false, nil
+	}
+
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -331,15 +536,18 @@ func (b *builder) file(p, repoPath string, info os.FileInfo) (hash.ID, bool, err
 		}
 		return hash.ID{}, false, err
 	}
-	cid := hash.Sum(data)
+	return b.commitFile(repoPath, info, data)
+}
 
+// commitFile 把一份已确认的内容落成 FileContent 并更新 stat 缓存。
+func (b *builder) commitFile(repoPath string, info os.FileInfo, data []byte) (hash.ID, bool, error) {
+	cid := hash.Sum(data)
 	if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
 		prev.ContentHash == cid && !prev.ObjectID.IsZero() {
 		// 内容未变（只是 mtime 变了），复用对象 id。
 		b.putStatWith(repoPath, codec.EntryFile, info, cid, prev.ObjectID, hash.ID{})
 		return prev.ObjectID, true, nil
 	}
-
 	fid, err := b.ow.PutFileData(data)
 	if err != nil {
 		return hash.ID{}, false, err

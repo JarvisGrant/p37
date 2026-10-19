@@ -372,9 +372,16 @@ func (s *Server) registerWorkspace() {
 			for _, o := range ops {
 				files[o.Path] = true
 			}
+			// §5.2：连续多轮不稳定的文件本轮被跳过，必须让调用方看见 ——
+			// 否则「采集了 0 个改动」和「有文件正在被写所以没采到」无法区分。
+			skipped := s.R.WS.LastUnstable(a.WsID)
+			if skipped == nil {
+				skipped = []string{}
+			}
 			return map[string]any{
 				"captured_ops": after, "new_ops": after - before,
-				"files_touched": len(files),
+				"files_touched":    len(files),
+				"skipped_unstable": skipped,
 			}, nil
 		})
 

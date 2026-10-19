@@ -15,6 +15,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/capture"
 	"github.com/chenyiwen/p37/internal/mountmgr"
+	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/tree"
 )
 
@@ -183,11 +184,69 @@ func Duration(s string, def time.Duration) time.Duration {
 
 // CaptureOptions 由配置导出采集参数。
 func (c Config) CaptureOptions() capture.Options {
-	return capture.Options{
-		ProbeBytes:   c.Files.BinaryProbeBytes,
-		MaxTextSize:  c.Files.MaxTextSize,
-		MaxFileSize:  c.Files.MaxFileSize,
-		ContextLines: c.Merge.ContextLines,
+	o := capture.Options{
+		ProbeBytes:     c.Files.BinaryProbeBytes,
+		MaxTextSize:    c.Files.MaxTextSize,
+		MaxFileSize:    c.Files.MaxFileSize,
+		ContextLines:   c.Merge.ContextLines,
+		MaxChain:       c.Merge.MaxChainLength,
+		MoveSimilarity: c.Merge.MoveSimilarity,
+	}
+	// 稳定点判定（§5.2）只在工作区采集里开启；import 是离线操作不需要。
+	return o
+}
+
+// StableOptions 返回稳定点判定的参数（§5.2）。
+//
+// 单独一个方法是因为 import 要显式关掉它（离线导入不需要、也不应该等）。
+func (c Config) StableOptions() (time.Duration, int) {
+	return Duration(c.Workspace.StableDelay, 200*time.Millisecond), c.Workspace.StableRetries
+}
+
+// WarnDiskBytes 返回磁盘告警阈值（附录 B 的 workspace.warn_disk_bytes）。
+func (c Config) WarnDiskBytes() int64 {
+	if c.Workspace.WarnDiskBytes <= 0 {
+		return 50 << 30
+	}
+	return c.Workspace.WarnDiskBytes
+}
+
+// InotifyFallback 报告是否应把 fs watcher 降级为只监听根目录（附录 G.3）。
+func (c Config) InotifyFallback() bool { return c.Workspace.InotifyFallback }
+
+// LogLevel 返回日志级别。
+func (c Config) LogLevel() string {
+	if c.Daemon.LogLevel == "" {
+		return "info"
+	}
+	return c.Daemon.LogLevel
+}
+
+// RepoOptions 由配置导出 repo.Options。
+//
+// CLI 与 daemon 共用同一份映射，避免两处配置走样（这正是「配置写了不生效」
+// 这类问题的常见来源）。
+func (c Config) RepoOptions() repo.Options {
+	delay, retries := c.StableOptions()
+	copt := c.CaptureOptions()
+	copt.StableDelay, copt.StableRetries = delay, retries
+	return repo.Options{
+		ExtraIgnore:    c.Repo.IgnoreExtra,
+		Capture:        copt,
+		Materialize:    c.MountMode(),
+		BaseCacheBytes: c.Workspace.BaseCacheBytes,
+		LandQueueMax:   c.Daemon.LandQueueMax,
+		EpochSize:      c.Retention.EpochSize,
+		MaxActive:      c.Workspace.MaxActive,
+		MaxDepth:       c.Workspace.MaxDepth,
+		MaxFanout:      c.Workspace.MaxFanout,
+		MaxMatches:     c.Merge.MaxMatches,
+		GC: repo.GCOptions{
+			KeepVersions: c.Retention.KeepVersions,
+			KeepEpochs:   c.Retention.KeepEpochs,
+			ScrubSample:  c.GC.ScrubSample,
+			VerifyOnRead: c.GC.VerifyOnRead,
+		},
 	}
 }
 

@@ -21,8 +21,8 @@ import (
 	"github.com/chenyiwen/p37/internal/workspace"
 )
 
-// EpochSize 是 epoch 的版本数（§9.4，附录 B 的 retention.epoch_size）。
-const EpochSize = 50
+// DefaultEpochSize 是 epoch 的版本数默认值（§9.4，附录 B 的 retention.epoch_size）。
+const DefaultEpochSize = 50
 
 // AgentImporter 是 import 产生的版本的 agent 名。
 const AgentImporter = "p37-import"
@@ -38,6 +38,11 @@ type Repo struct {
 	Ignore *tree.Ignore
 	// CaptureOpt 是采集参数。
 	CaptureOpt capture.Options
+
+	// epochSize 是 epoch 的版本数（§9.4）。
+	epochSize int
+	// gc 是保留与回收参数（§10）。
+	gc GCOptions
 
 	// landSem 限制并发进入 land 流水线的请求数（超出即拒绝）。
 	landSem chan struct{}
@@ -74,6 +79,36 @@ type Options struct {
 	// （§7.7 步骤 3）。**只有常驻 daemon 应该打开它**：CLI 每次调用都重挂
 	// 既慢又会与 daemon 打架。
 	RemountWorkspaces bool
+
+	// EpochSize 是 epoch 的版本数（§9.4）。0 表示 DefaultEpochSize。
+	EpochSize int
+	// MaxActive / MaxDepth / MaxFanout 覆盖工作区上限（附录 B）。
+	// 0 表示硬上限；只能调小，不能调大（D20）。
+	MaxActive int
+	MaxDepth  int
+	MaxFanout int
+	// MaxMatches 是 place 的匹配上限（附录 B 的 merge.max_matches）。
+	// 0 表示 op.DefaultMaxMatches。
+	MaxMatches int
+	// GC 是保留与回收参数（§10）。
+	GC GCOptions
+}
+
+// GCOptions 是保留与回收的参数（§10.3、§10.4）。
+type GCOptions struct {
+	// KeepVersions 是始终保留的最近版本数。
+	KeepVersions int
+	// KeepEpochs 是保留 checkpoint 的 epoch 数。
+	KeepEpochs int
+	// ScrubSample 是 scrub 的抽样比例（0–1）。
+	ScrubSample float64
+	// VerifyOnRead 是读时校验策略："off" / "sample" / "always"。
+	VerifyOnRead string
+}
+
+// DefaultGCOptions 返回附录 B 的默认值。
+func DefaultGCOptions() GCOptions {
+	return GCOptions{KeepVersions: 200, KeepEpochs: 20, ScrubSample: 0.01, VerifyOnRead: "sample"}
 }
 
 // DefaultLandQueueMax 是 land 队列的默认容量（附录 B 的 daemon.land_queue_max）。
@@ -130,6 +165,10 @@ func Open(root string, opt Options) (*Repo, error) {
 		Capture:            copt,
 		MaterializeDefault: opt.Materialize,
 		InodeReliable:      opt.InodeReliable,
+		MaxActive:          opt.MaxActive,
+		MaxDepth:           opt.MaxDepth,
+		MaxFanout:          opt.MaxFanout,
+		MaxMatches:         opt.MaxMatches,
 	})
 
 	// 启动修复：补做/回滚未完成的 land（§7.7 步骤 2）。
@@ -151,9 +190,30 @@ func Open(root string, opt Options) (*Repo, error) {
 	if qmax <= 0 {
 		qmax = DefaultLandQueueMax
 	}
+	epoch := opt.EpochSize
+	if epoch <= 0 {
+		epoch = DefaultEpochSize
+	}
+	gc := opt.GC
+	if gc.KeepVersions <= 0 {
+		gc.KeepVersions = DefaultGCOptions().KeepVersions
+	}
+	if gc.KeepEpochs <= 0 {
+		gc.KeepEpochs = DefaultGCOptions().KeepEpochs
+	}
+	if gc.VerifyOnRead == "" {
+		gc.VerifyOnRead = DefaultGCOptions().VerifyOnRead
+	}
 	return &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
-		Ignore: ig, CaptureOpt: copt, landSem: make(chan struct{}, qmax)}, nil
+		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
+		landSem: make(chan struct{}, qmax)}, nil
 }
+
+// EpochSize 返回生效的 epoch 版本数（§9.4）。
+func (r *Repo) EpochSize() int { return r.epochSize }
+
+// GCOptions 返回生效的保留与回收参数（§10）。
+func (r *Repo) GCOptions() GCOptions { return r.gc }
 
 // enterLand 取得一个 land 名额；队列满时立即失败（不阻塞）。
 func (r *Repo) enterLand() (release func(), err error) {
@@ -236,8 +296,12 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 
 	// 导入没有对应的工作区行，因此**不写** stat 缓存（stat_cache.ws_id 有外键）。
 	// 传 nil 即可：Build 会跳过全部缓存读写。
+	// 稳定点判定只针对「agent 正在并发改工作区」的场景；import 是离线操作，
+	// 没有并发写者，显式关掉以免白等（§5.2 的适用面就是工作区采集）。
+	iopt := r.CaptureOpt
+	iopt.StableRetries = 0
 	t, err := capture.Build("", srcDir, r.Ignore, r.Store, nil,
-		capture.InodeReliable(false), r.CaptureOpt)
+		capture.InodeReliable(false), iopt)
 	if err != nil {
 		return hash.ID{}, err
 	}
