@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/codec"
@@ -123,7 +124,13 @@ func Build(wsID, root string, ig *tree.Ignore, ow ObjectWriter,
 	if opt.ProbeBytes <= 0 {
 		opt = DefaultOptions()
 	}
-	b := &builder{wsID: wsID, rootDir: root, ig: ig, ow: ow, stat: stat, inodeOK: inodeOK, opt: opt}
+	b := &builder{wsID: wsID, rootDir: root, ig: ig, ow: ow, stat: stat, inodeOK: inodeOK, opt: opt,
+		listing: make(map[string][]dirItem, 128)}
+	// 一次扫描同时服务稳定点判定与建树：此前 collectCandidates 与 dir 各走一遍
+	// 全树（readdir + lstat ×2），是 1 万文件采集的主要成本。
+	if err := b.scan(root); err != nil {
+		return nil, err
+	}
 	// §5.2 稳定点判定：必须在正式遍历之前，且必须在任何对象写入之前。
 	if err := b.stabilize(); err != nil {
 		return nil, err
@@ -176,6 +183,10 @@ type builder struct {
 
 	// pendingStat 累积待写入的 stat 条目，最后批量落库。
 	pendingStat []StatEntry
+
+	// listing 是一次扫描得到的「目录 -> 子项（含 FileInfo）」快照。
+	// 稳定点判定与建树共用它，避免两次全树遍历。
+	listing map[string][]dirItem
 
 	// cache 是本次构建用的 stat 缓存快照（惰性载入一次）。
 	cache     map[string]StatEntry
@@ -284,49 +295,32 @@ func (b *builder) stabilize() error {
 // collectCandidates 找出「需要真正读取、且刚被写过」的文件。
 func (b *builder) collectCandidates() ([]candidate, error) {
 	var out []candidate
-	var walk func(dir string) error
-	walk = func(dir string) error {
-		des, err := os.ReadDir(dir)
-		if err != nil {
-			return nil // 单个子目录读不了不影响其它
-		}
-		for _, de := range des {
-			child := filepath.Join(dir, de.Name())
-			rp := b.rel(child)
-			info, err := os.Lstat(child)
-			if err != nil {
+	for _, items := range b.listing {
+		for _, it := range items {
+			info := it.info
+			if info.IsDir() || !info.Mode().IsRegular() {
+				continue // 符号链接等不读内容，无关稳定点
+			}
+			if info.Size() > b.opt.MaxFileSize {
 				continue
 			}
-			if b.ig != nil && b.ig.Match(rp, info.IsDir()) {
-				continue
+			if time.Since(info.ModTime()) >= b.opt.StableDelay {
+				continue // 很久没动 -> 不可能正在被写
 			}
-			switch {
-			case info.IsDir():
-				if err := walk(child); err != nil {
-					return err
-				}
-			case !info.Mode().IsRegular():
-				// 符号链接等不读内容，无关稳定点。
-			default:
-				if info.Size() > b.opt.MaxFileSize {
-					continue
-				}
-				if time.Since(info.ModTime()) >= b.opt.StableDelay {
-					continue // 很久没动 -> 不可能正在被写
-				}
-				if b.isFastPath(rp, info) {
-					continue // 快路径命中 -> 根本不会读
-				}
-				out = append(out, candidate{
-					path: rp, abs: child,
-					mtime: info.ModTime().UnixNano(), size: info.Size(),
-				})
+			child := it.abs
+			rp := it.repoPath
+			if b.isFastPath(rp, info) {
+				continue // 快路径命中 -> 根本不会读
 			}
+			out = append(out, candidate{
+				path: rp, abs: child,
+				mtime: info.ModTime().UnixNano(), size: info.Size(),
+			})
 		}
-		return nil
 	}
-	err := walk(b.rootDir)
-	return out, err
+	// map 遍历无序；排序保证稳定点判定的顺序确定（便于复现与测试）。
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out, nil
 }
 
 // isFastPath 报告该文件是否会命中「不读取」的快路径。
@@ -371,38 +365,38 @@ func (b *builder) cached(path string) (StatEntry, bool) {
 }
 
 func (b *builder) rel(p string) string {
-	r, err := filepath.Rel(b.rootDir, p)
-	if err != nil {
-		return filepath.ToSlash(p)
+	if p == b.rootDir {
+		return "."
 	}
-	return filepath.ToSlash(r)
+	prefix := b.rootDir + string(filepath.Separator)
+	if strings.HasPrefix(p, prefix) {
+		return filepath.ToSlash(p[len(prefix):])
+	}
+	// 理论上不会走到这里（所有路径都由 rootDir 拼出）；保留兜底。
+	if r, err := filepath.Rel(b.rootDir, p); err == nil {
+		return filepath.ToSlash(r)
+	}
+	return filepath.ToSlash(p)
 }
 
 // dir 递归构建一个目录的条目。
 func (b *builder) dir(dirPath string) ([]tree.Entry, error) {
-	des, err := os.ReadDir(dirPath)
-	if err != nil {
-		return nil, err
-	}
-
-	entries := make([]tree.Entry, 0, len(des))
-	for _, de := range des {
-		name := codec.NFC(de.Name())
-		child := filepath.Join(dirPath, de.Name())
-		repoPath := b.rel(child)
-
-		info, err := os.Lstat(child)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue // 采集期间被删除
-			}
+	items, ok := b.listing[dirPath]
+	if !ok {
+		// 理论不可达：Build 会先 scan 整棵树。保留兜底以便单测直接调用。
+		if err := b.scan(dirPath); err != nil {
 			return nil, err
 		}
-		isDir := info.IsDir()
+		items = b.listing[dirPath]
+	}
 
-		if b.ig != nil && b.ig.Match(repoPath, isDir) {
-			continue
-		}
+	entries := make([]tree.Entry, 0, len(items))
+	for _, it := range items {
+		name := codec.NFC(it.name)
+		child := it.abs
+		repoPath := it.repoPath
+		info := it.info
+		isDir := info.IsDir()
 
 		switch {
 		case isDir:
@@ -420,6 +414,9 @@ func (b *builder) dir(dirPath string) ([]tree.Entry, error) {
 		case info.Mode()&os.ModeSymlink != 0:
 			target, err := os.Readlink(child)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue // 扫描后被删除
+				}
 				return nil, err
 			}
 			// 符号链接的条目 id 是链接目标的 Blob id（附录 A.3）。
@@ -457,6 +454,51 @@ func (b *builder) dir(dirPath string) ([]tree.Entry, error) {
 	return entries, nil
 }
 
+// dirItem 是扫描快照里的一个目录项（名字、绝对路径、仓库相对路径与 FileInfo）。
+type dirItem struct {
+	name     string
+	abs      string
+	repoPath string
+	info     os.FileInfo
+}
+
+// scan 遍历整棵工作区目录树，记录每个目录的子项与 FileInfo。
+//
+// 只做 readdir + lstat，不读文件内容；忽略规则在这里就生效，因此被忽略的
+// 目录不会被继续下钻。后续的稳定点判定与建树都复用这份快照。
+func (b *builder) scan(dirPath string) error {
+	des, err := os.ReadDir(dirPath)
+	if err != nil {
+		return err
+	}
+	items := make([]dirItem, 0, len(des))
+	for _, de := range des {
+		child := filepath.Join(dirPath, de.Name())
+		info, err := os.Lstat(child)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // 扫描期间被删除
+			}
+			return err
+		}
+		rp := b.rel(child)
+		if b.ig != nil && b.ig.Match(rp, info.IsDir()) {
+			continue
+		}
+		items = append(items, dirItem{name: de.Name(), abs: child, repoPath: rp, info: info})
+		if info.IsDir() {
+			if err := b.scan(child); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue // 子目录在扫描期间消失
+				}
+				return err
+			}
+		}
+	}
+	b.listing[dirPath] = items
+	return nil
+}
+
 // subtree 处理一个子目录：条目签名未变则直接复用其 Tree id（§5.5）。
 //
 // 返回的计数 n 是该目录下的条目数；n == 0 表示空目录，调用方应跳过它
@@ -468,7 +510,7 @@ func (b *builder) subtree(dirPath, repoPath string, info os.FileInfo) (hash.ID, 
 	}
 	if len(sub) == 0 {
 		if b.stat != nil {
-			b.stat.DeleteUnder(b.wsID, repoPath)
+			b.dropStat(repoPath)
 		}
 		return hash.ID{}, 0, nil
 	}
@@ -595,7 +637,7 @@ func (b *builder) putStatWith(repoPath string, kind uint8, info os.FileInfo,
 	if info.Mode()&0o111 != 0 {
 		mode = codec.ModeExecutable
 	}
-	b.pendingStat = append(b.pendingStat, StatEntry{
+	e := StatEntry{
 		Path:        repoPath,
 		Kind:        kind,
 		MtimeNS:     info.ModTime().UnixNano(),
@@ -605,7 +647,40 @@ func (b *builder) putStatWith(repoPath string, kind uint8, info os.FileInfo,
 		ContentHash: contentHash,
 		ObjectID:    objectID,
 		EntriesSig:  sig,
-	})
+	}
+	// 与缓存快照逐字段相同时不必落库。
+	//
+	// 这是 10k 文件「无变更采集」从数百毫秒降到数十毫秒的关键：此前每一轮
+	// 采集都会把**全部**条目重写一遍（O(文件数) 次写入）。缓存本身是可重建的
+	// 纯缓存，跳过等价写入不改变任何可观察语义。
+	if prev, ok := b.cached(repoPath); ok && statEqual(prev, e) {
+		return
+	}
+	b.pendingStat = append(b.pendingStat, e)
+}
+
+// statEqual 比较两条 stat 缓存记录是否等价。
+func statEqual(a, b StatEntry) bool {
+	return a.Kind == b.Kind && a.MtimeNS == b.MtimeNS && a.Size == b.Size &&
+		a.Inode == b.Inode && a.Mode == b.Mode &&
+		a.ContentHash == b.ContentHash && a.ObjectID == b.ObjectID &&
+		a.EntriesSig == b.EntriesSig
+}
+
+// dropStat 删除 prefix 及其下的缓存条目，并把内存快照里的对应项一并抹掉 ——
+// 否则「跳过等价写入」的优化会让被删的行再也写不回来。
+func (b *builder) dropStat(prefix string) {
+	if b.stat == nil {
+		return
+	}
+	b.stat.DeleteUnder(b.wsID, prefix)
+	if b.cacheOnce {
+		for p := range b.cache {
+			if p == prefix || strings.HasPrefix(p, prefix+"/") {
+				delete(b.cache, p)
+			}
+		}
+	}
 }
 
 // EntriesSig 是目录条目的规范化签名，用于子树复用与 stat 缓存播种。
