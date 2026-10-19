@@ -36,7 +36,7 @@ func Diff(wsID string, base, next *tree.Tree, ow ObjectWriter, opt Options) ([]o
 			ops = append(ops, op.Op{
 				ID: newOpID(wsID, ch.path, seq, op.KindCreate), WsID: wsID,
 				Seq: nextSeq(), Kind: op.KindCreate, Path: ch.path, NewFile: ch.new.ID,
-				EntryKind: ch.new.Kind, Derived: true,
+				EntryKind: ch.new.Kind, ModeAfter: op.ModePtr(ch.new.Mode), Derived: true,
 			})
 			creates = append(creates, len(ops)-1)
 
@@ -44,7 +44,7 @@ func Diff(wsID string, base, next *tree.Tree, ow ObjectWriter, opt Options) ([]o
 			ops = append(ops, op.Op{
 				ID: newOpID(wsID, ch.path, seq, op.KindDelete), WsID: wsID,
 				Seq: nextSeq(), Kind: op.KindDelete, Path: ch.path, BaseFile: ch.old.ID,
-				EntryKind: ch.old.Kind, Derived: true,
+				EntryKind: ch.old.Kind, ModeBefore: op.ModePtr(ch.old.Mode), Derived: true,
 			})
 			deletes = append(deletes, len(ops)-1)
 
@@ -62,7 +62,9 @@ func Diff(wsID string, base, next *tree.Tree, ow ObjectWriter, opt Options) ([]o
 				ID: newOpID(wsID, ch.path, seq, op.KindBlobPut), WsID: wsID,
 				Seq: nextSeq(), Kind: op.KindBlobPut, Path: ch.path,
 				BaseFile: ch.old.ID, NewFile: ch.new.ID,
-				EntryKind: codec.EntrySymlink, Derived: true,
+				EntryKind:  codec.EntrySymlink,
+				ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
+				Derived: true,
 			})
 
 		case ch.old.Kind != codec.EntryFile || ch.new.Kind != codec.EntryFile:
@@ -70,13 +72,13 @@ func Diff(wsID string, base, next *tree.Tree, ow ObjectWriter, opt Options) ([]o
 			ops = append(ops, op.Op{
 				ID: newOpID(wsID, ch.path, seq, op.KindDelete), WsID: wsID,
 				Seq: nextSeq(), Kind: op.KindDelete, Path: ch.path, BaseFile: ch.old.ID,
-				Derived: true,
+				ModeBefore: op.ModePtr(ch.old.Mode), Derived: true,
 			})
 			deletes = append(deletes, len(ops)-1)
 			ops = append(ops, op.Op{
 				ID: newOpID(wsID, ch.path, seq, op.KindCreate), WsID: wsID,
 				Seq: nextSeq(), Kind: op.KindCreate, Path: ch.path, NewFile: ch.new.ID,
-				EntryKind: ch.new.Kind, Derived: true,
+				EntryKind: ch.new.Kind, ModeAfter: op.ModePtr(ch.new.Mode), Derived: true,
 			})
 			creates = append(creates, len(ops)-1)
 
@@ -299,13 +301,27 @@ func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func
 		return op.Op{}, err
 	}
 
+	// 权限位（可执行位）变化而内容不变 -> attr（§5.1 的属性变更）。
+	// 早先这种情况会掉进下面的兜底 blob_put，且权限位本身没有承载，落地即丢。
+	if ch.old.ID == ch.new.ID {
+		return op.Op{
+			ID: newOpID(wsID, ch.path, nextSeq(), op.KindAttr), WsID: wsID,
+			Kind: op.KindAttr, Path: ch.path,
+			BaseFile: ch.old.ID, NewFile: ch.new.ID,
+			Attr:       &op.Attr{EOL: tree.DetectEOL(newData)},
+			ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
+			Derived: true,
+		}, nil
+	}
+
 	// 纯换行差异 → attr（§3.5、附录 L.2 #8）。
 	if tree.IsEOLOnlyChange(oldData, newData) {
 		return op.Op{
 			ID: newOpID(wsID, ch.path, nextSeq(), op.KindAttr), WsID: wsID,
 			Kind: op.KindAttr, Path: ch.path,
 			BaseFile: ch.old.ID, NewFile: ch.new.ID,
-			Attr:    &op.Attr{EOL: tree.DetectEOL(newData)},
+			Attr:       &op.Attr{EOL: tree.DetectEOL(newData)},
+			ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
 			Derived: true,
 		}, nil
 	}
@@ -316,7 +332,9 @@ func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func
 		return op.Op{
 			ID: newOpID(wsID, ch.path, nextSeq(), op.KindBlobPut), WsID: wsID,
 			Kind: op.KindBlobPut, Path: ch.path,
-			BaseFile: ch.old.ID, NewFile: ch.new.ID, Derived: true,
+			BaseFile: ch.old.ID, NewFile: ch.new.ID,
+			ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
+			Derived: true,
 		}, nil
 	}
 
@@ -333,7 +351,9 @@ func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func
 		return op.Op{
 			ID: newOpID(wsID, ch.path, nextSeq(), op.KindModify), WsID: wsID,
 			Kind: op.KindModify, Path: ch.path,
-			BaseFile: ch.old.ID, Hunks: out, Derived: true,
+			BaseFile: ch.old.ID, Hunks: out,
+			ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
+			Derived: true,
 		}, nil
 	}
 
@@ -341,7 +361,9 @@ func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func
 	return op.Op{
 		ID: newOpID(wsID, ch.path, nextSeq(), op.KindBlobPut), WsID: wsID,
 		Kind: op.KindBlobPut, Path: ch.path,
-		BaseFile: ch.old.ID, NewFile: ch.new.ID, Derived: true,
+		BaseFile: ch.old.ID, NewFile: ch.new.ID,
+		ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
+		Derived: true,
 	}, nil
 }
 
@@ -369,6 +391,9 @@ func mergeRenames(ops []op.Op, deletes, creates []int) []op.Op {
 		o.Kind = op.KindRename
 		o.DestPath = ops[ci].Path
 		o.NewFile = ops[ci].NewFile
+		// 权限位：改动前后分别来自被删条目与新建条目（通常相同）。
+		o.ModeBefore = ops[di].ModeBefore
+		o.ModeAfter = ops[ci].ModeAfter
 		if ops[ci].EntryKind != 0 {
 			o.EntryKind = ops[ci].EntryKind
 		}

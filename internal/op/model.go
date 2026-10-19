@@ -94,6 +94,32 @@ func (o *Op) EntryKindOf() uint8 {
 	return codec.EntryFile
 }
 
+// ModePtr 返回一个指向权限位的指针（便于构造 op）。
+func ModePtr(m uint64) *uint64 { return &m }
+
+// resolveMode 按 §6.5 的语义给出条目重放后的权限位：
+//
+//   - op 明确携带 ModeAfter -> 用它（越界一律按普通文件）；
+//   - 否则保留 cur（目标条目当前权限）；
+//   - create 没有 cur 可保留，退回 ModeNormal。
+func resolveMode(o *Op, cur uint64) uint64 {
+	if o.ModeAfter == nil {
+		return cur
+	}
+	if *o.ModeAfter > codec.ModeExecutable {
+		return codec.ModeNormal
+	}
+	return *o.ModeAfter
+}
+
+// createdMode 是 create / blob_put 新建条目时的权限位。
+func createdMode(o *Op) uint64 {
+	if o.ModeAfter == nil {
+		return codec.ModeNormal
+	}
+	return resolveMode(o, codec.ModeNormal)
+}
+
 // Attr 是 kind=attr 的载荷。
 type Attr struct {
 	EOL uint8
@@ -121,6 +147,18 @@ type Op struct {
 	// 必须持久化：否则「文件 ↔ 符号链接」的类型变化在重放后会退化成常规文件
 	// （内容变成链接目标文本）。0 视为 EntryFile（老数据的默认）。
 	EntryKind uint8
+
+	// ModeBefore / ModeAfter 是条目在前后的**权限位**（目前只有可执行位，
+	// codec.ModeNormal / codec.ModeExecutable）。
+	//
+	// 与 BaseFile / NewFile 对称：前者描述「改动前是什么权限」，后者描述
+	// 「改动后应是什么权限」。缺了它，任何经 op 重放产生的条目都会退化成
+	// 0644 —— 新建的可执行文件、以及改过内容/属性的可执行文件都会丢权限位。
+	//
+	// nil 表示该 op 不携带此信息（老数据，或该 kind 不适用），重放时保持
+	// 目标条目现有权限（create 则取 ModeNormal）。
+	ModeBefore *uint64
+	ModeAfter  *uint64
 
 	Hunks []Hunk
 

@@ -124,24 +124,55 @@ func (d *DB) Init(root string) error {
 				return err
 			}
 		}
-		// 兼容早前创建的仓库：补上新增的列（幂等）。
-		var hasCol int
-		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM pragma_table_info('workspace') WHERE name='materialized_ts'`).
-			Scan(&hasCol); err != nil {
+		if err := ensureColumnsTx(tx); err != nil {
 			return err
-		}
-		if hasCol == 0 {
-			if _, err := tx.Exec(
-				`ALTER TABLE workspace ADD COLUMN materialized_ts INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return err
-			}
 		}
 
 		// 记录格式版本，供 daemon 启动时校验（§2.2）。
 		_, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, FormatVer))
 		return err
 	})
+}
+
+// EnsureSchema 把已有仓库的库结构补到当前版本（幂等）。
+//
+// 与 Init 不同，它**不建表、不写 repo 行**，只补齐后来新增的列。repo.Open
+// 会调用它，因此老仓库打开一次就自动升级，不需要额外执行 p37 migrate。
+func (d *DB) EnsureSchema() error {
+	return d.withWrite(ensureColumnsTx)
+}
+
+// ensureColumnsTx 幂等地补齐后续版本新增的列。
+func ensureColumnsTx(tx *sql.Tx) error {
+	// workspace.materialized_ts（S15 重启重挂）。
+	var hasCol int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('workspace') WHERE name='materialized_ts'`).
+		Scan(&hasCol); err != nil {
+		return err
+	}
+	if hasCol == 0 {
+		if _, err := tx.Exec(
+			`ALTER TABLE workspace ADD COLUMN materialized_ts INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	// op.mode_before / mode_after（可执行位）。
+	for _, col := range []string{"mode_before", "mode_after"} {
+		var has int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('op') WHERE name = ?`, col).
+			Scan(&has); err != nil {
+			return err
+		}
+		if has == 0 {
+			if _, err := tx.Exec(fmt.Sprintf(
+				`ALTER TABLE op ADD COLUMN %s INTEGER CHECK (%s IN (0,1))`, col, col)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // UserVersion 返回库内的格式版本（PRAGMA user_version）。
@@ -251,6 +282,8 @@ var ddl = []string{
 	  eol         INTEGER CHECK (eol IN (0,1,2)),
 	  dest_path   TEXT,
 	  entry_kind  INTEGER NOT NULL DEFAULT 0 CHECK (entry_kind IN (0,2)),
+	  mode_before INTEGER CHECK (mode_before IN (0,1)),
+	  mode_after  INTEGER CHECK (mode_after  IN (0,1)),
 	  blob_before TEXT,
 	  blob_after  TEXT,
 	  captured_ts INTEGER NOT NULL,

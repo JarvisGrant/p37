@@ -158,6 +158,20 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 		return &LandResult{OpsCount: 0, CanLand: false}, ErrNotDirty
 	}
 
+	// 5b. 若对侧已把某文件重命名并落地，本侧改的还是旧路径 —— 跟随到新路径
+	// （§6.3 rename_vs_edit）。只在「单工作区折叠」时构建：多工作区栈里各
+	// 自的基准不同，路径映射会互相干扰。
+	var follow map[string]string
+	if len(fold) == 1 && !fold[0].BaseTree.IsZero() && fold[0].BaseTree != hv.Tree {
+		baseTree, err := r.Store.GetTree(fold[0].BaseTree)
+		if err != nil {
+			return nil, err
+		}
+		if follow, err = op.RenameFollows(r.Store, baseTree, headTree); err != nil {
+			return nil, err
+		}
+	}
+
 	// 6. 重放。
 	leaf := fold[len(fold)-1]
 	res, err := op.Replay(headTree, allOps, r.Store, op.Options{
@@ -165,6 +179,7 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 		MaxMatches: op.DefaultMaxMatches,
 		Resolver:   r.DB.Resolver(),
 		Candidates: true,
+		Follow:     follow,
 	})
 	if err != nil {
 		return nil, err
@@ -396,6 +411,7 @@ func invert(ops []op.Op) []op.Op {
 	out := make([]op.Op, 0, len(ops))
 	for i := len(ops) - 1; i >= 0; i-- {
 		o := ops[i]
+		o.ModeBefore, o.ModeAfter = o.ModeAfter, o.ModeBefore
 		switch o.Kind {
 		case op.KindCreate:
 			o.Kind = op.KindDelete

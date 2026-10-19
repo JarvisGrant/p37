@@ -194,6 +194,14 @@ func hashOrNil(id hash.ID) any {
 	return id.String()
 }
 
+// modeOrNil 把可选的权限位转成 SQL 值（nil 保持 NULL = 该 op 不携带此信息）。
+func modeOrNil(m *uint64) any {
+	if m == nil {
+		return nil
+	}
+	return int64(*m)
+}
+
 var _ capture.StatCache = (*StatCache)(nil)
 
 // ClearAll 清空全部 stat 缓存并返回删除行数。

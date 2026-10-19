@@ -365,17 +365,20 @@ func insertOpTx(tx *sql.Tx, o *op.Op) error {
 	}
 	_, err = tx.Exec(
 		`INSERT INTO op(id, ws_id, seq, kind, path, hunks_json, attr_json, eol,
-		                dest_path, entry_kind, blob_before, blob_after,
+		                dest_path, entry_kind, mode_before, mode_after,
+		                blob_before, blob_after,
 		                captured_ts, captured_by, derived)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   seq=excluded.seq, kind=excluded.kind, path=excluded.path,
 		   hunks_json=excluded.hunks_json, attr_json=excluded.attr_json,
 		   eol=excluded.eol, dest_path=excluded.dest_path,
 		   entry_kind=excluded.entry_kind,
+		   mode_before=excluded.mode_before, mode_after=excluded.mode_after,
 		   blob_before=excluded.blob_before, blob_after=excluded.blob_after`,
 		o.ID, o.WsID, o.Seq, string(o.Kind), o.Path, hunks, attrJSON, eol,
-		dest, int(o.EntryKindOf()), hashOrNil(o.BaseFile), hashOrNil(o.NewFile),
+		dest, int(o.EntryKindOf()), modeOrNil(o.ModeBefore), modeOrNil(o.ModeAfter),
+		hashOrNil(o.BaseFile), hashOrNil(o.NewFile),
 		o.CapturedTS, o.CapturedBy, boolToInt(o.Derived))
 	return err
 }
@@ -384,7 +387,8 @@ func insertOpTx(tx *sql.Tx, o *op.Op) error {
 func (d *DB) ListOps(wsID string) ([]op.Op, error) {
 	rows, err := d.sql.Query(
 		`SELECT id, ws_id, seq, kind, path, hunks_json, eol, dest_path, entry_kind,
-		        blob_before, blob_after, attr_json, captured_ts, captured_by, derived
+		        mode_before, mode_after, blob_before, blob_after, attr_json,
+		        captured_ts, captured_by, derived
 		   FROM op WHERE ws_id = ? ORDER BY seq`, wsID)
 	if err != nil {
 		return nil, err
@@ -400,19 +404,27 @@ func (d *DB) ListOps(wsID string) ([]op.Op, error) {
 			eol       sql.NullInt64
 			dest      sql.NullString
 			entryKind int
+			modeB     sql.NullInt64
+			modeA     sql.NullInt64
 			before    sql.NullString
 			after     sql.NullString
 			attrJSON  sql.NullString
 			derived   int
 		)
 		if err := rows.Scan(&o.ID, &o.WsID, &o.Seq, &kind, &o.Path, &hunks, &eol,
-			&dest, &entryKind, &before, &after, &attrJSON, &o.CapturedTS, &o.CapturedBy,
-			&derived); err != nil {
+			&dest, &entryKind, &modeB, &modeA, &before, &after, &attrJSON,
+			&o.CapturedTS, &o.CapturedBy, &derived); err != nil {
 			return nil, err
 		}
 		o.Kind = op.Kind(kind)
 		o.EntryKind = uint8(entryKind)
 		o.Derived = derived != 0
+		if modeB.Valid {
+			o.ModeBefore = op.ModePtr(uint64(modeB.Int64))
+		}
+		if modeA.Valid {
+			o.ModeAfter = op.ModePtr(uint64(modeA.Int64))
+		}
 		if o.Hunks, err = op.UnmarshalHunks(hunks); err != nil {
 			return nil, err
 		}

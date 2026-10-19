@@ -234,6 +234,13 @@ func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID
 		if v, err := m.db.GetVersion(h); err == nil {
 			return meta.ParentVersion, parent, v.Tree, h, nil
 		}
+	} else if isHexPrefix(parent) {
+		// 也接受版本 id 的唯一前缀（与 p37 log 的短 id 对齐）。
+		if h, err := m.db.FindVersionByPrefix(parent); err == nil {
+			if v, err := m.db.GetVersion(h); err == nil {
+				return meta.ParentVersion, h.String(), v.Tree, h, nil
+			}
+		}
 	}
 
 	// 再当作工作区。
@@ -734,8 +741,19 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 跟随对侧已落地的重命名（§6.3 rename_vs_edit）。
+	var follow map[string]string
+	if !w.BaseTree.IsZero() && w.BaseTree != newBase {
+		baseTree, err := m.store.GetTree(w.BaseTree)
+		if err != nil {
+			return nil, err
+		}
+		if follow, err = op.RenameFollows(m.store, baseTree, newTree); err != nil {
+			return nil, err
+		}
+	}
 	res, err := op.Replay(newTree, ops, m.store, op.Options{
-		WsID: wsID, MaxMatches: m.maxMatches(), Resolver: m.db.Resolver(),
+		WsID: wsID, MaxMatches: m.maxMatches(), Resolver: m.db.Resolver(), Follow: follow,
 	})
 	if err != nil {
 		return nil, err
@@ -1060,4 +1078,18 @@ func writeTreeRel(root, prefix string, t *tree.Tree, cs treeContentSource) error
 		}
 	}
 	return nil
+}
+
+// isHexPrefix 报告 s 是否为一段十六进制字符（用于版本 id 前缀）。
+func isHexPrefix(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }

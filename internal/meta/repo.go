@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/version"
@@ -138,6 +139,44 @@ func (d *DB) GetVersion(id hash.ID) (*version.Version, error) {
 
 // ErrNotExist 表示记录不存在。
 var ErrNotExist = errors.New("meta: 记录不存在")
+
+// ErrAmbiguous 表示前缀匹配到多个记录。
+var ErrAmbiguous = errors.New("meta: 前缀匹配到多个记录")
+
+// FindVersionByPrefix 按 id 十六进制前缀查找唯一版本。
+//
+// 供 CLI 使用：`p37 log` 打印的是短 id，用户理应用它回喂给 show/revert/blame。
+func (d *DB) FindVersionByPrefix(prefix string) (hash.ID, error) {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if prefix == "" {
+		return hash.ID{}, ErrNotExist
+	}
+	rows, err := d.sql.Query(
+		`SELECT id FROM version WHERE id LIKE ? || '%' ORDER BY ts DESC LIMIT 2`, prefix)
+	if err != nil {
+		return hash.ID{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return hash.ID{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return hash.ID{}, err
+	}
+	switch len(ids) {
+	case 0:
+		return hash.ID{}, ErrNotExist
+	case 1:
+		return hash.Parse(ids[0])
+	default:
+		return hash.ID{}, ErrAmbiguous
+	}
+}
 
 // CountVersions 返回版本总数。
 func (d *DB) CountVersions() (int64, error) {

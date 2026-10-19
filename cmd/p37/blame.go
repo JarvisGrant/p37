@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/repo"
 )
 
@@ -21,6 +20,7 @@ func cmdBlame(root string, args []string, out, errw io.Writer) int {
 	}
 	path := args[0]
 	opt := repo.BlameOptions{Granularity: "line"}
+	versionArg := ""
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--hunk":
@@ -31,12 +31,7 @@ func cmdBlame(root string, args []string, out, errw io.Writer) int {
 				return 2
 			}
 			i++
-			v, err := parseVersionArg(args[i])
-			if err != nil {
-				fmt.Fprintf(errw, "版本 id 非法: %v\n", err)
-				return 2
-			}
-			opt.VersionID = v
+			versionArg = args[i]
 		case "--range":
 			if i+1 >= len(args) {
 				fmt.Fprintln(errw, "--range 需要 a-b")
@@ -61,6 +56,15 @@ func cmdBlame(root string, args []string, out, errw io.Writer) int {
 		return 1
 	}
 	defer func() { _ = r.Close() }()
+
+	if versionArg != "" {
+		v, err := resolveVersionArg(r, versionArg)
+		if err != nil {
+			fmt.Fprintf(errw, "版本 id 非法: %v\n", err)
+			return 2
+		}
+		opt.VersionID = v
+	}
 
 	recs, err := r.Blame(path, opt)
 	if err != nil {
@@ -91,13 +95,6 @@ func cmdBlame(root string, args []string, out, errw io.Writer) int {
 			rec.Range, rec.VersionID[:16], who, task, tag)
 	}
 	return 0
-}
-
-func parseVersionArg(s string) (hash.ID, error) {
-	if s == "" || s == "head" {
-		return hash.ID{}, nil
-	}
-	return hash.Parse(s)
 }
 
 func parseRange(s string) (int, int, error) {

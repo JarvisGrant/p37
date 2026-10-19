@@ -49,6 +49,10 @@ type Options struct {
 	Resolver Resolver
 	// Candidates 为真时合成候选解（§6.3）。
 	Candidates bool
+	// Follow 把「工作区采集时的旧路径」映射到「目标基准里的新路径」，
+	// 用于跟随对侧已经落地的重命名（§6.3 rename_vs_edit）。
+	// nil 表示不做跟随。
+	Follow map[string]string
 }
 
 // ReplayResult 是一次重放的结果。
@@ -152,7 +156,7 @@ func (c *replayCtx) applyCreate(o *Op) error {
 		return fmt.Errorf("op: create 缺少 NewFile (op=%s)", o.ID)
 	}
 	c.entries[o.Path] = tree.Entry{
-		Name: baseName(o.Path), Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: o.NewFile,
+		Name: baseName(o.Path), Mode: createdMode(o), Kind: o.EntryKindOf(), ID: o.NewFile,
 	}
 	return nil
 }
@@ -170,47 +174,59 @@ func (c *replayCtx) applyDelete(o *Op) error {
 }
 
 func (c *replayCtx) applyAttr(o *Op) error {
-	e, ok := c.entries[o.Path]
+	path := c.target(o.Path)
+	e, ok := c.entries[path]
 	if !ok {
-		return c.conflict(o, ConflictMissingBase, nil, insertHunks(o))
+		return c.conflictAt(path, o, ConflictMissingBase, nil, insertHunks(o))
 	}
 	if e.ID != o.BaseFile {
 		// 内容已被第三方改动。若只是 EOL 属性变化，候选为取 upper（§6.3）。
-		return c.conflict(o, ConflictAttr, fileHunks(e, c.cs), insertHunks(o))
+		return c.conflictAt(path, o, ConflictAttr, fileHunks(e, c.cs), insertHunks(o))
 	}
 	if o.NewFile.IsZero() {
 		return fmt.Errorf("op: attr 缺少 NewFile (op=%s)", o.ID)
 	}
 	e.ID = o.NewFile
-	c.entries[o.Path] = e
+	if o.ModeAfter != nil {
+		e.Mode = resolveMode(o, e.Mode)
+	}
+	c.entries[path] = e
 	return nil
 }
 
 func (c *replayCtx) applyBlobPut(o *Op) error {
-	e, ok := c.entries[o.Path]
+	path := c.target(o.Path)
+	e, ok := c.entries[path]
 
 	// 文件当前不存在。
 	if !ok {
 		if !o.BaseFile.IsZero() {
-			return c.conflict(o, ConflictMissingBase, nil, insertHunks(o))
+			return c.conflictAt(path, o, ConflictMissingBase, nil, insertHunks(o))
 		}
-		c.entries[o.Path] = tree.Entry{
-			Name: o.Path, Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: o.NewFile,
+		c.entries[path] = tree.Entry{
+			Name: baseName(path), Mode: createdMode(o), Kind: o.EntryKindOf(), ID: o.NewFile,
 		}
 		return nil
 	}
 
 	switch e.ID {
 	case o.NewFile:
+		if o.ModeAfter != nil {
+			e.Mode = resolveMode(o, e.Mode)
+			c.entries[path] = e
+		}
 		return nil // 已经是我们想要的内容：幂等
 	case o.BaseFile:
 		e.ID = o.NewFile
-		c.entries[o.Path] = e
+		if o.ModeAfter != nil {
+			e.Mode = resolveMode(o, e.Mode)
+		}
+		c.entries[path] = e
 		return nil
 	}
 
 	// 目标已被第三方改动：二进制/大文件永不自动合并（§6.5）。
-	return c.conflict(o, ConflictBinary, fileHunks(e, c.cs), insertHunks(o))
+	return c.conflictAt(path, o, ConflictBinary, fileHunks(e, c.cs), insertHunks(o))
 }
 
 func (c *replayCtx) applyRename(o *Op) error {
@@ -234,6 +250,9 @@ func (c *replayCtx) applyRename(o *Op) error {
 		if o.EntryKind != 0 {
 			ne.Kind = o.EntryKindOf()
 		}
+		if o.ModeAfter != nil {
+			ne.Mode = resolveMode(o, e.Mode)
+		}
 		c.entries[o.DestPath] = ne
 		delete(c.entries, o.Path)
 		if len(o.Hunks) == 0 {
@@ -247,6 +266,9 @@ func (c *replayCtx) applyRename(o *Op) error {
 	if o.EntryKind != 0 {
 		ne.Kind = o.EntryKindOf()
 	}
+	if o.ModeAfter != nil {
+		ne.Mode = resolveMode(o, e.Mode)
+	}
 	c.entries[o.DestPath] = ne
 	delete(c.entries, o.Path)
 	// 本侧对内容也有改动时同样放到新路径上。
@@ -256,7 +278,28 @@ func (c *replayCtx) applyRename(o *Op) error {
 	return nil
 }
 
-func (c *replayCtx) applyModify(o *Op) error { return c.applyHunksTo(o.Path, o) }
+func (c *replayCtx) applyModify(o *Op) error { return c.applyHunksTo(c.target(o.Path), o) }
+
+// target 在路径已被对侧重命名时给出新路径。
+//
+// 仅当旧路径在目标里**不存在**、且跟随目标存在时才改道；否则保持原样，
+// 以免误伤「对侧只是新增了同名路径」之类的正常情况。
+func (c *replayCtx) target(path string) string {
+	if _, ok := c.entries[path]; ok {
+		return path
+	}
+	if c.opt.Follow == nil {
+		return path
+	}
+	np, ok := c.opt.Follow[path]
+	if !ok || np == "" {
+		return path
+	}
+	if _, ok := c.entries[np]; ok {
+		return np
+	}
+	return path
+}
 
 // applyHunksTo 把 op 的 hunks 放到 path 上（rename 会改道到新路径）。
 func (c *replayCtx) applyHunksTo(path string, o *Op) error {
@@ -267,6 +310,7 @@ func (c *replayCtx) applyHunksTo(path string, o *Op) error {
 	if !ok {
 		return c.conflictAt(path, o, ConflictMissingBase, nil, insertHunks(o))
 	}
+	mode := c.entries[path].Mode
 
 	// 逐 hunk 放置，**原地推进**目标。
 	placed := cur
@@ -325,7 +369,7 @@ func (c *replayCtx) applyHunksTo(path string, o *Op) error {
 		return err
 	}
 	c.entries[path] = tree.Entry{
-		Name: baseName(path), Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: id,
+		Name: baseName(path), Mode: resolveMode(o, mode), Kind: codec.EntryFile, ID: id,
 	}
 	return nil
 }

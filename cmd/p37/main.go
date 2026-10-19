@@ -16,6 +16,7 @@ import (
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hash"
+	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/tree"
@@ -556,6 +557,13 @@ func cmdIgnoreCheck(root, p string, out, errw io.Writer) int {
 	if err != nil {
 		return fail(errw, err)
 	}
+	if lines, err := tree.LoadIgnoreFile(root); err != nil {
+		return fail(errw, err)
+	} else if len(lines) > 0 {
+		if ig, err = tree.NewIgnore(true, append(append([]string{}, cfg.Repo.IgnoreExtra...), lines...)); err != nil {
+			return fail(errw, err)
+		}
+	}
 	norm, err := tree.NormalizePath(p)
 	if err != nil {
 		return fail(errw, err)
@@ -769,15 +777,11 @@ func cmdShow(root string, args []string, out, errw io.Writer) int {
 		return fail(errw, err)
 	}
 	defer func() { _ = r.Close() }()
-	var vid = strings.TrimSpace(id)
-	if vid == "" || strings.EqualFold(vid, "head") {
-		head, ok, err := r.Head()
-		if err != nil || !ok {
-			return fail(errw, errors.New("无 head"))
-		}
-		vid = head.String()
+	vid, err := resolveVersionArg(r, id)
+	if err != nil {
+		return fail(errw, err)
 	}
-	d, err := r.VersionShow(mustHash(vid))
+	d, err := r.VersionShow(vid)
 	if err != nil {
 		return fail(errw, err)
 	}
@@ -803,13 +807,9 @@ func cmdRevert(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 
-	vid := mustVersionArg(args[0])
-	if vid.IsZero() {
-		head, ok, err := r.Head()
-		if err != nil || !ok {
-			return fail(errw, errors.New("无 head"))
-		}
-		vid = head
+	vid, err := resolveVersionArg(r, args[0])
+	if err != nil {
+		return fail(errw, err)
 	}
 	rv, err := r.Revert(vid)
 	if err != nil {
@@ -828,6 +828,51 @@ func mustVersionArg(s string) hash.ID {
 		return hash.ID{}
 	}
 	return mustHash(t)
+}
+
+// resolveVersionArg 解析版本参数，支持 head / 空 / 完整 id / **唯一前缀**。
+//
+// `p37 log` 打印的是 16 位短 id，用户理应用它回喂给 show / revert / blame。
+func resolveVersionArg(r *repo.Repo, s string) (hash.ID, error) {
+	t := strings.TrimSpace(s)
+	if t == "" || strings.EqualFold(t, "head") {
+		head, ok, err := r.Head()
+		if err != nil {
+			return hash.ID{}, err
+		}
+		if !ok {
+			return hash.ID{}, errors.New("无 head")
+		}
+		return head, nil
+	}
+	if id, err := hash.Parse(t); err == nil {
+		return id, nil
+	}
+	if !isHexPrefix(t) {
+		return hash.ID{}, fmt.Errorf("非法版本 id %q", s)
+	}
+	id, err := r.DB.FindVersionByPrefix(t)
+	switch {
+	case errors.Is(err, meta.ErrNotExist):
+		return hash.ID{}, fmt.Errorf("找不到版本（前缀 %q）", s)
+	case errors.Is(err, meta.ErrAmbiguous):
+		return hash.ID{}, fmt.Errorf("前缀 %q 匹配到多个版本，请给更长前缀", s)
+	}
+	return id, err
+}
+
+// isHexPrefix 报告 s 是否为一段十六进制字符（不要求偶数长度）。
+func isHexPrefix(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func mustHash(s string) hash.ID {

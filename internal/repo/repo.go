@@ -129,6 +129,12 @@ func Open(root string, opt Options) (*Repo, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// 兼容老仓库：补齐后续版本新增的列（幂等）。放在 CheckFormat 之后，
+	// 避免对未初始化/未来版本的库做任何写入。
+	if err := db.EnsureSchema(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	bs, err := cas.NewLocalFS(p37)
 	if err != nil {
@@ -148,7 +154,16 @@ func Open(root string, opt Options) (*Repo, error) {
 
 	ig := opt.Ignore
 	if ig == nil {
-		ig, err = tree.NewIgnore(true, opt.ExtraIgnore)
+		extra := opt.ExtraIgnore
+		// §3.4：仓库根的 .p37ignore 与配置 ignore_extra 合并（文件在后，
+		// 后匹配的规则覆盖先匹配的）。文件缺失或无规则都不报错。
+		if lines, err := tree.LoadIgnoreFile(root); err != nil {
+			_ = db.Close()
+			return nil, err
+		} else if len(lines) > 0 {
+			extra = append(append([]string{}, extra...), lines...)
+		}
+		ig, err = tree.NewIgnore(true, extra)
 		if err != nil {
 			_ = db.Close()
 			return nil, err

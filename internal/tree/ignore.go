@@ -3,6 +3,8 @@ package tree
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -51,6 +53,29 @@ var DefaultIgnorePatterns = []string{
 	"build/",
 	".idea/",
 	".DS_Store",
+}
+
+// IgnoreFileName 是仓库根的忽略文件名（§3.4）。
+const IgnoreFileName = ".p37ignore"
+
+// LoadIgnoreFile 读取仓库根下的 .p37ignore，返回其中有效的行。
+//
+// 文件不存在时返回 (nil, nil)：忽略文件是可选的。语法错误留给 ParseIgnore
+// 报出，以便调用方给出带行号的错误。
+func LoadIgnoreFile(root string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join(root, IgnoreFileName))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	raw := strings.Split(string(b), "\n")
+	lines := make([]string, 0, len(raw))
+	for _, l := range raw {
+		lines = append(lines, strings.TrimRight(l, "\r"))
+	}
+	return lines, nil
 }
 
 // NewIgnore 编译规则集合。builtin 为真时在最前面加入内置集。
