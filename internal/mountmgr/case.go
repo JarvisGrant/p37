@@ -6,8 +6,11 @@ import (
 	"sync"
 )
 
-// baseRefs / wsBaseRef 记录工作区引用的基底，供 Close 时释放引用。
+// baseRefs 记录每个工作区当前引用的**基底树 id**，供 Close / Relower 释放
+// `ensureBase` 里累加的引用计数。
 //
+// 注意存的是 `hash.ID` 而不是目录路径：releaseBase 要按树 id 递减 `inUse`，
+// 存字符串会让类型断言炸掉（这个 bug 真机上表现为 **land 时 daemon panic**）。
 // 放在无构建标签的文件里，使两个平台实现都能使用。
 var baseRefs sync.Map // wsID -> hash.ID
 

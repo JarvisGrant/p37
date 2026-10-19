@@ -398,14 +398,21 @@ func (m *Manager) ensureBase(treeID hash.ID, src ContentSource) (string, error) 
 // Relower。早先这里读的是另一个**从未被写入**的 map，于是 inUse 只增不减，
 // `Evict` 会认为所有基底都在被引用，基底缓存永远腾不出空间。
 func (m *Manager) releaseBase(wsID string) {
-	if v, ok := baseRefs.LoadAndDelete(wsID); ok {
-		id := v.(hash.ID)
-		m.mu.Lock()
-		if m.inUse[id] > 0 {
-			m.inUse[id]--
-		}
-		m.mu.Unlock()
+	v, ok := baseRefs.LoadAndDelete(wsID)
+	if !ok {
+		return
 	}
+	id, ok := v.(hash.ID)
+	if !ok {
+		// 防御：类型不符时宁可漏记一次引用计数，也绝不 panic ——
+		// 这里的 panic 会顺着 land 一路把整个 daemon 带走。
+		return
+	}
+	m.mu.Lock()
+	if m.inUse[id] > 0 {
+		m.inUse[id]--
+	}
+	m.mu.Unlock()
 }
 
 // Evict 在超过缓存上限时淘汰最久未用的基底。被引用的基底不淘汰。

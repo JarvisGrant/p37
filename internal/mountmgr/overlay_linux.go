@@ -20,11 +20,13 @@ func (m *Manager) mountOverlay(wsID string, baseTree hash.ID, src ContentSource)
 	if err != nil {
 		return err
 	}
-	return m.mountWithLower(wsID, base)
+	return m.mountWithLower(wsID, baseTree, base)
 }
 
 // mountWithLower 用一个已物化的基底目录挂载工作区。
-func (m *Manager) mountWithLower(wsID, base string) error {
+//
+// baseTree 是基底树的 id（记进 baseRefs 供释放引用计数用），base 是它的目录。
+func (m *Manager) mountWithLower(wsID string, baseTree hash.ID, base string) error {
 	upper := m.upperDir(wsID)
 	work := m.workDir(wsID)
 	dir := m.WorkspaceDir(wsID)
@@ -39,7 +41,7 @@ func (m *Manager) mountWithLower(wsID, base string) error {
 	if err := syscall.Mount("overlay", dir, "overlay", 0, opts); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	baseRefs.Store(wsID, base)
+	baseRefs.Store(wsID, baseTree)
 	return nil
 }
 
@@ -67,7 +69,7 @@ func (m *Manager) Remount(wsID string, baseTree hash.ID, src ContentSource) erro
 	if err != nil {
 		return err
 	}
-	return m.mountWithLower(wsID, base)
+	return m.mountWithLower(wsID, baseTree, base)
 }
 
 // Relower 把工作区的 lowerdir 换成 newBase，**upper 层原样保留**（§4.9.2）。
@@ -104,7 +106,7 @@ func (m *Manager) Relower(wsID string, newBase hash.ID, src ContentSource) error
 	}
 	// 释放旧基底的引用，改记新的。
 	m.releaseBase(wsID)
-	baseRefs.Store(wsID, base)
+	baseRefs.Store(wsID, newBase)
 	return nil
 }
 
