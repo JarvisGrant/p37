@@ -3,6 +3,7 @@ package op
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
@@ -146,7 +147,7 @@ func (c *replayCtx) applyCreate(o *Op) error {
 		return fmt.Errorf("op: create 缺少 NewFile (op=%s)", o.ID)
 	}
 	c.entries[o.Path] = tree.Entry{
-		Name: o.Path, Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: o.NewFile,
+		Name: baseName(o.Path), Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: o.NewFile,
 	}
 	return nil
 }
@@ -292,7 +293,7 @@ func (c *replayCtx) applyModify(o *Op) error {
 		return err
 	}
 	c.entries[o.Path] = tree.Entry{
-		Name: o.Path, Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: id,
+		Name: baseName(o.Path), Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: id,
 	}
 	return nil
 }
@@ -310,6 +311,17 @@ func (c *replayCtx) lowerHunk(h *Hunk, placed [][]byte) Hunk {
 		Remove: sliceOf(placed, start, end),
 		After:  sliceOf(placed, end, min(len(placed), end+len(h.After))),
 	}
+}
+
+// baseName 返回路径的最后一段。
+//
+// 注意：条目存在扁平命名空间里（key 是完整路径），但 tree.Entry.Name 必须只是
+// 单段名 —— unflatten 会自行拆分路径，这里保持一致以免日后被误用。
+func baseName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 func clamp(v, lo, hi int) int {

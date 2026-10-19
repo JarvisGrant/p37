@@ -64,6 +64,11 @@ func NewStore(bs BlobStore, idx ObjectIndex) *Store {
 // BlobStore 返回底层后端。
 func (s *Store) BlobStore() BlobStore { return s.bs }
 
+// Flush 确保此前写入的全部对象已持久化。
+//
+// 调用方**必须**在推进主干 head 之前调用它（§7.3）。
+func (s *Store) Flush() error { return s.bs.Flush() }
+
 // keyFor 返回对象的 BlobStore key。
 func keyFor(id hash.ID) string { return "objects/" + id.String() }
 

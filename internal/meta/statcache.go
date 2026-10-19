@@ -62,6 +62,38 @@ func (s *StatCache) Put(wsID string, e capture.StatEntry) {
 	})
 }
 
+// PutMany 实现 capture.StatCache：**一个事务**写完一批。
+//
+// 逐条 Put 会产生 O(文件数) 个事务，是 ws_open / ws_sync 慢的主因。
+func (s *StatCache) PutMany(wsID string, es []capture.StatEntry) error {
+	if len(es) == 0 {
+		return nil
+	}
+	return s.db.withWrite(func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(
+			`INSERT INTO stat_cache(ws_id, path, kind, mtime_ns, size, inode, mode,
+			                        content_hash, object_id, entries_sig)
+			 VALUES(?,?,?,?,?,?,?,?,?,?)
+			 ON CONFLICT(ws_id, path) DO UPDATE SET
+			   kind=excluded.kind, mtime_ns=excluded.mtime_ns, size=excluded.size,
+			   inode=excluded.inode, mode=excluded.mode,
+			   content_hash=excluded.content_hash, object_id=excluded.object_id,
+			   entries_sig=excluded.entries_sig`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, e := range es {
+			if _, err := stmt.Exec(wsID, e.Path, int(e.Kind), e.MtimeNS, e.Size,
+				e.Inode, int(e.Mode), hashOrNil(e.ContentHash),
+				hashOrNil(e.ObjectID), hashOrNil(e.EntriesSig)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // DeleteUnder 实现 capture.StatCache。
 func (s *StatCache) DeleteUnder(wsID, prefix string) {
 	_ = s.db.withWrite(func(tx *sql.Tx) error {

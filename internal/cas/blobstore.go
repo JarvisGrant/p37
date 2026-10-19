@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // ErrNotExist 表示 key 不存在。
@@ -45,12 +47,29 @@ type BlobStore interface {
 	PutIfMatch(key, etag string, data []byte) (string, error)
 	// Stat 返回元信息。
 	Stat(key string) (Stat, error)
+	// Flush 确保此前写入的全部 key 已持久化。
+	//
+	// 调用方**必须**在推进主干 head 之前调用它（§7.3）。对真正的远端后端
+	// （S3 等）它可以是 no-op。
+	Flush() error
 }
 
 // LocalFS 是把 BlobStore 实现为本地目录树的后端（§8.2）。
+//
+// 持久化策略：`PutIfAbsent` **不做 fsync**，只把文件与目录记入待同步集合；
+// 调用方在「提交点之前」（推进 head 之前）调用 `Flush` 统一落盘。
+//
+// 这样做的正确性依据是 §7.3：对象在 head 推进之前不必持久 —— head 未推进时
+// 崩溃只会留下孤儿对象（无害，GC 回收）。而 1000 个文件会产生约 2000 个对象，
+// 每个对象 2 次 fsync，串行执行就是 import 慢的根因。
 type LocalFS struct {
 	root string
 	tmp  string
+
+	syncMu   sync.Mutex
+	pendingF map[string]struct{}
+	pendingD map[string]struct{}
+	noSync   bool
 }
 
 // NewLocalFS 创建/打开本地后端。root 通常为 <仓库根>/.p37。
@@ -59,14 +78,143 @@ func NewLocalFS(root string) (*LocalFS, error) {
 		return nil, errors.New("cas: 本地后端 root 不能为空")
 	}
 	tmp := filepath.Join(root, "tmp")
-	if err := os.MkdirAll(tmp, 0o755); err != nil {
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, err
 	}
-	return &LocalFS{root: root, tmp: tmp}, nil
+	return &LocalFS{
+		root:     root,
+		tmp:      tmp,
+		pendingF: make(map[string]struct{}),
+		pendingD: make(map[string]struct{}),
+	}, nil
+}
+
+// DisableSyncForTest 关闭 fsync，仅用于基准测试对照。
+func (l *LocalFS) DisableSyncForTest() {
+	l.syncMu.Lock()
+	l.noSync = true
+	l.syncMu.Unlock()
 }
 
 // Root 返回后端根目录。
 func (l *LocalFS) Root() string { return l.root }
+
+// Flush 把此前写入的全部对象与目录落盘。
+//
+// 调用方必须在推进 head 之前调用它（§7.3）。
+func (l *LocalFS) Flush() error {
+	l.syncMu.Lock()
+	if l.noSync {
+		l.pendingF = make(map[string]struct{})
+		l.pendingD = make(map[string]struct{})
+		l.syncMu.Unlock()
+		return nil
+	}
+	files := make([]string, 0, len(l.pendingF))
+	for p := range l.pendingF {
+		files = append(files, p)
+	}
+	dirs := make([]string, 0, len(l.pendingD))
+	for p := range l.pendingD {
+		dirs = append(dirs, p)
+	}
+	l.pendingF = make(map[string]struct{})
+	l.pendingD = make(map[string]struct{})
+	l.syncMu.Unlock()
+
+	// fsync 是阻塞系统调用，并行做能显著摊薄等待。
+	if err := parallelSync(files); err != nil {
+		return err
+	}
+	return parallelSyncDirs(dirs)
+}
+
+// note 记下待同步的文件与目录。
+func (l *LocalFS) note(file string) {
+	l.syncMu.Lock()
+	defer l.syncMu.Unlock()
+	if l.noSync {
+		return
+	}
+	l.pendingF[file] = struct{}{}
+	l.pendingD[filepath.Dir(file)] = struct{}{}
+}
+
+// parallelSync 并行 fsync 一批文件。
+func parallelSync(paths []string) error {
+	return runParallel(paths, func(p string) error {
+		f, err := os.Open(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		return f.Sync()
+	})
+}
+
+// parallelSyncDirs 并行 fsync 一批目录。
+func parallelSyncDirs(paths []string) error {
+	return runParallel(paths, func(p string) error {
+		d, err := os.Open(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		defer func() { _ = d.Close() }()
+		_ = d.Sync() // 部分文件系统（如 macOS）对目录 fsync 返回 EINVAL
+		return nil
+	})
+}
+
+// runParallel 用有界并发执行 fn；返回首个错误。
+func runParallel(paths []string, fn func(string) error) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 16 {
+		workers = 16
+	}
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	ch := make(chan string)
+	var wg sync.WaitGroup
+	var (
+		mu  sync.Mutex
+		err error
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range ch {
+				if e := fn(p); e != nil {
+					mu.Lock()
+					if err == nil {
+						err = e
+					}
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, p := range paths {
+		ch <- p
+	}
+	close(ch)
+	wg.Wait()
+	return err
+}
 
 // pathForKey 把 BlobStore key 映射为本地路径。
 //
@@ -187,10 +335,6 @@ func (l *LocalFS) PutIfAbsent(key string, r io.Reader, size int64) error {
 		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -201,7 +345,9 @@ func (l *LocalFS) PutIfAbsent(key string, r io.Reader, size int64) error {
 		}
 		return err
 	}
-	return syncDir(filepath.Dir(final))
+	// 不在此处 fsync：统一到 Flush（调用方在推进 head 之前调用）。
+	l.note(final)
+	return nil
 }
 
 // ListPrefix 实现 BlobStore。仅返回文件（不返回目录）。
@@ -330,7 +476,27 @@ func (l *LocalFS) PutIfMatch(key, etag string, data []byte) (string, error) {
 	if err := os.Rename(tmpName, p); err != nil {
 		return "", err
 	}
-	return newETag, syncDir(filepath.Dir(p))
+	// refs 是提交点本身，这里必须同步落盘。
+	if !l.isNoSync() {
+		if f, err := os.Open(p); err == nil {
+			if err := f.Sync(); err != nil {
+				_ = f.Close()
+				return "", err
+			}
+			_ = f.Close()
+		}
+		if err := syncDir(filepath.Dir(p)); err != nil {
+			return "", err
+		}
+	}
+	return newETag, nil
+}
+
+// isNoSync 报告是否处于测试用的免同步模式。
+func (l *LocalFS) isNoSync() bool {
+	l.syncMu.Lock()
+	defer l.syncMu.Unlock()
+	return l.noSync
 }
 
 // fileETag 计算小文件的内容哈希。

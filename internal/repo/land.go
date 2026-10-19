@@ -149,8 +149,10 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(allOps) == 0 && !commit {
-		return &LandResult{OpsCount: 0, CanLand: false, Files: nil}, nil
+	// 无改动时不允许推进主干 —— 否则会静默产出一个「空版本」，
+	// 而它的树会覆盖整个仓库（见 deep_test.go 的回归）。
+	if len(allOps) == 0 {
+		return &LandResult{OpsCount: 0, CanLand: false}, ErrNotDirty
 	}
 
 	// 6. 重放。

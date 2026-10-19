@@ -142,14 +142,18 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 	w.Materialize = string(actual)
 	w.Mounted = actual == mountmgr.ModeOverlay
 
-	// 物化后回填 stat_cache（§4.6、§4.7），否则首轮采集会把整树当成全变更。
-	if err := m.fillStatCache(wsID, baseTree); err != nil {
+	// 必须先插入工作区行，再回填 stat_cache —— stat_cache.ws_id 有外键约束，
+	// 顺序颠倒会导致写入被拒（早前实现里该错误被静默吞掉，缓存其实没落库）。
+	if err := m.db.InsertWorkspace(w); err != nil {
 		_ = m.mm.Close(wsID, false, w.Mounted)
 		return nil, err
 	}
-
-	if err := m.db.InsertWorkspace(w); err != nil {
+	// 记录物化完成时刻。采集靠它做惰性判定（见 capture.Options），
+	// 因此 ws_open 完全不必走文件系统 —— 这正是「与文件数无关」的实现方式。
+	w.MaterializedTS = time.Now().UnixNano()
+	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, now, w.MaterializedTS); err != nil {
 		_ = m.mm.Close(wsID, false, w.Mounted)
+		_ = m.db.DeleteWorkspace(wsID)
 		return nil, err
 	}
 	for _, p := range req.Leases {
@@ -267,13 +271,40 @@ func (m *Manager) List() ([]meta.Workspace, error) { return m.db.ListWorkspaces(
 // Dir 返回工作区目录。
 func (m *Manager) Dir(wsID string) string { return m.mm.WorkspaceDir(wsID) }
 
-// fillStatCache 在物化后回填 stat 缓存（§4.6、§4.7）。
-func (m *Manager) fillStatCache(wsID string, baseTree hash.ID) error {
-	stat := m.db.StatCache()
-	dir := m.mm.WorkspaceDir(wsID)
-	_, err := capture.Build(wsID, dir, m.opt.Ignore, m.store, stat,
-		capture.InodeReliable(m.opt.InodeReliable), m.opt.Capture)
-	return err
+// flattenTreeIDs 返回基准树的扁平视图（仓库相对路径 -> 对象 id，不含目录）。
+//
+// 只读 Tree 对象，不读文件内容，因此成本与目录数相关而与文件大小无关。
+func (m *Manager) flattenTreeIDs(root hash.ID) (map[string]hash.ID, error) {
+	out := make(map[string]hash.ID, 1024)
+	var walk func(dir string, t *tree.Tree) error
+	walk = func(dir string, t *tree.Tree) error {
+		for _, e := range t.Entries {
+			rel := e.Name
+			if dir != "" {
+				rel = dir + "/" + e.Name
+			}
+			if e.Kind == codec.EntryTree {
+				sub, err := m.store.GetTree(e.ID)
+				if err != nil {
+					return err
+				}
+				if err := walk(rel, sub); err != nil {
+					return err
+				}
+				continue
+			}
+			out[rel] = e.ID
+		}
+		return nil
+	}
+	t, err := m.store.GetTree(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := walk("", t); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Sync 重新采集：把 op-log 重建为 diff(base_tree, 当前磁盘)（§4.1、§5.4）。
@@ -295,9 +326,21 @@ func (m *Manager) Sync(wsID string) error {
 	}
 
 	// 1. 构建当前树。
+	//
+	// 传入基准树的扁平视图与物化时刻：文件若不比物化时刻更新，就是基准树里
+	// 那一份，可直接复用其对象 id（不读、不哈希）。
+	copt := m.opt.Capture
+	copt.MaterializedNS = w.MaterializedTS
+	if copt.MaterializedNS > 0 {
+		ids, err := m.flattenTreeIDs(w.BaseTree)
+		if err != nil {
+			return err
+		}
+		copt.BaseEntries = ids
+	}
 	stat := m.db.StatCache()
 	nowTree, err := capture.Build(wsID, m.mm.WorkspaceDir(wsID), m.opt.Ignore, m.store, stat,
-		capture.InodeReliable(m.opt.InodeReliable), m.opt.Capture)
+		capture.InodeReliable(m.opt.InodeReliable), copt)
 	if err != nil {
 		return err
 	}
@@ -580,14 +623,16 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 	if err := m.overwriteWorkspace(wsID, res.Tree); err != nil {
 		return nil, err
 	}
+	// 覆写完成 -> 记录新的物化时刻：之后的采集可以把「不比此刻更新」的文件
+	// 视作未变，从而不必读盘哈希。
+	matTS := time.Now().UnixNano()
 	if err := m.db.UpdateWorkspaceBase(wsID, newBase, w.BaseVersion, m.now()); err != nil {
 		return nil, err
 	}
 	if err := m.db.UpdateWorkspaceParent(wsID, newKind, newID, m.now()); err != nil {
 		return nil, err
 	}
-	// 覆写后 stat 缓存与磁盘已一致，重新回填一次。
-	if err := m.fillStatCache(wsID, res.Tree.ID()); err != nil {
+	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, m.now(), matTS); err != nil {
 		return nil, err
 	}
 	if err := m.Sync(wsID); err != nil {

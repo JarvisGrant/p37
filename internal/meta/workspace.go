@@ -44,6 +44,11 @@ type Workspace struct {
 	Mounted     bool
 	CreatedTS   int64
 	UpdatedTS   int64
+	// MaterializedTS 是工作区最近一次物化（挂载/复制）完成时刻，Unix 纳秒。
+	//
+	// 采集用它做**惰性判定**：文件不比这个时刻更新，就说明它仍是基准树里
+	// 那一份，可以直接复用对象 id，不必读盘哈希（见 capture.Options）。
+	MaterializedTS int64
 }
 
 // InsertWorkspace 插入一行。
@@ -52,11 +57,11 @@ func (d *DB) InsertWorkspace(w Workspace) error {
 		_, err := tx.Exec(
 			`INSERT INTO workspace(id, name, parent_kind, parent_id, base_tree,
 			                       base_version, task_desc, state, materialize, mounted,
-			                       created_ts, updated_ts)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			                       created_ts, updated_ts, materialized_ts)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			w.ID, w.Name, w.ParentKind, w.ParentID, w.BaseTree.String(),
 			w.BaseVersion.String(), w.TaskDesc, w.State, w.Materialize, boolToInt(w.Mounted),
-			w.CreatedTS, w.UpdatedTS)
+			w.CreatedTS, w.UpdatedTS, w.MaterializedTS)
 		return err
 	})
 }
@@ -71,10 +76,12 @@ func (d *DB) GetWorkspace(id string) (*Workspace, error) {
 	)
 	err := d.sql.QueryRow(
 		`SELECT id, name, parent_kind, parent_id, base_tree, base_version,
-		        task_desc, state, materialize, mounted, created_ts, updated_ts
+		        task_desc, state, materialize, mounted, created_ts, updated_ts,
+		        materialized_ts
 		   FROM workspace WHERE id = ?`, id).
 		Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &baseTreeStr, &baseVerStr,
-			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &w.CreatedTS, &w.UpdatedTS)
+			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &w.CreatedTS, &w.UpdatedTS,
+			&w.MaterializedTS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotExist
 	}
@@ -142,12 +149,13 @@ func (d *DB) UpdateWorkspaceState(id, state string, ts int64) error {
 	})
 }
 
-// UpdateWorkspaceMount 更新物化模式与挂载标记。
-func (d *DB) UpdateWorkspaceMount(id, mode string, mounted bool, ts int64) error {
+// UpdateWorkspaceMount 更新物化模式、挂载标记与物化时刻。
+func (d *DB) UpdateWorkspaceMount(id, mode string, mounted bool, refTS, materializedTS int64) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`UPDATE workspace SET materialize = ?, mounted = ?, updated_ts = ? WHERE id = ?`,
-			mode, boolToInt(mounted), ts, id)
+			`UPDATE workspace SET materialize = ?, mounted = ?, updated_ts = ?,
+			                      materialized_ts = ? WHERE id = ?`,
+			mode, boolToInt(mounted), refTS, materializedTS, id)
 		return err
 	})
 }

@@ -29,6 +29,15 @@ type Options struct {
 	MaxFileSize int64
 	// ContextLines 是 hunk 的上下文行数（§5.3）。
 	ContextLines int
+
+	// BaseEntries 是基准树的扁平视图（仓库相对路径 -> 对象 id，不含目录）。
+	//
+	// 与 MaterializedNS 一起用于**惰性判定**：工作区刚物化时 stat 缓存是空的，
+	// 但「文件不比物化时刻更新」就说明它仍是基准树里那一份，可以直接复用其
+	// 对象 id —— 不读、不哈希。这让 ws_open 完全不必走文件系统。
+	BaseEntries map[string]hash.ID
+	// MaterializedNS 是工作区的物化时刻（Unix 纳秒）。0 表示未启用惰性判定。
+	MaterializedNS int64
 }
 
 // DefaultOptions 返回 §3.5、附录 B 的默认取值。
@@ -61,6 +70,9 @@ type StatEntry struct {
 type StatCache interface {
 	Get(wsID, path string) (StatEntry, bool)
 	Put(wsID string, e StatEntry)
+	// PutMany 批量写入。实现必须用**单个事务**完成，否则每次采集会产生
+	// O(文件数) 个事务 —— 这是 ws_open / ws_sync 慢的主因。
+	PutMany(wsID string, es []StatEntry) error
 	// DeleteUnder 删除 prefix 及其下的全部条目。
 	DeleteUnder(wsID, prefix string)
 }
@@ -98,7 +110,31 @@ func Build(wsID, root string, ig *tree.Ignore, ow ObjectWriter,
 	if _, err := b.ow.PutTree(t); err != nil {
 		return nil, err
 	}
+	// stat 缓存批量落库（单事务）。缓存写失败不影响正确性（下一轮会重算）。
+	if b.stat != nil {
+		if err := b.flushStat(); err != nil {
+			return nil, err
+		}
+	}
 	return t, nil
+}
+
+// statBatch 是批量落库的分片大小。
+const statBatch = 2000
+
+// flushStat 把累积的 stat 条目分批写入（每批一个事务）。
+func (b *builder) flushStat() error {
+	if len(b.pendingStat) == 0 {
+		return nil
+	}
+	for len(b.pendingStat) > 0 {
+		n := min(statBatch, len(b.pendingStat))
+		if err := b.stat.PutMany(b.wsID, b.pendingStat[:n]); err != nil {
+			return err
+		}
+		b.pendingStat = b.pendingStat[n:]
+	}
+	return nil
 }
 
 type builder struct {
@@ -109,6 +145,17 @@ type builder struct {
 	stat    StatCache
 	inodeOK InodeReliable
 	opt     Options
+
+	// pendingStat 累积待写入的 stat 条目，最后批量落库。
+	pendingStat []StatEntry
+}
+
+// cached 读取 stat 缓存；stat 为 nil 时视为未命中。
+func (b *builder) cached(path string) (StatEntry, bool) {
+	if b.stat == nil {
+		return StatEntry{}, false
+	}
+	return b.stat.Get(b.wsID, path)
 }
 
 func (b *builder) rel(p string) string {
@@ -213,9 +260,9 @@ func (b *builder) subtree(dirPath, repoPath string, info os.FileInfo) (hash.ID, 
 		}
 		return hash.ID{}, 0, nil
 	}
-	sig := entriesSig(sub)
+	sig := EntriesSig(sub)
 
-	if prev, ok := b.stat.Get(b.wsID, repoPath); ok &&
+	if prev, ok := b.cached(repoPath); ok &&
 		prev.Kind == codec.EntryTree && prev.EntriesSig == sig && !prev.ObjectID.IsZero() {
 		b.putStatWith(repoPath, codec.EntryTree, info, hash.ID{}, prev.ObjectID, sig)
 		return prev.ObjectID, len(sub), nil
@@ -236,10 +283,19 @@ func (b *builder) file(p, repoPath string, info os.FileInfo) (hash.ID, bool, err
 		return hash.ID{}, false, fmt.Errorf("%w: %s (%d 字节)", ErrFileTooLarge, repoPath, info.Size())
 	}
 
-	// 快路径：stat 未变则复用 §4.7 的判定。
-	if prev, ok := b.stat.Get(b.wsID, repoPath); ok && prev.Kind == codec.EntryFile &&
+	// 快路径 1：已有缓存条目（含播种条目，见 sameStat）。
+	if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
 		b.sameStat(prev, info) && !prev.ObjectID.IsZero() {
 		return prev.ObjectID, true, nil
+	}
+	// 快路径 2：惰性判定 —— 基准树里有这个路径，且文件不比物化时刻更新，
+	// 说明它仍是基准树里那一份，直接复用对象 id（不读、不哈希）。
+	if b.opt.MaterializedNS > 0 {
+		if id, found := b.opt.BaseEntries[repoPath]; found && !id.IsZero() &&
+			info.ModTime().UnixNano() <= b.opt.MaterializedNS {
+			b.putStatWith(repoPath, codec.EntryFile, info, hash.ID{}, id, hash.ID{})
+			return id, true, nil
+		}
 	}
 
 	data, err := os.ReadFile(p)
@@ -251,7 +307,7 @@ func (b *builder) file(p, repoPath string, info os.FileInfo) (hash.ID, bool, err
 	}
 	cid := hash.Sum(data)
 
-	if prev, ok := b.stat.Get(b.wsID, repoPath); ok && prev.Kind == codec.EntryFile &&
+	if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
 		prev.ContentHash == cid && !prev.ObjectID.IsZero() {
 		// 内容未变（只是 mtime 变了），复用对象 id。
 		b.putStatWith(repoPath, codec.EntryFile, info, cid, prev.ObjectID, hash.ID{})
@@ -267,7 +323,19 @@ func (b *builder) file(p, repoPath string, info os.FileInfo) (hash.ID, bool, err
 }
 
 // sameStat 实现 §4.7 的快路径判定。
+//
+// 两种条目：
+//
+//	播种条目（Inode == 0）：ws_open 时由**版本树**直接播种，没有 stat 过。
+//	  只要文件不比物化时刻更新，就认为未变。
+//	  依据：物化会把 mtime 写成「物化时刻」；agent 之后任何修改都会让 mtime 变大。
+//	  这样 ws_open 完全不必读文件系统、不必哈希，做到与文件数近似无关。
+//
+//	真实条目：精确匹配 mtime_ns + size（overlay 下不比 inode）。
 func (b *builder) sameStat(prev StatEntry, info os.FileInfo) bool {
+	if prev.Inode == 0 && prev.MtimeNS != 0 {
+		return info.ModTime().UnixNano() <= prev.MtimeNS
+	}
 	if prev.MtimeNS != info.ModTime().UnixNano() || prev.Size != info.Size() {
 		return false
 	}
@@ -291,7 +359,7 @@ func (b *builder) putStatWith(repoPath string, kind uint8, info os.FileInfo,
 	if info.Mode()&0o111 != 0 {
 		mode = codec.ModeExecutable
 	}
-	b.stat.Put(b.wsID, StatEntry{
+	b.pendingStat = append(b.pendingStat, StatEntry{
 		Path:        repoPath,
 		Kind:        kind,
 		MtimeNS:     info.ModTime().UnixNano(),
@@ -304,8 +372,8 @@ func (b *builder) putStatWith(repoPath string, kind uint8, info os.FileInfo,
 	})
 }
 
-// entriesSig 是目录条目的规范化签名，用于子树复用。
-func entriesSig(entries []tree.Entry) hash.ID {
+// EntriesSig 是目录条目的规范化签名，用于子树复用与 stat 缓存播种。
+func EntriesSig(entries []tree.Entry) hash.ID {
 	e := codec.NewEncoder()
 	e.Uvarint(uint64(len(entries)))
 	for _, en := range entries {
@@ -333,6 +401,14 @@ func (m *MemStat) Get(wsID, path string) (StatEntry, bool) {
 
 // Put 实现 StatCache。
 func (m *MemStat) Put(wsID string, e StatEntry) { m.M[memKey(wsID, e.Path)] = e }
+
+// PutMany 实现 StatCache。
+func (m *MemStat) PutMany(wsID string, es []StatEntry) error {
+	for _, e := range es {
+		m.M[memKey(wsID, e.Path)] = e
+	}
+	return nil
+}
 
 // DeleteUnder 实现 StatCache。
 func (m *MemStat) DeleteUnder(wsID, prefix string) {

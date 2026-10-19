@@ -78,6 +78,19 @@ func unflatten(cs ContentStore, entries map[string]tree.Entry) (*tree.Tree, erro
 		})
 	}
 
+	// 必须先补齐**所有祖先目录**再排定处理顺序。
+	//
+	// 曾经的 bug：先收集 levels 的键、再在循环里创建父目录 —— 对于
+	// "pkg/mod5/f5.go" 这类两级嵌套，"pkg" 不在初始键集合里，于是永远不会
+	// 被构建，最终根树为空（land 会静默清空整棵仓库树）。
+	for _, p := range paths {
+		dir, _ := splitDir(p)
+		for dir != "" {
+			ensure(dir)
+			dir, _ = splitDir(dir)
+		}
+	}
+
 	// 目录按深度降序处理，保证子目录先完成。
 	dirs := make([]string, 0, len(levels))
 	for d := range levels {

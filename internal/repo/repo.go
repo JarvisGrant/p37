@@ -221,13 +221,13 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 		return hash.ID{}, err
 	}
 
-	stat := r.DB.StatCache()
-	t, err := capture.Build("__import__", srcDir, r.Ignore, r.Store, stat,
+	// 导入没有对应的工作区行，因此**不写** stat 缓存（stat_cache.ws_id 有外键）。
+	// 传 nil 即可：Build 会跳过全部缓存读写。
+	t, err := capture.Build("", srcDir, r.Ignore, r.Store, nil,
 		capture.InodeReliable(false), r.CaptureOpt)
 	if err != nil {
 		return hash.ID{}, err
 	}
-	r.DB.StatCache().DeleteUnder("__import__", "")
 
 	v := version.New(hash.Zero, t.ID(),
 		0, AgentImporter, "import "+srcDir, time.Now().UnixMilli(), "import")
@@ -245,7 +245,13 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 }
 
 // writeHead 原子写入 refs/mainline（§7.3）。
+//
+// 这是 land 的唯一提交点，因此**先**把此前写入的全部对象落盘，再推进 head：
+// 保证「head 指向的对象一定已持久」这一不变量。
 func (r *Repo) writeHead(id hash.ID) error {
+	if err := r.Store.Flush(); err != nil {
+		return fmt.Errorf("repo: 对象落盘失败: %w", err)
+	}
 	key := "refs/mainline"
 	cur, err := r.Store.BlobStore().Stat(key)
 	etag := ""

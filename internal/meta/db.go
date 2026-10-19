@@ -124,6 +124,20 @@ func (d *DB) Init(root string) error {
 				return err
 			}
 		}
+		// 兼容早前创建的仓库：补上新增的列（幂等）。
+		var hasCol int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('workspace') WHERE name='materialized_ts'`).
+			Scan(&hasCol); err != nil {
+			return err
+		}
+		if hasCol == 0 {
+			if _, err := tx.Exec(
+				`ALTER TABLE workspace ADD COLUMN materialized_ts INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return err
+			}
+		}
+
 		// 记录格式版本，供 daemon 启动时校验（§2.2）。
 		_, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, FormatVer))
 		return err
@@ -197,7 +211,8 @@ var ddl = []string{
 	  materialize  TEXT NOT NULL CHECK (materialize IN ('overlay','copy')),
 	  mounted      INTEGER NOT NULL DEFAULT 0 CHECK (mounted IN (0,1)),
 	  created_ts   INTEGER NOT NULL,
-	  updated_ts   INTEGER NOT NULL
+	  updated_ts   INTEGER NOT NULL,
+	  materialized_ts INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ws_parent ON workspace(parent_kind, parent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_ws_state  ON workspace(state)`,
