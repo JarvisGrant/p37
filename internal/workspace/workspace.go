@@ -40,6 +40,12 @@ var (
 	ErrWrongState = errors.New("workspace: 状态不允许该操作")
 	// ErrDirMissing 表示工作区目录缺失。
 	ErrDirMissing = errors.New("workspace: 工作区目录缺失")
+	// ErrNotMounted 表示工作区应当处于挂载态，但实际没有挂载。
+	//
+	// 这是**数据安全**防护：挂载丢失时工作区目录会是一个空目录，
+	// 若继续采集会把「挂载丢了」误判成「agent 删光了所有文件」，
+	// 落地后就会清空整棵仓库树。
+	ErrNotMounted = errors.New("workspace: 工作区未挂载")
 )
 
 // Options 配置 Manager。
@@ -324,6 +330,15 @@ func (m *Manager) Sync(wsID string) error {
 		}
 		return fmt.Errorf("%w: %s", ErrDirMissing, wsID)
 	}
+	// 应当挂载却没挂载 -> 目录是空的，绝不能当成「文件被删光」。
+	// （机器重启、daemon 被强杀、人为 umount 都会造成这种情况。）
+	if w.Materialize == meta.MaterializeOverlay && !m.mm.IsMounted(wsID) {
+		if w.State != meta.StateBroken {
+			_ = m.db.UpdateWorkspaceState(wsID, meta.StateBroken, m.now())
+		}
+		return fmt.Errorf("%w: %s（应为 overlay 挂载但实际未挂载；可执行 ws_rebase 或重建工作区）",
+			ErrNotMounted, wsID)
+	}
 
 	// 1. 构建当前树。
 	//
@@ -373,6 +388,46 @@ func (m *Manager) Sync(wsID string) error {
 	return nil
 }
 
+// RemountAll 在 daemon 启动时恢复全部活跃工作区的挂载（§7.7 步骤 3）。
+//
+// 只恢复挂载，不动 upper 层，因此工作区内容不丢。返回恢复的个数。
+func (m *Manager) RemountAll() (int, error) {
+	all, err := m.db.ListWorkspaces()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	var firstErr error
+	for i := range all {
+		w := &all[i]
+		if w.Materialize != meta.MaterializeOverlay {
+			continue
+		}
+		switch w.State {
+		case meta.StateActive, meta.StateConflicted, meta.StateBroken:
+		default:
+			continue // integrating 等中间态交给 ReconcileLand 处理
+		}
+		if m.mm.IsMounted(w.ID) {
+			_ = m.db.UpdateWorkspaceMount(w.ID, w.Materialize, true, m.now(), w.MaterializedTS)
+			continue
+		}
+		if err := m.mm.Remount(w.ID, w.BaseTree, m.store); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("重挂 %s: %w", w.ID, err)
+			}
+			continue
+		}
+		// 恢复后刷新物化时刻：期间没被改过的文件仍可走惰性判定。
+		_ = m.db.UpdateWorkspaceMount(w.ID, w.Materialize, true, m.now(), time.Now().UnixNano())
+		if w.State == meta.StateBroken {
+			_ = m.db.UpdateWorkspaceState(w.ID, meta.StateActive, m.now())
+		}
+		n++
+	}
+	return n, firstErr
+}
+
 // EffectiveTree 计算并缓存父工作区的有效树（§4.9.1）。
 func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
 	w, err := m.Get(wsID)
@@ -411,18 +466,18 @@ func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
 	return id, nil
 }
 
-// Status 是 repo_status 的工作区部分。
+// Status 是 ws_info 的返回（字段名遵循附录 K 的 snake_case 约定）。
 type Status struct {
-	ID            string
-	ParentKind    string
-	ParentID      string
-	BaseVersion   hash.ID
-	Dir           string
-	Dirty         bool
-	CapturedOps   int64
-	ConflictCount int64
-	State         string
-	Materialize   string
+	ID            string  `json:"ws_id"`
+	ParentKind    string  `json:"parent_kind"`
+	ParentID      string  `json:"parent_id"`
+	BaseVersion   hash.ID `json:"base_version"`
+	Dir           string  `json:"dir"`
+	Dirty         bool    `json:"dirty"`
+	CapturedOps   int64   `json:"captured_ops"`
+	ConflictCount int64   `json:"conflict_count"`
+	State         string  `json:"state"`
+	Materialize   string  `json:"materialize"`
 }
 
 // Info 返回工作区状态。
@@ -499,6 +554,9 @@ func (m *Manager) FoldSet(wsID string) ([]*meta.Workspace, error) {
 
 		w, err := m.db.GetWorkspace(cur)
 		if err != nil {
+			if errors.Is(err, meta.ErrNotExist) {
+				return nil, fmt.Errorf("%w: %s", ErrNotFound, cur)
+			}
 			return nil, err
 		}
 		out = append(out, w)

@@ -73,6 +73,10 @@ type StatCache interface {
 	// PutMany 批量写入。实现必须用**单个事务**完成，否则每次采集会产生
 	// O(文件数) 个事务 —— 这是 ws_open / ws_sync 慢的主因。
 	PutMany(wsID string, es []StatEntry) error
+	// Load 一次性载入某工作区的全部缓存条目。
+	//
+	// 逐条 Get 会退化成 O(文件数) 次查询；批量载入把它压成 1 次。
+	Load(wsID string) (map[string]StatEntry, error)
 	// DeleteUnder 删除 prefix 及其下的全部条目。
 	DeleteUnder(wsID, prefix string)
 }
@@ -148,6 +152,26 @@ type builder struct {
 
 	// pendingStat 累积待写入的 stat 条目，最后批量落库。
 	pendingStat []StatEntry
+
+	// cache 是本次构建用的 stat 缓存快照（惰性载入一次）。
+	cache     map[string]StatEntry
+	cacheOnce bool
+}
+
+// loadCache 惰性载入 stat 缓存快照（一次查询）。
+func (b *builder) loadCache() {
+	if b.cacheOnce {
+		return
+	}
+	b.cacheOnce = true
+	if b.stat == nil {
+		return
+	}
+	m, err := b.stat.Load(b.wsID)
+	if err != nil {
+		return // 缓存读失败不影响正确性：退化为全部重新哈希
+	}
+	b.cache = m
 }
 
 // cached 读取 stat 缓存；stat 为 nil 时视为未命中。
@@ -155,7 +179,9 @@ func (b *builder) cached(path string) (StatEntry, bool) {
 	if b.stat == nil {
 		return StatEntry{}, false
 	}
-	return b.stat.Get(b.wsID, path)
+	b.loadCache()
+	e, ok := b.cache[path]
+	return e, ok
 }
 
 func (b *builder) rel(p string) string {
@@ -408,6 +434,18 @@ func (m *MemStat) PutMany(wsID string, es []StatEntry) error {
 		m.M[memKey(wsID, e.Path)] = e
 	}
 	return nil
+}
+
+// Load 实现 StatCache。
+func (m *MemStat) Load(wsID string) (map[string]StatEntry, error) {
+	out := make(map[string]StatEntry)
+	p := wsID + "\x00"
+	for k, v := range m.M {
+		if len(k) > len(p) && k[:len(p)] == p {
+			out[k[len(p):]] = v
+		}
+	}
+	return out, nil
 }
 
 // DeleteUnder 实现 StatCache。

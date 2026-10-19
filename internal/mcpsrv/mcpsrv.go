@@ -139,6 +139,8 @@ func classify(err error) (code, msg string, detail any) {
 		return "WS_HAS_CHILDREN", err.Error(), nil
 	case errors.Is(err, workspace.ErrDirMissing):
 		return "WS_DIR_MISSING", err.Error(), nil
+	case errors.Is(err, workspace.ErrNotMounted):
+		return "WS_NOT_MOUNTED", err.Error(), nil
 	case errors.Is(err, workspace.ErrWrongState):
 		return "WS_NOT_ACTIVE", err.Error(), nil
 	case errors.Is(err, mountmgr.ErrUnavailable):

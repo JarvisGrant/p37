@@ -3,10 +3,12 @@
 package mountmgr
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/chenyiwen/p37/internal/hash"
@@ -18,7 +20,11 @@ func (m *Manager) mountOverlay(wsID string, baseTree hash.ID, src ContentSource)
 	if err != nil {
 		return err
 	}
+	return m.mountWithLower(wsID, base)
+}
 
+// mountWithLower 用一个已物化的基底目录挂载工作区。
+func (m *Manager) mountWithLower(wsID, base string) error {
 	upper := m.upperDir(wsID)
 	work := m.workDir(wsID)
 	dir := m.WorkspaceDir(wsID)
@@ -33,9 +39,7 @@ func (m *Manager) mountOverlay(wsID string, baseTree hash.ID, src ContentSource)
 	if err := syscall.Mount("overlay", dir, "overlay", 0, opts); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-
-	// 记录引用，供 Close 时释放。
-	baseRefs.Store(wsID, baseTree)
+	baseRefs.Store(wsID, base)
 	return nil
 }
 
@@ -51,59 +55,75 @@ func (m *Manager) unmountOverlay(wsID string) error {
 	return nil
 }
 
-// IsMounted 报告路径当前是否为挂载点。
-func (m *Manager) IsMounted(wsID string) bool {
-	dir := m.WorkspaceDir(wsID)
-	var st, parent syscall.Stat_t
-	if err := syscall.Stat(dir, &st); err != nil {
-		return false
+// Remount 恢复一个工作区的挂载（daemon 启动时用，§7.7 步骤 3）。
+//
+// 只重建挂载：基底按 base_tree 复用/物化，**upper 层原样保留**，因此工作区
+// 内容不会丢。
+func (m *Manager) Remount(wsID string, baseTree hash.ID, src ContentSource) error {
+	if m.IsMounted(wsID) {
+		return nil
 	}
-	if err := syscall.Stat(filepath.Dir(dir), &parent); err != nil {
-		return false
+	base, err := m.ensureBase(baseTree, src)
+	if err != nil {
+		return err
 	}
-	// 挂载点的设备号与父目录不同，且 inode 为 1。
-	return st.Dev != parent.Dev || st.Ino == 1
+	return m.mountWithLower(wsID, base)
 }
 
-// Remount 以新的 baseTree 重挂（§4.9.2 步骤 5b）。
+// IsMounted 报告工作区目录当前是否为挂载点。
 //
-// 实现策略：把 upper 中相对旧 lower 的内容先在临时目录准备好，再原子替换并
-// 重挂。这里采用 simpler 的两步：卸载 -> 替换 upper -> 重挂。
-func (m *Manager) Remount(wsID string, newBase hash.ID, src ContentSource,
-	prepareUpper func(tmpUpper string) error) error {
-	if err := m.unmountOverlay(wsID); err != nil {
-		return err
-	}
+// 通过 /proc/self/mountinfo 判断，比比较 st_dev 可靠（bind mount、tmpfs 等
+// 场景下 st_dev 会误导）。
+func (m *Manager) IsMounted(wsID string) bool {
+	return IsMountPoint(m.WorkspaceDir(wsID))
+}
 
-	upper := m.upperDir(wsID)
-	work := m.workDir(wsID)
-	_ = os.RemoveAll(work)
-
-	tmpUpper := upper + ".new"
-	_ = os.RemoveAll(tmpUpper)
-	if err := os.MkdirAll(tmpUpper, 0o755); err != nil {
-		return err
+// IsMountPoint 报告 path 是否为挂载点。
+func IsMountPoint(path string) bool {
+	want, err := filepath.Abs(path)
+	if err != nil {
+		return false
 	}
-	if prepareUpper != nil {
-		if err := prepareUpper(tmpUpper); err != nil {
-			_ = os.RemoveAll(tmpUpper)
-			return err
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		// 格式: id parent major:minor root mountpoint options...
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		mp := unescapeMountField(fields[4])
+		if mp == want {
+			return true
 		}
 	}
-	old := upper + ".old"
-	_ = os.RemoveAll(old)
-	if err := os.Rename(upper, old); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(tmpUpper, upper); err != nil {
-		return err
-	}
-	_ = os.RemoveAll(old)
+	return false
+}
 
-	if err := m.mountOverlay(wsID, newBase, src); err != nil {
-		return err
+// unescapeMountField 还原 mountinfo 里的八进制转义（空格等）。
+func unescapeMountField(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
 	}
-	return nil
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			var v int
+			if _, err := fmt.Sscanf(s[i+1:i+4], "%03o", &v); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // ProbeOverlay 尝试在 dir 下做一次真实的 OverlayFS 挂载，用于部署自检
@@ -122,8 +142,7 @@ func (m *Manager) ProbeOverlay(dir string) error {
 	if err := syscall.Mount("overlay", target, "overlay", 0, opts); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	err := syscall.Unmount(target, 0)
-	if err != nil {
+	if err := syscall.Unmount(target, 0); err != nil {
 		return fmt.Errorf("mountmgr: 自检挂载成功但卸载失败: %w", err)
 	}
 	return nil

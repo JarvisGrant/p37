@@ -70,6 +70,10 @@ type Options struct {
 	// LandQueueMax 是 land 队列容量；超出即拒绝（LAND_QUEUE_FULL，§11.5）。
 	// 0 表示使用 DefaultLandQueueMax。
 	LandQueueMax int
+	// RemountWorkspaces 为真时在 Open 阶段恢复全部活跃工作区的挂载
+	// （§7.7 步骤 3）。**只有常驻 daemon 应该打开它**：CLI 每次调用都重挂
+	// 既慢又会与 daemon 打架。
+	RemountWorkspaces bool
 }
 
 // DefaultLandQueueMax 是 land 队列的默认容量（附录 B 的 daemon.land_queue_max）。
@@ -132,6 +136,15 @@ func Open(root string, opt Options) (*Repo, error) {
 	if _, err := db.ReconcileLand(); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+
+	// 步骤 3：恢复活跃工作区的挂载。**必须在 land 修复之后**，因为修复可能
+	// 焚毁/恢复工作区。只重建挂载，upper 层原样保留。
+	if opt.RemountWorkspaces {
+		if _, err := ws.RemountAll(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 
 	qmax := opt.LandQueueMax

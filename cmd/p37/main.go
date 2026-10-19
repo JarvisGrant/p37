@@ -308,9 +308,15 @@ func cmdDoctor(root string, out, errw io.Writer) int {
 	if err != nil {
 		report("磁盘可用空间", true, "无法探测")
 	} else {
+		// 磁盘空间是**建议值**，不是硬性错误：空间偏小只是意味着并发工作区
+		// 或仓库规模要相应收敛，不影响正确性。
 		warnBytes := int64(40 << 30)
-		report("磁盘可用空间", avail >= warnBytes,
-			fmt.Sprintf("%s（建议 ≥ %s）", humanBytes(avail), humanBytes(warnBytes)))
+		if avail >= warnBytes {
+			report("磁盘可用空间", true, humanBytes(avail))
+		} else {
+			fmt.Fprintf(out, "[WARN] %-28s %s（建议 ≥ %s；空间偏小只影响并发度，不影响正确性）\n",
+				"磁盘可用空间", humanBytes(avail), humanBytes(warnBytes))
+		}
 	}
 
 	// 7. 仓库可打开且格式匹配。

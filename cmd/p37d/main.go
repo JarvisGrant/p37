@@ -69,6 +69,8 @@ func runDaemon(root string, serveHTTP bool) error {
 		Materialize:    cfg.MountMode(),
 		BaseCacheBytes: cfg.Workspace.BaseCacheBytes,
 		LandQueueMax:   cfg.Daemon.LandQueueMax,
+		// 常驻 daemon 负责恢复活跃工作区的挂载（§7.7 步骤 3）。
+		RemountWorkspaces: true,
 	})
 	if err != nil {
 		return err

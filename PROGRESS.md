@@ -1,7 +1,7 @@
 # P37 实现进度
 
 > 设计规格为内部资料，不随本仓库发布
-> 最近更新：2026-10-18
+> 最近更新：2026-10-19
 
 ## 当前状态
 
@@ -9,11 +9,12 @@
 |---|---|---|
 | **M1 存储底座** | ✅ 完成 | 附录 L.1 的全部单元/属性测试通过 |
 | **M2 树与 op** | 🟡 主体完成 | 缺：行级移动检测、fs watcher；stat_cache 已落 SQLite |
-| **M3 工作区与整合** | ✅ 主体完成 | 缺：OverlayFS 真机验证、fs watcher、真机上跑门禁 spike |
-| **M4 冲突** | ✅ 核心完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解只实现了 3 条规则 |
-| **M5 栈与回退** | 🟡 部分完成 | 折叠集合、revert、journal 已实现；栈的端到端用例待补 |
+| **M3 工作区与整合** | ✅ 完成 | OverlayFS 已在真机（Ubuntu 26.04 / ext4）验证；重启重挂与未挂载防护已补齐 |
+| **M4 冲突** | ✅ 核心完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
+| **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal、三层栈 + 分叉端到端用例齐备 |
 
-测试：`go test ./...` 全绿（76 个测试）。约 13,800 行 Go（含测试）。
+测试：`go test ./...` 全绿（**100 个测试**）。约 15,850 行 Go（含测试）。
+交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
 
 **已可用的端到端路径**（本机用 `copy` 模式验证通过）：
 
@@ -53,10 +54,52 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 顺带清理了全部死代码（未使用的导出函数、`var _ =` 占位、魔法数字），
 `go vet` 与 gofmt 干净。
 
+### 真机发现并修正的问题（S15 / S16）
+
+在 P36 平台的 Ubuntu 26.04 / ext4 上做端到端验证时，发现两个**会造成数据丢失**
+的缺口。两者都已修复并在真机上复验。
+
+| 编号 | 问题 | 处理 | 回归测试 |
+|---|---|---|---|
+| S15 | **daemon 重启后不恢复活跃工作区的挂载**（§7.7 步骤 3 未实现）。挂载消失后工作区目录变成空目录，`ws_sync` 会采集出「全部文件被删除」 | 新增 `workspace.RemountAll()`，在 `repo.Open` 的启动流程里、land 修复之后调用；只重建挂载，upper 层原样保留。由 `Options.RemountWorkspaces` 控制，**仅常驻 daemon 打开**（CLI 不重挂，避免与 daemon 打架） | 真机：重启前 6 个工作区 → 停止后 0 挂载 → 重启后 6 个挂载全部恢复、每个 1000 文件 |
+| S16 | **没有「应挂载却未挂载」的防护**。人为 `umount`、或清理工具误删挂载后，`ws_sync` 会安静地采集出 N 条 `delete`，落地即清空仓库 | `workspace.Sync` 在采集前校验：`materialize=overlay` 且不是挂载点 → 置 `state=broken` 并返回 `ErrNotMounted`（MCP 错误码 `WS_NOT_MOUNTED`）。挂载点判定改用 `/proc/self/mountinfo`，不再依赖不可靠的 `st_dev` 比较 | `mcpsrv.TestErrorCodesCoverNewStates`；真机：`umount` 后 `ws_sync` 返回 `WS_NOT_MOUNTED`，重启重挂后恢复正常 |
+
+### 性能修正（真机实测）
+
+真机上 `import` 1000 个文件要 6.7s，`ws_sync` 无变更要 0.12–0.18s。逐项定位后修正：
+
+| 编号 | 根因 | 处理 | 效果 |
+|---|---|---|---|
+| S17 | 每写一个对象都 `CreateTemp` → `link` → `remove`，5 次元数据操作 | 改为直接 `O_CREAT\|O_EXCL` 写最终路径；key 是内容寻址的，**替换同内容文件无害**。残留残片用「大小校验」兜底（head 未推进前不会被引用） | 单对象 2.31ms → **0.51ms** |
+| S18 | `Flush` 对 2063 个对象逐个 `fsync`。实测在 2 vCPU 虚拟机上一次对象创建只要 63ms，而 import 要数秒 —— **瓶颈全在 fsync** | 改用 `syncfs`（一次系统调用刷完整个文件系统），小批量时回退到并行 fsync | import 6.7s → **1.23s**（三次稳定，5.4x） |
+| S19 | `stat_cache` 逐条 `SELECT`，1000 个文件就是 1000 次查询 | 新增 `StatCache.Load(wsID)` 一次性载入内存快照，`Build` 期间只查 1 次 | `ws_sync` 无变更 0.15s → **0.03s** |
+
+真机最终数据（1000 文件 / 2063 对象，2 vCPU / 956MB / ext4）：
+
+```
+import          1.23s
+ws_open         0.03s   （O(1)，与文件数无关）
+ws_sync 无变更  0.03s
+ws_sync 改10文件 0.08s
+ws_land         0.23s
+```
+
+### API 一致性
+
+`ws_info` 曾直接返回 `workspace.Status`，该结构体没有 json tag，字段名是
+PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约定不符，
+按 schema 实现的客户端会解析失败。已补全 tag 并加回归测试
+`mcpsrv.TestWSInfoUsesSnakeCase`。
+
 ### 已知但**未做**（不影响发布，列出来以免误以为已覆盖）
 
-- 行级移动检测、fs watcher（第三重采集触发）、`blame`、P2 的包与 GC、
-  栈的三层端到端集成测试：见下文「下一步」。
+- 行级移动检测（§5.3 第 1、2 趟）；目前只有树级重命名检测。
+- fs watcher（§5.2 触发源 a/c）；目前靠显式 `ws_sync` 与「以该 ws 为目标的 MCP 调用」触发。
+- `blame`（§12.2，P2）。
+- P2 的包（pack）与 GC：当前一对象一文件，10 万文件约 20 万对象；`syncfs` 之后
+  元数据成本已不是瓶颈，但打包仍能把小文件场景再压一个量级。
+- `ws_rebase` 目前把整棵目标树写进 upper（正确但浪费）；规格的「换 lower 只写 delta」
+  需要手工生成 whiteout，未实现。
 - 符号链接**内容变化**目前走 delete + create（而非 modify），语义正确但 op 数偏多。
 
 ## 已实现
@@ -95,7 +138,7 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 | `internal/mountmgr` | `overlay`（Linux，含 `ProbeOverlay` 自检）与 `copy`（跨平台）两种物化、基底 LRU、大小写冲突检测、标记文件在被跟踪树之外 |
 | `internal/repo` | init / import / **land 流水线**（可恢复的三段提交协议）/ revert / 状态 / 冲突视图 / 租约违规检测 |
 | `internal/meta` | stat_cache / workspace / op / conflict / resolution / journal 的读写；`CommitLand` / `FinishLand` / `RollbackLand` / `ReconcileLand` |
-| `internal/mcpsrv` | 21 个 MCP 工具 + 统一信封 + 错误码映射（附录 K、附录 E） |
+| `internal/mcpsrv` | 22 个 MCP 工具 + 统一信封 + 错误码映射（附录 K、附录 E） |
 | `internal/config` | 附录 B 的配置与默认值 |
 | `cmd/p37` | 运维 CLI（init/import/status/doctor/fsck/gc/migrate/ignore-check + 调试用版本操作） |
 | `cmd/p37d` | 常驻 daemon：flock、unix socket、可选 HTTP（强制 token）、优雅退出 |
@@ -138,20 +181,21 @@ Diff(T0,T1)   --Replay--> T2
 ### 到验证前的剩余工作
 
 1. **fs watcher**（§5.2 触发源 a/c）：`fsnotify` + debounce + 轮转扫描调度器（§4.7）。
-   当前采集只靠显式 `ws_sync` 与「以该 ws 为目标的 MCP 调用」两个触发源。
-2. **行级移动检测**（§5.3 第 1、2 趟）：精确块移动 + 相似度移动。目前只做了
-   树级的重命名检测。
-3. **候选解补齐**（§6.3）：目前实现 3 条（take_lower / take_upper / both），
-   其余（同锚点插入按 seq 拼接、delete 覆盖 edit 等）待补。
-4. **`blame`**（§12.2，P2）：算法已在规格中定稿，未编码。
-5. **栈的端到端用例**：折叠集合与重挂已实现，但缺少三层栈 + 分叉的集成测试。
-6. **P2 的包与 GC**：`package` / mark-sweep / scrub / 保留策略。
+2. **行级移动检测**（§5.3 第 1、2 趟）：精确块移动 + 相似度移动。
+3. **`blame`**（§12.2，P2）：算法已在规格中定稿，未编码。
+4. **P2 的包与 GC**：`package` / mark-sweep / scrub / 保留策略。
+5. `ws_rebase` 的「换 lower 只写 delta」优化。
 
-### 需要真机
+### 真机结论（已完成）
 
-见 [`VERIFY.md`](VERIFY.md)。最关键的四处：OverlayFS 能否挂载、换 lower 重挂的
-行为、stat 的 inode 是否可靠、fsnotify 是否可靠。这四点决定 §4.7 与 §4.9.2 的
-实现是否需要调整，**必须在继续做 M4/M5 的栈特性之前拿到结论**。
+`VERIFY.md` 门禁全部通过。四点关键结论：
+
+- OverlayFS 在 ext4 上可挂载，换 lowerdir 正常。
+- 跨 copy-up 与重挂，`stat` 的 mtime/size/inode 精确映射到 lower，inode 不变 ——
+  惰性 stat 判定（D23 相关）成立。
+- inotify 在 overlay 上行为与裸 ext4 一致（含 copy-up、50 次快速写 → 101 事件）。
+  故 fs watcher 可按普通目录实现。
+- 一次 `umount`/重启会让所有挂载消失 —— 这正是 S15/S16 的来源。
 
 ## 开发命令
 

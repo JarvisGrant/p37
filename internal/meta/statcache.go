@@ -94,6 +94,40 @@ func (s *StatCache) PutMany(wsID string, es []capture.StatEntry) error {
 	})
 }
 
+// Load 实现 capture.StatCache：一次查询取出该工作区的全部条目。
+func (s *StatCache) Load(wsID string) (map[string]capture.StatEntry, error) {
+	rows, err := s.db.sql.Query(
+		`SELECT path, kind, mtime_ns, size, inode, mode,
+		        content_hash, object_id, entries_sig
+		   FROM stat_cache WHERE ws_id = ?`, wsID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]capture.StatEntry, 1024)
+	for rows.Next() {
+		var (
+			e          capture.StatEntry
+			kind, mode int
+			contentStr sql.NullString
+			objectStr  sql.NullString
+			entriesStr sql.NullString
+		)
+		if err := rows.Scan(&e.Path, &kind, &e.MtimeNS, &e.Size, &e.Inode, &mode,
+			&contentStr, &objectStr, &entriesStr); err != nil {
+			return nil, err
+		}
+		e.Kind = uint8(kind)
+		e.Mode = uint64(mode)
+		e.ContentHash = parseHashOrZero(contentStr)
+		e.ObjectID = parseHashOrZero(objectStr)
+		e.EntriesSig = parseHashOrZero(entriesStr)
+		out[e.Path] = e
+	}
+	return out, rows.Err()
+}
+
 // DeleteUnder 实现 capture.StatCache。
 func (s *StatCache) DeleteUnder(wsID, prefix string) {
 	_ = s.db.withWrite(func(tx *sql.Tx) error {
