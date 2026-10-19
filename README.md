@@ -11,8 +11,11 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**M1–M3 主体完成，M4 核心完成，M5 部分完成。尚未经过真机（Ubuntu + ext4）
-> 验证。** 详见 [`PROGRESS.md`](PROGRESS.md) 与 [`VERIFY.md`](VERIFY.md)。
+> 状态：**M1–M5 主体完成，已在真机（P36 实例 · Ubuntu 26.04 + ext4 + OverlayFS）上按
+> `VERIFY.md` 验证通过**（门禁、功能闭环、并发、崩溃恢复、重启重挂、CDC 去重等）。
+> 真机第二遍修掉了权限位丢失、rename 跨落地不跟随、`.p37ignore` 未读取、CLI 短 id
+> 不可回喂、老仓库不自动补列等缺陷，并优化了采集路径。详见 [`PROGRESS.md`](PROGRESS.md)
+> 与 [`VERIFY.md`](VERIFY.md)。
 
 ---
 

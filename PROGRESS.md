@@ -30,6 +30,35 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## 真机第二遍（S30–S34 + 采集提速）
+
+在 P36 实例（Ubuntu 26.04 / ext4 / overlay，2 vCPU / 1 GiB）上按 `VERIFY.md` 又走了一遍
+完整功能与性能清单，抓到并修掉以下问题；两项核心功能（权限位、rename 跟随）在真机上复验通过。
+
+| 编号 | 问题 | 处理 | 回归测试 |
+|---|---|---|---|
+| **S30** | **可执行位（权限位）丢失**：op 不承载权限位，`replay` 一律按 `ModeNormal` 落条目。改过内容的可执行脚本、新建的可执行文件，落地后都变成 0644；只 `chmod` 会被误记成 `blob_put` | `op.Op` 增加 `mode_before` / `mode_after`（可空），capture 在 create/modify/attr/blob_put/rename 上填好，replay 按 `resolveMode` 落位；纯权限变化改判为 `attr`；`invert` 交换前后权限，revert 可还原；`op` 表补同名列 | `repo.TestExecutableBitSurvivesOps`、`TestExecutableBitRevert` |
+| **S31** | **对侧已落地的重命名不被跟随**：S21 的 rename 跟随只在「rename 与 modify 在同一次重放内」成立；对侧重命名并落地后，本侧基于旧路径的改动报 `missing_base` | 新增 `op.RenameFollows`（只按内容 id 唯一匹配，歧义不猜），`plan` / `Rebase` 在重放前构建「旧路径→新路径」映射，`replay` 在目标路径缺失时改道 | `repo.TestRenameFollowAcrossLand` |
+| **S32** | **`.p37ignore` 从未被读取**：文档与 `tree.ignore` 注释都承诺读仓库根的 `.p37ignore`，但全仓只有注释，没有读取代码 | 新增 `tree.LoadIgnoreFile`，`repo.Open` 与 `ignore-check` 把文件规则并到 `ignore_extra` 之后（后匹配覆盖先匹配） | `tree.TestLoadIgnoreFile*`（3 个）、`repo.TestP37IgnoreFileIsApplied` |
+| **S33** | **CLI 版本 id 自相矛盾**：`p37 log` 打印 16 位短 id，`show/revert/blame --version/ws-open --parent` 却只认 64 位完整 id | `meta.FindVersionByPrefix`（唯一前缀，歧义报错）+ CLI/`resolveParent` 统一解析；短 id 可以直接回喂 | `repo.TestShortVersionPrefixResolves` |
+| **S34** | **老仓库不会自动补列**：补列逻辑只在 `repo.Init` 里，已存在的仓库打开时不会执行，新列缺失导致插 op 报 `table op has no column named mode_before` | 抽出 `meta.EnsureSchema`（幂等补列），`repo.Open` 在 `CheckFormat` 之后调用 | `meta.TestEnsureSchemaAddsLaterColumns` |
+
+**采集提速（真机实测，10k 文件 / 2 vCPU）**：
+
+- **单次扫描**：稳定点判定（`collectCandidates`）与建树（`dir`）原先各走一遍全树
+  （readdir + lstat ×2）。现改为一次 `scan` 产出「目录 → 子项 + FileInfo + 仓库相对路径 +
+  忽略判定」快照，两者共用；`dir` 不再重复 `rel`/`Ignore.Match`。
+- **跳过等价写入**：`putStatWith` 与缓存快照逐字段比较，相同就不落库。此前每轮采集都把
+  全部条目重写一遍（10k 次写），这是无变更采集的主要开销。
+- 结果：`ws_sync` 无变更 264ms → **~140ms**；改 10 文件 ~250–530ms → **~190ms**；
+  `land` 0.69–1.54s → **~0.5s**。`import` 1 万文件 15–21s（目标 <30s）。
+  无变更 1 万文件仍高于附录 D.2 的 100ms 目标：在本机（2 vCPU）`readdir+lstat` 单遍
+  约 60ms、SQLite 载入 1 万行 stat_cache 约 30–50ms，已接近该硬件的下限。
+
+**仍未做（与存储有关，需要独立设计）**：小文件的对象放大 —— 1 万个小文件（逻辑内容
+约 240 KB）在对象库里约 **148 MB / 2 万个对象**（一对象一文件 + 4 KiB 块粒度），约 600×。
+这是 P2 的「打包」缺口（见下节），不是本轮可安全收口的小改动。
+
 ## 发布前的安全加固（已完成）
 
 开源发布前做了一轮审计，修掉 2 个真漏洞 + 2 项加固，并补了对应的回归测试。
