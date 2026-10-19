@@ -758,9 +758,22 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 	if err := m.rebaseWorkspace(wsID, newBase, res.Tree); err != nil {
 		return nil, err
 	}
-	// 覆写完成 -> 记录新的物化时刻：之后的采集可以把「不比此刻更新」的文件
-	// 视作未变，从而不必读盘哈希。
-	matTS := time.Now().UnixNano()
+	// 重写完成后必须让「惰性 stat 判定」失效。
+	//
+	// 惰性判定的不变量是「物化完成时磁盘内容 == base_tree」。rebase **打破**了
+	// 它：磁盘被写成了 res.Tree，而 base_tree 是新基准，两者在改动过的路径上
+	// 不同。若不处理，下一次采集会把这些路径直接判成「未变、等于基准」，于是
+	// **agent 的全部改动从 op-log 里消失**（真机上表现为 rebase 之后
+	// ws_info 的 captured_ops 变成 0、land 报 NOT_DIRTY）。
+	//
+	// 两件事一起做：
+	//   - 物化时刻置 0 -> 下一次采集走全量读，结果一定正确；
+	//   - 清掉本工作区的 stat 缓存 -> 防止「mtime/size 恰好没变」被快路径误判。
+	// 那次全量采集之后缓存就重新填好了，后续采集照常走快路径。
+	if _, err := m.db.StatCache().Clear(wsID); err != nil {
+		return nil, err
+	}
+	matTS := int64(0)
 	if err := m.db.UpdateWorkspaceBase(wsID, newBase, w.BaseVersion, m.now()); err != nil {
 		return nil, err
 	}

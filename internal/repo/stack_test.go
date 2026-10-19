@@ -348,3 +348,76 @@ func TestStackParentAndChildEditSameFile(t *testing.T) {
 			"说明折叠集合的重放顺序错了", got, want)
 	}
 }
+
+// TestRebaseThenLandKeepsChanges 是真机上发现的缺陷的回归测试。
+//
+// 症状：ws_rebase 之后，工作区的 op-log 变成空 —— **agent 的全部改动从
+// 采集结果里消失**，land 直接报 NOT_DIRTY。
+//
+// 根因：惰性 stat 判定的不变量是「物化完成时磁盘内容 == base_tree」，而 rebase
+// 把磁盘写成了重放结果（≠ 新基准），不变量被打破；那些「mtime 不比物化时刻新」
+// 的路径被直接判成「未变、等于基准」，于是改动全部消失。
+//
+// 这个测试必须在 rebase **之后**再检查 op 与落地，否则抓不到。
+func TestRebaseThenLandKeepsChanges(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "a0\n")
+	e.seed("keep.txt", "keep\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+
+	// 工作区改两个文件，先不落地。
+	w := e.open("", "搭车工作区")
+
+	// 让 head 前进（另一个工作区落地），这样上面那个的基准就过期了。
+	h := e.open("", "推 head")
+	e.write(h.ID, "a.txt", "a0\n")    // 制造一次真实的版本推进
+	e.write(h.ID, "other.txt", "o\n") // 新增一个文件
+	if _, err := e.r.Land(h.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 现在给搭车的那个工作区写下自己的改动。
+	e.write(w.ID, "a.txt", "a0\nBY-TARGET\n")
+	e.write(w.ID, "keep.txt", "keep-CHANGED\n")
+
+	rb, err := e.r.WS.Rebase(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rb.Rebased {
+		t.Fatal("应当真的 rebase（基准已过期）")
+	}
+
+	// ★ 核心断言：改动必须还在 op-log 里。
+	ops, err := e.r.DB.ListOps(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 {
+		t.Fatal("★ rebase 之后 op-log 为空 —— agent 的改动从采集结果里消失了")
+	}
+
+	// ★ 而且必须能落地。
+	res, err := e.r.Land(w.ID)
+	if err != nil {
+		t.Fatalf("★ rebase 之后无法落地: %v", err)
+	}
+	v, err := e.r.DB.GetVersion(res.VersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, _ := e.r.Store.GetTree(v.Tree)
+	// 本侧改动保留
+	if got, err := readTreeFile(e, tr, "keep.txt"); err != nil || got != "keep-CHANGED\n" {
+		t.Fatalf("keep.txt = %q err=%v", got, err)
+	}
+	if got, err := readTreeFile(e, tr, "a.txt"); err != nil || got != "a0\nBY-TARGET\n" {
+		t.Fatalf("a.txt = %q err=%v", got, err)
+	}
+	// rebase 的意义：拿到 head 的改动
+	if got, err := readTreeFile(e, tr, "other.txt"); err != nil || got != "o\n" {
+		t.Fatalf("other.txt = %q err=%v（rebase 没把新基准的内容带过来）", got, err)
+	}
+}

@@ -138,6 +138,24 @@ func (s *StatCache) DeleteUnder(wsID, prefix string) {
 	})
 }
 
+// Clear 清空某个工作区的全部 stat 缓存，返回删除行数。
+//
+// 用途：rebase 会**重写**工作区内容，而缓存里记的是重写之前的 stat 与对象 id。
+// 留着它不仅会拖慢下一次采集（都要重新比对），更危险的是「mtime 与 size 恰好
+// 都没变」的路径会被快路径误判为未变，直接返回旧对象 id。
+func (s *StatCache) Clear(wsID string) (int64, error) {
+	var n int64
+	err := s.db.withWrite(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM stat_cache WHERE ws_id = ?`, wsID)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
+}
+
 // Count 返回某工作区的缓存条目数。
 func (s *StatCache) Count(wsID string) (int64, error) {
 	var n int64
