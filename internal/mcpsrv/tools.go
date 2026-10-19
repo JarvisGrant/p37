@@ -647,7 +647,7 @@ func errorsIsLandConflict(err error) bool { return errors.Is(err, repo.ErrLandCo
 
 func (s *Server) registerSync() {
 	s.register("sync_status",
-		"返回本地与远端的同步状态（P2/P3；当前为占位实现）。",
+		"返回本地同步状态。P3 的远端 push/fetch 尚未实现：当前 remote 相关字段为空，supported=false。",
 		`{"type":"object","additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			head, ok, err := s.R.Head()
@@ -658,8 +658,10 @@ func (s *Server) registerSync() {
 			if ok {
 				h = head.String()
 			}
+			// 不把本地 head 伪装成远端 head：P3 未实现时如实返回空。
 			return map[string]any{
-				"local_head": h, "remote_head": h,
+				"local_head": h, "remote_head": "",
+				"remote_configured": false, "supported": false,
 				"pending_packages": 0, "last_sync_ts": 0,
 			}, nil
 		})
