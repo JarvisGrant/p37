@@ -289,12 +289,22 @@ Diff(T0,T1)   --Replay--> T2
 
 ## 下一步
 
-### 到验证前的剩余工作
+### 仍然未做
 
-1. **fs watcher**（§5.2 触发源 a/c）：`fsnotify` + debounce + 轮转扫描调度器（§4.7）。
-2. **行级移动检测**（§5.3 第 1、2 趟）：精确块移动 + 相似度移动。
-4. **P2 的包与 GC**：`package` / mark-sweep / scrub / 保留策略。
-5. `ws_rebase` 的「换 lower 只写 delta」优化。
+1. **行级移动检测**（§5.3 第 1、2 趟）：精确块移动 + 相似度移动。
+   目前只有树级重命名检测（内容 hash 相同或相似度 ≥ 阈值）。
+   影响：把一段代码整体搬走会被记成「删除 + 插入」，rebase 锚点质量下降。
+2. **P2 的包与 GC**：`package`（checkpoint/delta）/ mark-sweep / scrub / 保留策略。
+   现状：一对象一文件，10 万文件约 20 万对象；`syncfs` 之后元数据已不是瓶颈，
+   但打包仍能把小文件场景再压一个量级。
+   `blame_cache` 的 GC 钩子（`DeleteBlameCacheForVersion`）已就位，等 GC 接。
+3. **`ws_rebase` 的「换 lower 只写 delta」**：现在把整棵目标树写进 upper
+   （正确但浪费磁盘）；规格的做法需要手工生成 whiteout。
+4. 符号链接**内容变化**目前走 delete + create（语义正确，op 数偏多）。
+
+### 下一步建议顺序
+
+`行级移动检测` → `P2 包与 GC` → `ws_rebase 增量重挂`。
 
 ### 真机结论（已完成）
 
