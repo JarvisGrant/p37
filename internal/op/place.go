@@ -164,6 +164,11 @@ func abs(v int) int {
 //   - Remove 为空（纯插入）：对侧在同一锚点插入过内容。本侧 op 的 seq 必然
 //     晚于目标里已有的内容，因此把本侧内容拼在**后面**（即紧挨 After 之前），
 //     这就是 §6.3 的「按 op seq 拼接」。
+//
+// 锚点定位允许**逐级放宽上下文**：从完整的 Before/After 开始，找不到就在
+// 目标里试更短的后缀/前缀，直到能唯一匹配。这样「在文件末尾追加一行」不会
+// 因为紧邻的上一行被对侧改过就退化成一个假冲突 —— 这是最常见的误报来源。
+// 每一级都要求唯一匹配，因此放宽不会把改动落到错误的位置。
 func autoMerge(h *Hunk, target [][]byte) ([][]byte, bool) {
 	if len(h.Remove) > 0 {
 		pos := matchPositions(target, h.Remove, 1)
@@ -172,40 +177,85 @@ func autoMerge(h *Hunk, target [][]byte) ([][]byte, bool) {
 		}
 		return spliceAt(target, pos[0], len(h.Remove), h.Insert), true
 	}
+	return autoMergeInsert(h, target)
+}
 
-	// 纯插入：需要 Before / After 定位锚点，且二者都必须唯一。
-	switch {
-	case len(h.Before) == 0 && len(h.After) == 0:
+// autoMergeInsert 处理纯插入 hunk 的自动合并。
+//
+// 判定顺序（每一步都要求**唯一匹配**，都不成立就退回冲突）：
+//
+//  1. After 可定位 -> 插在它前面，即对侧已插入内容的**后面**（§6.3 的 seq 拼接）。
+//  2. After 为空 -> 本侧是**在文件末尾追加**。追加位置不依赖紧邻的上文，
+//     因此即使上一行刚被对侧改过也应当合并（这是最常见的误报来源：
+//     父工作区改了某行，子工作区在文件尾部追加）。
+//  3. Before 可定位 -> 插在它后面。
+func autoMergeInsert(h *Hunk, target [][]byte) ([][]byte, bool) {
+	if len(h.Before) == 0 && len(h.After) == 0 {
 		// 无锚点（例如向空文件插入）。只有目标为空时才没有歧义。
 		if len(target) == 0 {
 			return append([][]byte(nil), h.Insert...), true
 		}
 		return nil, false
-
-	case len(h.Before) == 0:
-		pos := matchPositions(target, h.After, 1)
-		if len(pos) != 1 {
-			return nil, false
-		}
-		return spliceAt(target, pos[0], 0, h.Insert), true
-
-	case len(h.After) == 0:
-		pos := matchPositions(target, h.Before, 1)
-		if len(pos) != 1 {
-			return nil, false
-		}
-		return spliceAt(target, pos[0]+len(h.Before), 0, h.Insert), true
-
-	default:
-		bp := matchPositions(target, h.Before, 1)
-		if len(bp) != 1 {
-			return nil, false
-		}
-		start := bp[0] + len(h.Before)
-		ap := matchPositions(target[start:], h.After, 1)
-		if len(ap) != 1 {
-			return nil, false
-		}
-		return spliceAt(target, start+ap[0], 0, h.Insert), true
 	}
+
+	from, haveFrom := 0, false
+	if len(h.Before) > 0 {
+		if end, ok := anchorAfter(target, h.Before); ok {
+			from, haveFrom = end, true
+		}
+	}
+
+	if len(h.After) > 0 {
+		if at, ok := anchorBefore(target, from, h.After); ok {
+			return spliceAt(target, at, 0, h.Insert), true
+		}
+	} else {
+		// 末尾追加。注意行切分把「文件以换行结尾」表示为一个尾随空元素，
+		// 因此追加点是 len-1 而不是 len。
+		return spliceAt(target, appendIndex(target), 0, h.Insert), true
+	}
+
+	if haveFrom {
+		return spliceAt(target, from, 0, h.Insert), true
+	}
+	return nil, false
+}
+
+// appendIndex 返回「在文件末尾追加一行」的插入下标。
+//
+// 行切分把「以换行结尾」表示成尾随的空元素，所以有尾随空元素时插入点要
+// 退一格，否则会多出一个空行。
+func appendIndex(target [][]byte) int {
+	if n := len(target); n > 0 && len(target[n-1]) == 0 {
+		return n - 1
+	}
+	return len(target)
+}
+
+// anchorAfter 返回 before 的**最长唯一可定位后缀**在 target 中匹配结束的位置。
+func anchorAfter(target, before [][]byte) (int, bool) {
+	for k := len(before); k >= 1; k-- {
+		suf := before[len(before)-k:]
+		if pos := matchPositions(target, suf, 1); len(pos) == 1 {
+			return pos[0] + k, true
+		}
+	}
+	return 0, false
+}
+
+// anchorBefore 返回 after 的**最长唯一可定位前缀**在 target[from:] 中的起始位置。
+func anchorBefore(target [][]byte, from int, after [][]byte) (int, bool) {
+	if from < 0 {
+		from = 0
+	}
+	if from > len(target) {
+		return 0, false
+	}
+	tail := target[from:]
+	for k := len(after); k >= 1; k-- {
+		if pos := matchPositions(tail, after[:k], 1); len(pos) == 1 {
+			return from + pos[0], true
+		}
+	}
+	return 0, false
 }

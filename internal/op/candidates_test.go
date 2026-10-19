@@ -226,3 +226,94 @@ func TestCandidatesPerKind(t *testing.T) {
 		}
 	}
 }
+
+// TestAutoMergeAppendAfterChangedNeighbor 覆盖真机上暴露的误报：
+// 本侧在文件末尾追加一行，而对侧刚改过紧邻的那一行。
+//
+// 这是最常见的场景（父工作区改了某行，子工作区在文件尾部追加）。
+// 若锚点定位只认完整的 Before 上下文，这里会报一个**假冲突**；
+// 逐级放宽到 Before 的最长唯一后缀就能正确定位。
+func TestAutoMergeAppendAfterChangedNeighbor(t *testing.T) {
+	f := newFixture(t, "ws_1")
+	const base = "l1\nl2\nl3\n"
+	// 对侧（已落地的父）把 l1 改成了 L1。
+	other := f.treeWith("a.txt", "L1\nl2\nl3\n")
+
+	// 本侧的 hunk 是「在末尾追加 X」，上下文取自**未改动**的基准。
+	o := Op{
+		ID: "op_ap", WsID: "ws_1", Seq: 2, Kind: KindModify, Path: "a.txt",
+		BaseFile: f.fileID("a.txt", base),
+		Hunks: []Hunk{{
+			Before: lines("l1", "l2", "l3"),
+			Insert: lines("X"),
+		}},
+	}
+	res := f.replay(other, o)
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("末尾追加不该报冲突（假冲突）: %+v", res.Conflicts)
+	}
+	if res.AutoMerged != 1 {
+		t.Fatalf("AutoMerged = %d，期望 1", res.AutoMerged)
+	}
+	// 行切分不含尾随空行，JoinLines 会补回结尾换行。
+	if got, _ := f.read(res.Tree, "a.txt"); got != "L1\nl2\nl3\nX\n" {
+		t.Fatalf("追加结果 = %q", got)
+	}
+}
+
+// TestAutoMergeInsertBetweenChangedLines 覆盖「在中间插入，两侧上下文都被改过」。
+// 只要仍有一段唯一的锚点可用，就应当合并；完全失去锚点则退回冲突。
+func TestAutoMergeInsertBetweenChangedLines(t *testing.T) {
+	f := newFixture(t, "ws_1")
+	const base = "A\nB\nC\nD\nE\n"
+	// 对侧改了 A 和 E —— 本侧 hunk 的上下文两端都被动了，但 B C D 段仍唯一。
+	other := f.treeWith("a.txt", "A2\nB\nC\nD\nE2\n")
+
+	o := Op{
+		ID: "op_mid", WsID: "ws_1", Seq: 2, Kind: KindModify, Path: "a.txt",
+		BaseFile: f.fileID("a.txt", base),
+		Hunks: []Hunk{{
+			Before: lines("A", "B", "C"),
+			Insert: lines("NEW"),
+			After:  lines("D", "E"),
+		}},
+	}
+	res := f.replay(other, o)
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("仍可唯一锚定，不该冲突: %+v", res.Conflicts)
+	}
+	if got, _ := f.read(res.Tree, "a.txt"); got != "A2\nB\nC\nNEW\nD\nE2\n" {
+		t.Fatalf("插入结果 = %q", got)
+	}
+}
+
+// TestAutoMergeAppendWithTrailingEmptyAfter 精确复现真机场景：
+// base 以换行结尾（行切分后有尾随空元素），本侧在末尾追加，
+// 对侧改了紧邻插入点的**内容行**。
+func TestAutoMergeAppendWithTrailingEmptyAfter(t *testing.T) {
+	f := newFixture(t, "ws_1")
+	const base = "line1\nline2\nline3\nline4\nline5\nline6\n"
+	// 对侧改了第 6 行。
+	other := f.treeWith("m.txt", "line1\nline2\nline3\nline4\nline5\nSIX-CHANGED\n")
+
+	// 本侧追加（锚点取 base 的末尾 3 行 + 尾随空行）。
+	o := Op{
+		ID: "op_ap2", WsID: "ws_1", Seq: 2, Kind: KindModify, Path: "m.txt",
+		BaseFile: f.fileID("m.txt", base),
+		Hunks: []Hunk{{
+			Before: lines("line4", "line5", "line6"),
+			Insert: lines("appended"),
+			After:  lines(""),
+		}},
+	}
+	res := f.replay(other, o)
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("末尾追加不该报冲突: %+v", res.Conflicts)
+	}
+	if res.AutoMerged != 1 {
+		t.Fatalf("AutoMerged = %d，期望 1", res.AutoMerged)
+	}
+	if got, _ := f.read(res.Tree, "m.txt"); got != "line1\nline2\nline3\nline4\nline5\nSIX-CHANGED\nappended\n" {
+		t.Fatalf("结果 = %q", got)
+	}
+}

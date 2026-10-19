@@ -76,6 +76,31 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 冻结快照（父后续改动对子不可见，D23）、兄弟分叉各自落地、落地后幸存子的血缘重挂、
 `ws_drop` 的 `cascade` 语义（子重挂到祖父而非被删）。
 
+### 自动合并的锚点定位（S23）
+
+真机验证时发现一个**假冲突**：本侧在文件末尾追加一行，而对侧刚刚改过紧邻的
+那一行。本侧 hunk 的 `Before` 上下文里含有被改的那行，`place` 找不到完整模式；
+而当时 `autoMerge` 只肯用完整的 `Before`/`After` 做锚点，于是报冲突。
+
+这是最常见的场景（父工作区改了某行、子工作区在文件尾追加），必须消解。
+
+| 改动 | 说明 |
+|---|---|
+| `After` 为空 ⟹ 末尾追加 | 直接追加到文件末尾。追加位置**不依赖**紧邻的上文，因此上一行被改过也不影响。 |
+| `Before`/`After` 逐级放宽 | 从完整上下文开始，找不到就试更短的**后缀/前缀**，直到唯一匹配。每一级都要求唯一，因此放宽不会把改动落到错误位置。 |
+| `appendIndex` | 行切分把「以换行结尾」表示成尾随空元素，追加点要取 `len-1`，否则会多出一个空行。 |
+
+结果（**真机复验**，全新仓库）：
+
+```
+B. 对侧改末行 + 本侧末尾追加 -> can_land=true, conflicts=0, auto_merged=1
+C. 两侧改同一行            -> can_land=false, conflicts=1, 候选 [take_lower, take_upper]
+D. rename 跟随（对侧改内容）-> can_land=true, conflicts=0
+```
+
+回归测试：`TestAutoMergeAppendAfterChangedNeighbor`、
+`TestAutoMergeAppendWithTrailingEmptyAfter`、`TestAutoMergeInsertBetweenChangedLines`。
+
 ### fs watcher（S22，§5.2 触发源 a/c + §4.7）
 
 新增 `internal/watch`：把「什么时候该采集」从采集本身里拆出来。
