@@ -204,6 +204,9 @@ func Open(root string, opt Options) (*Repo, error) {
 	if gc.VerifyOnRead == "" {
 		gc.VerifyOnRead = DefaultGCOptions().VerifyOnRead
 	}
+	// 读时校验策略（§8.3、附录 B 的 gc.verify_on_read）。
+	store.SetVerifyOnRead(cas.ParseVerifyMode(gc.VerifyOnRead))
+
 	return &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
 		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
 		landSem: make(chan struct{}, qmax)}, nil

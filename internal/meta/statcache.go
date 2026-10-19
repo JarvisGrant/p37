@@ -177,3 +177,22 @@ func hashOrNil(id hash.ID) any {
 }
 
 var _ capture.StatCache = (*StatCache)(nil)
+
+// ClearAll 清空全部 stat 缓存并返回删除行数。
+//
+// 为什么需要它：GC 会扫掉「只被缓存引用」的对象（例如采集过程中产生的中间
+// Tree 对象 —— 它们不属于任何版本的树，只出现在 stat_cache.object_id 里）。
+// 缓存留着悬空 id 会让下一次采集直接返回一个不存在的对象 id，树就烂了。
+// stat_cache 本来就是**纯缓存**，清掉即可，下一轮采集会重建。
+func (s *StatCache) ClearAll() (int64, error) {
+	var n int64
+	err := s.db.withWrite(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM stat_cache`)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
+}

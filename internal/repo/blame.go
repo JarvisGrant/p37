@@ -142,7 +142,7 @@ func (r *Repo) blameOwners(versionID hash.ID, path string, noCache bool) ([]hash
 		}
 		p, err := r.DB.GetVersion(cur.Parent)
 		if err != nil {
-			return nil, hash.ID{}, err
+			break // 剪枝边界（§10.3）：祖先已被 GC 回收，视作链的起点
 		}
 		if _, ok, err := r.linesAt(p.Tree, path); err != nil {
 			return nil, hash.ID{}, err

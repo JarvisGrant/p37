@@ -12,6 +12,7 @@ import (
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/op"
+	"github.com/chenyiwen/p37/internal/tree"
 )
 
 // VersionDetail 是 version_show 的返回（附录 K）。
@@ -55,23 +56,32 @@ var ErrVersionNotFound = errors.New("repo: 版本不存在")
 
 // diffVersions 由两个版本的树推导 op（用于统计与展示）。
 func (r *Repo) diffVersions(a, b hash.ID) ([]op.Op, error) {
-	av, err := r.DB.GetVersion(a)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrVersionNotFound, a)
-	}
-	bv, err := r.DB.GetVersion(b)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrVersionNotFound, b)
-	}
-	at, err := r.Store.GetTree(av.Tree)
+	at, err := r.versionTree(a)
 	if err != nil {
 		return nil, err
 	}
-	bt, err := r.Store.GetTree(bv.Tree)
+	bt, err := r.versionTree(b)
 	if err != nil {
 		return nil, err
 	}
 	return capture.Diff("__diff__", at, bt, r.Store, r.CaptureOpt)
+}
+
+// versionTree 返回版本的树；**版本已被剪枝时返回空树**（§10.3）。
+//
+// 为什么这是对的：剪枝之后最老的那个保留版本就成了新的根，它对「空」的差异
+// 就是「整个仓库都是新增的」—— 这正是它对使用者应当呈现的样子。
+// 若在这里报 ErrVersionNotFound，剪枝一次之后 version_show / version_diff
+// 就全废了。
+func (r *Repo) versionTree(id hash.ID) (*tree.Tree, error) {
+	v, err := r.DB.GetVersion(id)
+	if err != nil {
+		if errors.Is(err, meta.ErrNotExist) {
+			return &tree.Tree{}, nil
+		}
+		return nil, err
+	}
+	return r.Store.GetTree(v.Tree)
 }
 
 // FileDiff 是 version_diff 的单文件条目。
@@ -289,7 +299,10 @@ func (r *Repo) WalkHead(head hash.ID, fn func(id string) error) error {
 	for {
 		v, err := r.DB.GetVersion(cur)
 		if err != nil {
-			return fmt.Errorf("版本 %s 不可读: %w", cur, err)
+			// 剪枝边界：gc 会删掉最老的一批版本，链上会留下指向已删除版本的
+			// parent。这时**正常结束**，而不是报错 —— 否则剪枝一次之后
+			// fsck 就再也跑不起来了。
+			return nil
 		}
 		if _, err := r.Store.GetTree(v.Tree); err != nil {
 			return fmt.Errorf("版本 %s 的树 %s 不可读: %w", cur, v.Tree, err)

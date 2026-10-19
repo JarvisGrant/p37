@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -54,6 +55,64 @@ type ObjectIndex interface {
 type Store struct {
 	bs  BlobStore
 	idx ObjectIndex
+
+	// verify 是读时校验策略（§8.3，附录 B 的 gc.verify_on_read）。
+	verify VerifyMode
+	// reads 用于 sample 模式下的抽样计数。
+	reads atomic.Uint64
+}
+
+// VerifyMode 是读时校验策略。
+type VerifyMode string
+
+// 读时校验策略取值。
+const (
+	// VerifyOff 完全不校验。仅用于明确知道数据可信的场景（例如刚写完读回）。
+	VerifyOff VerifyMode = "off"
+	// VerifySample 小对象全校验，大对象按比例抽样 —— 大对象解压+哈希的代价
+	// 明显，抽样能在保留防线的前提下省下大部分开销。
+	VerifySample VerifyMode = "sample"
+	// VerifyAlways 每次读取都校验。
+	VerifyAlways VerifyMode = "always"
+)
+
+// verifyLargeRaw 是 sample 模式下「算大对象」的阈值。
+const verifyLargeRaw = 1 << 20
+
+// verifyLargeStride 是 sample 模式下大对象的抽样步长（1/8）。
+const verifyLargeStride = 8
+
+// ParseVerifyMode 解析配置值；无法识别时取 sample。
+func ParseVerifyMode(s string) VerifyMode {
+	switch VerifyMode(s) {
+	case VerifyOff, VerifyAlways, VerifySample:
+		return VerifyMode(s)
+	default:
+		return VerifySample
+	}
+}
+
+// SetVerifyOnRead 设置读时校验策略（§8.3）。
+func (s *Store) SetVerifyOnRead(m VerifyMode) {
+	if m == "" {
+		m = VerifySample
+	}
+	s.verify = m
+}
+
+// shouldVerify 报告本次读取是否需要校验内容哈希。
+func (s *Store) shouldVerify(rawLen int) bool {
+	switch s.verify {
+	case VerifyOff:
+		return false
+	case VerifyAlways:
+		return true
+	default:
+		if rawLen <= verifyLargeRaw {
+			return true
+		}
+		return s.reads.Add(1)%verifyLargeStride == 0
+	}
 }
 
 // NewStore 组合 BlobStore 与 ObjectIndex。
@@ -176,9 +235,13 @@ func (s *Store) Get(id hash.ID) (uint8, []byte, error) {
 		return 0, nil, errors.Join(ErrCorrupt, err)
 	}
 	// 读时校验：内容寻址的对象必须与 key 一致（§8.3）。
-	if got := hash.Sum(raw); got != id {
-		return 0, nil, errors.Join(ErrCorrupt,
-			fmt.Errorf("cas: 对象 %s 内容哈希为 %s", id, got))
+	// 策略来自 gc.verify_on_read；off 会跳过这一步，因此只应在明确可信的
+	// 场景下配置。
+	if s.shouldVerify(len(raw)) {
+		if got := hash.Sum(raw); got != id {
+			return 0, nil, errors.Join(ErrCorrupt,
+				fmt.Errorf("cas: 对象 %s 内容哈希为 %s", id, got))
+		}
 	}
 	return typ, raw, nil
 }
@@ -318,4 +381,71 @@ func (s *Store) RebuildIndex() (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+// ObjectInfo 是一个 CAS 对象的元信息（不解压内容）。
+type ObjectInfo struct {
+	ID   hash.ID
+	Type uint8
+	// StoredSize 是磁盘上的字节数（含 2 字节头与压缩）。
+	StoredSize int64
+}
+
+// Head 只读取对象的**类型与存储长度**，不解压、不校验内容哈希。
+//
+// 全量 Get 会把每个对象解压一遍并算哈希 —— 对 GC 这种「只要知道类型、
+// 好顺着树往下走」的场景是纯浪费（10 GB 仓库要读 10 GB）。
+func (s *Store) Head(id hash.ID) (uint8, int64, error) {
+	rc, st, err := s.bs.Get(keyFor(id))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = rc.Close() }()
+	var hdr [2]byte
+	if _, err := io.ReadFull(rc, hdr[:]); err != nil {
+		return 0, 0, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 头部不可读: %w", id, err))
+	}
+	if hdr[0] != storedFormat {
+		return 0, 0, errors.Join(ErrCorrupt,
+			fmt.Errorf("cas: %s 未知存储格式标记 0x%02x", id, hdr[0]))
+	}
+	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersion {
+		return 0, 0, errors.Join(ErrCorrupt,
+			fmt.Errorf("cas: %s 未知对象类型 0x%02x", id, hdr[1]))
+	}
+	return hdr[1], st.Size, nil
+}
+
+// ListObjects 枚举全部对象（类型 + 存储长度），不解压内容。
+//
+// 与 RebuildIndex 的区别：RebuildIndex 会解压每个对象并校验哈希（用于 fsck），
+// 这里只读头部，因此可以随时在大仓库上跑。
+func (s *Store) ListObjects() ([]ObjectInfo, error) {
+	stats, err := s.bs.ListPrefix("objects/")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ObjectInfo, 0, len(stats))
+	for _, st := range stats {
+		id, err := hash.Parse(st.Key[len("objects/"):])
+		if err != nil {
+			continue // 非对象文件
+		}
+		typ, size, err := s.Head(id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ObjectInfo{ID: id, Type: typ, StoredSize: size})
+	}
+	return out, nil
+}
+
+// DeleteObject 删除一个对象并同步从索引中摘除。
+//
+// 对象不存在不报错：GC 是幂等的，重复运行或与并发写入竞争都不应失败。
+func (s *Store) DeleteObject(id hash.ID) error {
+	if err := s.bs.Delete(keyFor(id)); err != nil && !errors.Is(err, ErrNotExist) {
+		return err
+	}
+	return s.idx.Remove(id)
 }

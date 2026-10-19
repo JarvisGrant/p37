@@ -102,6 +102,53 @@ D. rename 跟随（对侧改内容）-> can_land=true, conflicts=0
 回归测试：`TestAutoMergeAppendAfterChangedNeighbor`、
 `TestAutoMergeAppendWithTrailingEmptyAfter`、`TestAutoMergeInsertBetweenChangedLines`。
 
+### 保留与 GC（S25，§10）+ 读时校验（§8.3）
+
+这是「仓库只增不减」的正解：此前 `retention.*` 与 `gc.*` 整组配置零引用，
+`p37 gc` 只清孤儿工作区目录，**没有任何对象回收**。
+
+新实现分两件事：
+
+| | 做什么 |
+|---|---|
+| **mark-sweep** | 扫掉不可达的 CAS 对象（磁盘空间真正的大头） |
+| **retention** | 剪掉最老的一批版本行（§10.3） |
+
+根集合（§10.1）实现了 4 条，其中**第 4 条规格里没写但必须有**：
+
+1. `mainline_head`
+2. 保留策略命中的 version
+3. 所有活跃工作区的 `base_tree`
+4. **活跃工作区 op 引用的内容对象** —— 采集产出的 FileContent 只被 op 表引用，
+   不属于任何版本的树。漏了它，下一次 land 会去读一个已被扫掉的对象。
+
+实现要点：
+
+- **标记阶段只解压 Tree 与 FileContent**（都小），Blob 是叶子，只看头部字节
+  不解压 —— 所以 10 GB 仓库的标记不需要读那 10 GB。新增 `Store.Head()` 与
+  `Store.ListObjects()`（对应 `RebuildIndex` 的「全量解压+校验」是 fsck 的路径）。
+- **GC 与 land 互斥**（共用 `landMu`）：land 正在拼树时把对象扫掉就完了。
+- **顺序：先剪版本行、再删对象。** 反过来会出现「版本还在但对象没了」的窗口。
+- **GC 后清空 `stat_cache`。** 采集过程中产生的中间 Tree 对象只被 stat 缓存
+  引用；扫掉它们之后缓存里就是悬空 id，下一次采集会直接返回不存在的对象 id，
+  树立刻烂掉。缓存是纯的，清掉即可（有回归用例覆盖）。
+- **版本 id 不能改**（Merkle 包含 parent），所以剪枝会让最老的保留版本留下一个
+  指向已删版本的 parent。链的读取路径（`VersionChain` / `WalkHead` / `blame` /
+  `version_show` / `version_diff`）全部改成**把「祖先不可读」当作链的终点**，
+  而不是报错 —— 否则剪枝一次之后这些功能全废。
+- **读时校验策略**（`gc.verify_on_read`）：`off` / `sample` / `always`。
+  `sample` 对小对象全校验、大对象按 1/8 抽样（大对象解压+哈希的代价明显）。
+- **scrub**（`gc.scrub_sample`）按对象 id 排序后按步长抽样，**确定性**可复现；
+  `p37 gc --scrub` 与 `p37 doctor` 都会跑。
+
+CLI：`p37 gc [--prune] [--scrub] [--report-roots] [--workspaces]`，
+默认只预演，`--prune` 才真删。
+
+回归测试 `internal/repo/gc_test.go`（7 个）：剪枝+回收、预演无副作用、
+**活跃工作区的 op 引用对象不被扫**（并能在 GC 后正常落地）、被工作区引用的版本
+不被剪、剪枝后链仍可走、幂等、**stat 缓存清空后重新采集仍正确**、
+**scrub 能发现被篡改的对象**。
+
 ### blame（S24，§12.2）
 
 `internal/repo/blame.go` 实现行级归因，MCP 工具 `blame` 与 CLI `p37 blame` 都已接通。

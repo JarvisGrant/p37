@@ -33,8 +33,8 @@ const usage = `p37 —— AI 原生版本控制系统
   status <root>                   打印仓库摘要
   doctor <root>                   运行部署自检（附录 G.4）
   fsck <root>                     校验对象完整性与封闭性
-  gc <root> [--workspaces] [--report-roots]
-                                  回收与孤儿清理
+  gc <root> [--prune] [--scrub] [--report-roots] [--workspaces]
+                                  保留策略 + 对象回收 + 抽样校验
   migrate <root>                  向前迁移 format_ver
   ignore-check <root> <path>      检查某路径是否被忽略
 
@@ -324,6 +324,26 @@ func cmdDoctor(root string, out, errw io.Writer) int {
 		}
 	}
 
+	// 6b. 抽样校验（§10.4）：默认按 gc.scrub_sample 抽，能立刻暴露静默损坏。
+	if cfg.GC.ScrubSample > 0 {
+		r0, err := openRepo(root)
+		if err == nil {
+			if res, serr := r0.Scrub(cfg.GC.ScrubSample); serr == nil {
+				if len(res.Corrupt) > 0 {
+					report("对象抽样校验", false,
+						fmt.Sprintf("%d 个损坏（共抽 %d 个）", len(res.Corrupt), res.Checked))
+					for _, c := range res.Corrupt {
+						fmt.Fprintf(out, "        损坏: %s\n", c)
+					}
+				} else {
+					report("对象抽样校验", true,
+						fmt.Sprintf("抽 %d 个，全部完好（比例 %g）", res.Checked, cfg.GC.ScrubSample))
+				}
+			}
+			_ = r0.Close()
+		}
+	}
+
 	// 7. 仓库可打开且格式匹配。
 	r, err := openRepo(root)
 	if err != nil {
@@ -399,63 +419,113 @@ func cmdGC(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 
-	reportOnly := true
-	workspacesOnly := false
+	prune, scrub, workspacesOnly, rootsOnly := false, false, false, false
 	for _, a := range args {
 		switch a {
 		case "--prune":
-			reportOnly = false
+			prune = true
+		case "--scrub":
+			scrub = true
 		case "--workspaces":
 			workspacesOnly = true
 		case "--report-roots":
-			reportOnly = true
+			rootsOnly = true
+		default:
+			fmt.Fprintf(errw, "未知参数 %q\n", a)
+			return 2
 		}
 	}
 
-	if workspacesOnly || reportOnly {
-		all, err := r.WS.List()
-		if err != nil {
-			return fail(errw, err)
-		}
-		known := map[string]bool{}
-		for _, w := range all {
-			known[w.ID] = true
-		}
-		entries, err := os.ReadDir(filepath.Join(root, "workspaces"))
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fail(errw, err)
-		}
-		var orphans []string
-		for _, e := range entries {
-			if !e.IsDir() || known[e.Name()] {
-				continue
-			}
-			orphans = append(orphans, e.Name())
-		}
-		sort.Strings(orphans)
-		fmt.Fprintf(out, "活跃工作区 %d 个，孤儿目录 %d 个\n", len(all), len(orphans))
-		for _, o := range orphans {
-			fmt.Fprintf(out, "  孤儿 %s\n", o)
-		}
-		if !reportOnly {
-			for _, o := range orphans {
-				if err := os.RemoveAll(filepath.Join(root, "workspaces", o)); err != nil {
-					return fail(errw, err)
-				}
-			}
-			fmt.Fprintf(out, "已删除 %d 个孤儿目录\n", len(orphans))
-		}
-	}
 	if workspacesOnly {
-		return 0
+		return gcWorkspaces(r, root, prune, out, errw)
 	}
 
-	freed, err := r.MM.Evict()
+	// 保留 + mark-sweep（§10）。默认只报告（dry-run），--prune 才真的删。
+	rep, err := r.GC(!prune || rootsOnly)
 	if err != nil {
 		return fail(errw, err)
 	}
-	fmt.Fprintf(out, "已淘汰基底缓存 %s\n", humanBytes(freed))
-	fmt.Fprintln(out, "提示: 对象级 mark-sweep 与保留策略计划于 P2 交付。")
+	fmt.Fprintf(out, "版本: 共 %d，保留 %d，%s %d\n",
+		rep.VersionTotal, rep.VersionKeep,
+		map[bool]string{true: "将剪枝", false: "已剪枝"}[rep.DryRun], rep.VersionDrop)
+	fmt.Fprintf(out, "对象: 共 %d，可达 %d，%s %d（%s）\n",
+		rep.ObjectTotal, rep.ObjectKeep,
+		map[bool]string{true: "可回收", false: "已删除"}[rep.DryRun],
+		rep.ObjectDrop, humanBytes(rep.DropBytes))
+	fmt.Fprintf(out, "根（谁钉住了什么）:\n")
+	for _, rt := range rep.Roots {
+		fmt.Fprintf(out, "  %-16s %-20s %4d 个对象  %s\n",
+			rt.Kind, rt.ID, rt.Count, rt.Note)
+	}
+	if !rep.DryRun {
+		fmt.Fprintf(out, "已剪枝版本 %d，删除对象 %d，回收 %s\n",
+			rep.VersionsPruned, rep.ObjectsDeleted, humanBytes(rep.BytesReclaimed))
+		fmt.Fprintf(out, "已清空 stat 缓存 %d 行（避免悬空对象引用，下一轮采集会重建）\n",
+			rep.StatCacheCleared)
+	}
+
+	// 基底缓存 LRU（§4.8）。
+	if freed, err := r.MM.Evict(); err == nil && freed > 0 {
+		fmt.Fprintf(out, "已淘汰 overlay 基底缓存 %s\n", humanBytes(freed))
+	}
+
+	if scrub {
+		res, err := r.Scrub(r.GCOptions().ScrubSample)
+		if err != nil {
+			return fail(errw, err)
+		}
+		fmt.Fprintf(out, "scrub: 抽样校验 %d 个对象（%s），损坏 %d 个\n",
+			res.Checked, humanBytes(res.Bytes), len(res.Corrupt))
+		for _, c := range res.Corrupt {
+			fmt.Fprintf(errw, "  损坏: %s\n", c)
+		}
+		if len(res.Corrupt) > 0 {
+			return 1
+		}
+	}
+
+	if rep.DryRun {
+		fmt.Fprintln(out, "（这是预演；加 --prune 才会真的删除）")
+	}
+	return 0
+}
+
+// gcWorkspaces 处理孤儿工作区目录（§4.8）。
+func gcWorkspaces(r *repo.Repo, root string, prune bool, out, errw io.Writer) int {
+	all, err := r.WS.List()
+	if err != nil {
+		return fail(errw, err)
+	}
+	known := map[string]bool{}
+	for _, w := range all {
+		known[w.ID] = true
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "workspaces"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fail(errw, err)
+	}
+	var orphans []string
+	for _, e := range entries {
+		if !e.IsDir() || known[e.Name()] {
+			continue
+		}
+		orphans = append(orphans, e.Name())
+	}
+	sort.Strings(orphans)
+	fmt.Fprintf(out, "活跃工作区 %d 个，孤儿目录 %d 个\n", len(all), len(orphans))
+	for _, o := range orphans {
+		fmt.Fprintf(out, "  孤儿 %s\n", o)
+	}
+	if prune {
+		for _, o := range orphans {
+			if err := os.RemoveAll(filepath.Join(root, "workspaces", o)); err != nil {
+				return fail(errw, err)
+			}
+		}
+		fmt.Fprintf(out, "已删除 %d 个孤儿目录\n", len(orphans))
+	} else if len(orphans) > 0 {
+		fmt.Fprintln(out, "（加 --prune 才会删除）")
+	}
 	return 0
 }
 
@@ -700,7 +770,7 @@ func cmdShow(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 	var vid = strings.TrimSpace(id)
-	if vid == "" {
+	if vid == "" || strings.EqualFold(vid, "head") {
 		head, ok, err := r.Head()
 		if err != nil || !ok {
 			return fail(errw, errors.New("无 head"))
@@ -732,7 +802,16 @@ func cmdRevert(root string, args []string, out, errw io.Writer) int {
 		return fail(errw, err)
 	}
 	defer func() { _ = r.Close() }()
-	rv, err := r.Revert(mustHash(args[0]))
+
+	vid := mustVersionArg(args[0])
+	if vid.IsZero() {
+		head, ok, err := r.Head()
+		if err != nil || !ok {
+			return fail(errw, errors.New("无 head"))
+		}
+		vid = head
+	}
+	rv, err := r.Revert(vid)
 	if err != nil {
 		return fail(errw, err)
 	}
@@ -741,6 +820,15 @@ func cmdRevert(root string, args []string, out, errw io.Writer) int {
 }
 
 // --- 小工具 -------------------------------------------------------------
+
+// mustVersionArg 解析版本参数，支持 `head` / `HEAD` / 空（= head）。
+func mustVersionArg(s string) hash.ID {
+	t := strings.TrimSpace(s)
+	if t == "" || strings.EqualFold(t, "head") {
+		return hash.ID{}
+	}
+	return mustHash(t)
+}
 
 func mustHash(s string) hash.ID {
 	id, err := hash.Parse(s)
