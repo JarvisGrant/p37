@@ -1,6 +1,9 @@
 package tree
 
-import "bytes"
+import (
+	"bytes"
+	"sort"
+)
 
 // 本文件实现附录 I 的 histogram diff 与带上下文的 hunk 生成。
 //
@@ -15,6 +18,9 @@ import "bytes"
 
 // DefaultMaxChainLength 是 histogram diff 的链长上限（附录 I.3）。
 const DefaultMaxChainLength = 64
+
+// DefaultMoveSimilarity 是「相似度移动」的默认阈值（附录 B 的 merge.move_similarity）。
+const DefaultMoveSimilarity = 0.6
 
 // Region 表示一个变更区间：A[AStart:AStart+ALen] 被 B[BStart:BStart+BLen] 替换。
 type Region struct {
@@ -162,10 +168,15 @@ func Hunks(a, b [][]byte, ctx int) []Hunk {
 
 // HunksWith 与 Hunks 相同，但可指定 histogram 的链长上限（附录 I.3）。
 func HunksWith(a, b [][]byte, ctx, maxChain int) []Hunk {
+	return hunksFromRegions(a, b, HistogramWith(a, b, maxChain), ctx)
+}
+
+// hunksFromRegions 把变更区间列表转成 hunk（§5.3 的 hunk 生成规则）。
+func hunksFromRegions(a, b [][]byte, raw []Region, ctx int) []Hunk {
 	if ctx < 0 {
 		ctx = 0
 	}
-	regions := mergeAdjacent(HistogramWith(a, b, maxChain))
+	regions := mergeAdjacent(raw)
 	if len(regions) == 0 {
 		return nil
 	}
@@ -202,6 +213,16 @@ func HunksWith(a, b [][]byte, ctx, maxChain int) []Hunk {
 		})
 	}
 	return hunks
+}
+
+// sortRegions 把区间按 (AStart, BStart) 升序排好，保证重放顺序可用。
+func sortRegions(rs []Region) {
+	sort.Slice(rs, func(i, j int) bool {
+		if rs[i].AStart != rs[j].AStart {
+			return rs[i].AStart < rs[j].AStart
+		}
+		return rs[i].BStart < rs[j].BStart
+	})
 }
 
 // mergeAdjacent 只合并 A 侧完全相邻（无中间行）的区间。

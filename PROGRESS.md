@@ -102,6 +102,40 @@ D. rename 跟随（对侧改内容）-> can_land=true, conflicts=0
 回归测试：`TestAutoMergeAppendAfterChangedNeighbor`、
 `TestAutoMergeAppendWithTrailingEmptyAfter`、`TestAutoMergeInsertBetweenChangedLines`。
 
+### 块移动检测（S26，§5.3 第 1、2 趟）
+
+此前 `merge.move_similarity` 零引用，而且**根本不做移动检测**：把一段代码整体
+搬走会被拆成互不相干的「删一处 + 插一处」，插入侧的锚点常常只剩一两行上下文。
+
+实现方式：**不重写 diff 内核**，而是在 histogram 产出的区间列表上做后处理
+（`internal/tree/move.go`）。这样做的好处是正确性仍然由已被大量测试覆盖的
+histogram 保证，移动检测只换**等价**的切分方式。
+
+1. **第 1 趟 精确块移动**：纯删除区间与纯插入区间内容逐字节相同。
+2. **第 2 趟 相似度移动**：按行的**多重集合**相似度 `2·|共有行|/(|x|+|y|)`
+   ≥ `move_similarity`（默认 0.6）。
+3. 其余区间由 histogram 产出，本模块不动。
+4. 重命名检测在 capture 层（`mergeRenames`），不在这里。
+
+检测到一对之后把「删块 + 插块」合并成**一个**区间 —— 于是 hunk 的
+`before/remove/after` 连成一条完整、精确的模式。
+
+**实测效果**（`TestDiffDetectsBlockMove`）：把 5 行代码整块搬到文件开头，
+产出的 op 现在是 **1 个 hunk**（remove 5 行 / insert 5 行），而不是 2 个碎片。
+
+两个实现时踩到的点，都留了注释：
+
+- 只有**纯**删除 / **纯**插入区间参与配对。一个 replace 区间里既有删又有插，
+  那是「改动了这几行」，不是移动。
+- `Move` 必须携带**两个完整区间坐标**，不能只存「内容在另一侧的位置」：
+  删除区间的 `BStart` 与插入区间的 `BStart` 是两回事，用内容位置反查区间会
+  永远找不到（这个 bug 是靠测试里「期望 1 个 hunk 得到 2 个」暴露的）。
+
+回归测试 `internal/tree/move_test.go`（7 个）+ `internal/capture/move_test.go`（2 个）：
+精确移动的六种形态（含单行重排、整段替换、纯追加这些**不该**判为移动的）、
+相似度匹配与阈值生效、合并后模式唯一命中、**开关移动检测都不改变重建结果**、
+确定性、区间不重叠且按 AStart 升序。
+
 ### 保留与 GC（S25，§10）+ 读时校验（§8.3）
 
 这是「仓库只增不减」的正解：此前 `retention.*` 与 `gc.*` 整组配置零引用，

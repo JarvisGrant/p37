@@ -42,6 +42,8 @@ type Options struct {
 	StableRetries int
 	// OnUnstable 在某个文件连续多轮仍不稳定、本轮被跳过时回调（可观测性用）。
 	OnUnstable func(path string)
+	// OnMoves 在某个文件里检测到「块移动」时回调（§5.3 第 1、2 趟）。
+	OnMoves func(path string, moves []tree.Move)
 
 	// BaseEntries 是基准树的扁平视图（仓库相对路径 -> 对象 id，不含目录）。
 	//
