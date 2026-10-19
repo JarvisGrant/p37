@@ -247,6 +247,17 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 	if err := r.DB.InsertVersion(v); err != nil {
 		return hash.ID{}, err
 	}
+	// 写一条血缘记录：否则 blame 会把「导入」这一版报成「journal 已清理」，
+	// 而它恰恰是最需要解释来源的一版。
+	if _, err := r.DB.InsertJournal(meta.JournalEntry{
+		VersionID: v.ID().String(),
+		Agent:     AgentImporter,
+		TaskDesc:  v.TaskDesc,
+		TS:        v.TS,
+		OpsJSON:   "[]",
+	}); err != nil {
+		return hash.ID{}, err
+	}
 	if err := r.writeHead(v.ID()); err != nil {
 		return hash.ID{}, err
 	}

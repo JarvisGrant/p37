@@ -176,10 +176,41 @@ func (s *Server) registerRead() {
 		})
 
 	s.register("blame",
-		"行/hunk 级归因，返回产出该行的 agent 与任务描述（§12.2，P2）。",
-		`{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"array","items":{"type":"integer"}},"granularity":{"type":"string","enum":["line","hunk"]}},"required":["path"],"additionalProperties":false}`,
+		"行/hunk 级归因：返回每一行由哪个版本、哪个 agent、哪次任务引入（§12.2）。",
+		`{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"array","items":{"type":"integer"}},"version_id":{"type":"string"},"granularity":{"type":"string","enum":["line","hunk"]}},"required":["path"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			return nil, coded("INTERNAL", "blame 尚未实现（计划于 P2）")
+			a, err := decode[struct {
+				Path        string `json:"path"`
+				Range       []int  `json:"range"`
+				VersionID   string `json:"version_id"`
+				Granularity string `json:"granularity"`
+			}](raw)
+			if err != nil {
+				return nil, err
+			}
+			if a.Path == "" {
+				return nil, coded("INVALID_ARGUMENT", "path 不能为空")
+			}
+			vid, err := s.resolveVersion(a.VersionID)
+			if err != nil {
+				return nil, err
+			}
+			opt := repo.BlameOptions{VersionID: vid, Granularity: a.Granularity}
+			if len(a.Range) == 2 {
+				opt.From, opt.To = a.Range[0], a.Range[1]
+			} else if len(a.Range) != 0 {
+				return nil, coded("INVALID_ARGUMENT", "range 必须是 [from, to]")
+			}
+			recs, err := s.R.Blame(a.Path, opt)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"path":        a.Path,
+				"version_id":  vid.String(),
+				"granularity": opt.Granularity,
+				"records":     recs,
+			}, nil
 		})
 }
 

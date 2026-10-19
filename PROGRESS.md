@@ -9,11 +9,12 @@
 |---|---|---|
 | **M1 存储底座** | ✅ 完成 | 附录 L.1 的全部单元/属性测试通过 |
 | **M2 树与 op** | 🟡 主体完成 | 缺：行级移动检测；fs watcher 已实现（`internal/watch`） |
+| **P2 归因** | ✅ 完成 | `blame`（§12.2）行级归因 + 缓存 |
 | **M3 工作区与整合** | ✅ 完成 | OverlayFS 已在真机（Ubuntu 26.04 / ext4）验证；重启重挂与未挂载防护已补齐 |
 | **M4 冲突** | ✅ 核心完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
 | **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal；三层栈 + 分叉端到端用例齐备（并借此修掉 S20） |
 
-测试：`go test ./...` 全绿（**124 个测试**）。约 17307 行 Go（含测试）。
+测试：`go test ./...` 全绿（**132 个测试**）。约 17,900 行 Go（含测试）。
 交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
 
 **已可用的端到端路径**（本机用 `copy` 模式验证通过）：
@@ -101,6 +102,33 @@ D. rename 跟随（对侧改内容）-> can_land=true, conflicts=0
 回归测试：`TestAutoMergeAppendAfterChangedNeighbor`、
 `TestAutoMergeAppendWithTrailingEmptyAfter`、`TestAutoMergeInsertBetweenChangedLines`。
 
+### blame（S24，§12.2）
+
+`internal/repo/blame.go` 实现行级归因，MCP 工具 `blame` 与 CLI `p37 blame` 都已接通。
+
+**算法：从文件诞生的那一版正向推进**，而不是从目标版本反向回溯。
+
+反向回溯看起来更自然（「未变更的行归 parent」），但会**丢归属**。举个真实的例子：
+V1 建 `a.txt`（3 行）→ V2 改第 3 行 → V3 改第 1 行。反向回溯从 V3 走到 V2 时把
+未变更的第 1 行交给 V2，再走到 V1 时又交给 V1 —— 第 1 行明明被 V3 改过，却
+被抹成了 V1。正向推进则没有歧义：每一跳把新文件里**被改动的行**判给当前版本，
+其余行沿用上一版的归属。
+
+配套细节：
+
+- 行号剥离行切分产生的尾随空元素 —— 「以换行结尾」是编码产物，不是用户眼里的一行。
+- `import` 现在也写一条 journal。否则 blame 会把「导入」这一版报成
+  「journal 已清理」，而它恰恰是最需要解释来源的一版。
+- 每条记录带 `agent` / `task` —— 这是 git 给不了的能力：**行级 blame 直接返回
+  当时的任务描述**。
+- 结果缓存进 `blame_cache`（附录 J 已有该表），并配了
+  `DeleteBlameCacheForVersion` 供 GC 使用。
+- 新错误码 `PATH_NOT_FOUND`。
+
+回归测试 `internal/repo/blame_test.go`（5 个）：上面那个卡反向回溯的三版例子、
+文件在中间版本诞生、某版本完全没碰该文件、区间裁剪与错误路径、
+**缓存命中与不计算的结果必须逐字段一致**。
+
 ### fs watcher（S22，§5.2 触发源 a/c + §4.7）
 
 新增 `internal/watch`：把「什么时候该采集」从采集本身里拆出来。
@@ -181,7 +209,6 @@ PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约�
 
 - 行级移动检测（§5.3 第 1、2 趟）；目前只有树级重命名检测。
 - `ws_rebase` 的「换 lower 只写 delta」（现为整树写进 upper，正确但费磁盘）。
-- `blame`（§12.2，P2）。
 - P2 的包（pack）与 GC：当前一对象一文件，10 万文件约 20 万对象；`syncfs` 之后
   元数据成本已不是瓶颈，但打包仍能把小文件场景再压一个量级。
 - 符号链接**内容变化**目前走 delete + create（而非 modify），语义正确但 op 数偏多。
@@ -222,7 +249,7 @@ PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约�
 | `internal/mountmgr` | `overlay`（Linux，含 `ProbeOverlay` 自检）与 `copy`（跨平台）两种物化、基底 LRU、大小写冲突检测、标记文件在被跟踪树之外 |
 | `internal/repo` | init / import / **land 流水线**（可恢复的三段提交协议）/ revert / 状态 / 冲突视图 / 租约违规检测 |
 | `internal/meta` | stat_cache / workspace / op / conflict / resolution / journal 的读写；`CommitLand` / `FinishLand` / `RollbackLand` / `ReconcileLand` |
-| `internal/mcpsrv` | 22 个 MCP 工具 + 统一信封 + 错误码映射（附录 K、附录 E） |
+| `internal/mcpsrv` | 22 个 MCP 工具（20 个可用 + 2 个 P2 占位） + 统一信封 + 错误码映射（附录 K、附录 E） |
 | `internal/config` | 附录 B 的配置与默认值 |
 | `cmd/p37` | 运维 CLI（init/import/status/doctor/fsck/gc/migrate/ignore-check + 调试用版本操作） |
 | `cmd/p37d` | 常驻 daemon：flock、unix socket、可选 HTTP（强制 token）、优雅退出 |
@@ -266,7 +293,6 @@ Diff(T0,T1)   --Replay--> T2
 
 1. **fs watcher**（§5.2 触发源 a/c）：`fsnotify` + debounce + 轮转扫描调度器（§4.7）。
 2. **行级移动检测**（§5.3 第 1、2 趟）：精确块移动 + 相似度移动。
-3. **`blame`**（§12.2，P2）：算法已在规格中定稿，未编码。
 4. **P2 的包与 GC**：`package` / mark-sweep / scrub / 保留策略。
 5. `ws_rebase` 的「换 lower 只写 delta」优化。
 

@@ -49,6 +49,7 @@ const usage = `p37 —— AI 原生版本控制系统
   log <root> [limit]
   show <root> <version_id>
   revert <root> <version_id>
+  blame <root> <path> [--range a-b] [--version <id>] [--hunk]
 
 其它：
   version
@@ -127,6 +128,8 @@ func run(args []string, out, errw io.Writer) int {
 		return cmdShow(root, rest[1:], out, errw)
 	case "revert":
 		return cmdRevert(root, rest[1:], out, errw)
+	case "blame":
+		return cmdBlame(root, rest[1:], out, errw)
 	default:
 		fmt.Fprintf(errw, "未知命令 %q\n\n%s", cmd, usage)
 		return 2

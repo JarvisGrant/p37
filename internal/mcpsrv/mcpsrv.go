@@ -157,8 +157,10 @@ func classify(err error) (code, msg string, detail any) {
 		return "NOT_DIRTY", err.Error(), nil
 	case errors.Is(err, repo.ErrLandQueueFull):
 		return "LAND_QUEUE_FULL", err.Error(), nil
+	case errors.Is(err, repo.ErrPathNotFound):
+		return "PATH_NOT_FOUND", err.Error(), nil
 	case errors.Is(err, repo.ErrNotInitialized):
-		return "INTERNAL", err.Error(), nil
+		return "INIT_NOT_DONE", err.Error(), nil
 	case errors.Is(err, meta.ErrNotExist):
 		return "WS_NOT_FOUND", err.Error(), nil
 	case errors.Is(err, op.ErrNoContent):

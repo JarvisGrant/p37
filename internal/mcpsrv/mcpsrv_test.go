@@ -155,6 +155,17 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// blame（§12.2）：导入版本的每一行都必须能归因。
+	bl := h.mustOK("blame", map[string]any{"path": "a.txt"})
+	blRecs, _ := bl["records"].([]any)
+	if len(blRecs) == 0 {
+		t.Fatalf("blame 记录为空: %v", bl)
+	}
+	blFirst, _ := blRecs[0].(map[string]any)
+	if blFirst["version_id"] == nil || blFirst["range"] == nil {
+		t.Fatalf("blame 记录缺少 version_id/range: %v", blFirst)
+	}
+
 	// repo_status
 	st := h.mustOK("repo_status", map[string]any{})
 	repoPart, _ := st["repo"].(map[string]any)
@@ -329,10 +340,13 @@ func TestToolsErrorPaths(t *testing.T) {
 	// 非法 key。
 	h.mustFail("conflict_show", "INTERNAL", map[string]any{"key": "not-a-key"})
 
-	// blame 未实现但必须是结构化错误而不是 panic。
-	env := h.call("blame", map[string]any{"path": "a.txt"})
+	// blame 对不存在的路径必须返回结构化错误码而不是 panic。
+	env := h.call("blame", map[string]any{"path": "definitely-missing.txt"})
 	if ok, _ := env["ok"].(bool); ok {
-		t.Error("blame 应返回未实现错误")
+		t.Error("blame 不存在的路径应失败")
+	}
+	if e, _ := env["error"].(map[string]any); e == nil || e["code"] != "PATH_NOT_FOUND" {
+		t.Errorf("blame 错误码 = %v，期望 PATH_NOT_FOUND", env["error"])
 	}
 
 	// 未知参数应被忽略而不是报错（附录 K.3）。
