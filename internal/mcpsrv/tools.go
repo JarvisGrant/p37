@@ -582,10 +582,11 @@ func landView(res *repo.LandResult) map[string]any {
 		})
 	}
 	out := map[string]any{
-		"ops_count": res.OpsCount,
-		"files":     res.Files,
-		"conflicts": conflicts,
-		"can_land":  res.CanLand,
+		"ops_count":   res.OpsCount,
+		"files":       res.Files,
+		"conflicts":   conflicts,
+		"can_land":    res.CanLand,
+		"auto_merged": res.AutoMerged,
 	}
 	if !res.VersionID.IsZero() {
 		out["version_id"] = res.VersionID.String()

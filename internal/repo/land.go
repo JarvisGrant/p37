@@ -29,7 +29,10 @@ type LandResult struct {
 	Files     []FileStat    `json:"files"`
 	Conflicts []op.Conflict `json:"conflicts"`
 	CanLand   bool          `json:"can_land"`
-	VersionID hash.ID       `json:"-"`
+	// AutoMerged 是被 §6.3 规则自动合并（不产生冲突）的 hunk 数。
+	// 用于让调用方知道「本来会冲突的地方被确定性规则消化掉了多少」。
+	AutoMerged int     `json:"auto_merged"`
+	VersionID  hash.ID `json:"-"`
 }
 
 // ConflictsJSON 返回面向 MCP 的冲突列表（带 key）。
@@ -168,10 +171,11 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	}
 
 	out := &LandResult{
-		OpsCount:  len(allOps),
-		Conflicts: res.Conflicts,
-		Files:     summarize(allOps),
-		CanLand:   len(res.Conflicts) == 0,
+		OpsCount:   len(allOps),
+		Conflicts:  res.Conflicts,
+		Files:      summarize(allOps),
+		CanLand:    len(res.Conflicts) == 0,
+		AutoMerged: res.AutoMerged,
 	}
 	if len(res.Conflicts) > 0 {
 		return out, nil

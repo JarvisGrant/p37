@@ -60,6 +60,11 @@ type ReplayResult struct {
 	Conflicts []Conflict
 	// Resolved 是本次通过已记录 resolution 自动消解的冲突数。
 	Resolved int
+	// AutoMerged 是本次被 §6.3 规则**自动合并**（不产生冲突）的 hunk 数。
+	//
+	// 例如两侧改的是同一文件的不同行 —— 这是最常见的「冲突」，
+	// 按 §6.3 它根本不需要人来裁决。
+	AutoMerged int
 }
 
 // Replay 把 ops 依次重放到 base 树上（§6.5）。
@@ -141,7 +146,7 @@ func (c *replayCtx) contentOf(path string) ([][]byte, bool, error) {
 
 func (c *replayCtx) applyCreate(o *Op) error {
 	if e, ok := c.entries[o.Path]; ok {
-		return c.conflict(o, ConflictOverlappingEdit, fileHunks(e, c.cs), insertHunks(o), nil)
+		return c.conflict(o, ConflictOverlappingEdit, fileHunks(e, c.cs), insertHunks(o))
 	}
 	if o.NewFile.IsZero() {
 		return fmt.Errorf("op: create 缺少 NewFile (op=%s)", o.ID)
@@ -158,9 +163,7 @@ func (c *replayCtx) applyDelete(o *Op) error {
 		return nil // 幂等：已经不存在，视为达成
 	}
 	if e.ID != o.BaseFile {
-		return c.conflict(o, ConflictDeleteVsEdit, fileHunks(e, c.cs), nil,
-			[]Candidate{{Kind: ResolveTakeUpper, Note: "保留被删文件（即放弃 delete）"},
-				{Kind: ResolveTakeLower, Note: "仍然删除"}})
+		return c.conflict(o, ConflictDeleteVsEdit, fileHunks(e, c.cs), nil)
 	}
 	delete(c.entries, o.Path)
 	return nil
@@ -169,12 +172,11 @@ func (c *replayCtx) applyDelete(o *Op) error {
 func (c *replayCtx) applyAttr(o *Op) error {
 	e, ok := c.entries[o.Path]
 	if !ok {
-		return c.conflict(o, ConflictMissingBase, nil, insertHunks(o), nil)
+		return c.conflict(o, ConflictMissingBase, nil, insertHunks(o))
 	}
 	if e.ID != o.BaseFile {
 		// 内容已被第三方改动。若只是 EOL 属性变化，候选为取 upper（§6.3）。
-		return c.conflict(o, ConflictAttr, fileHunks(e, c.cs), insertHunks(o),
-			[]Candidate{{Kind: ResolveTakeUpper, Note: "采用新的 EOL 属性"}})
+		return c.conflict(o, ConflictAttr, fileHunks(e, c.cs), insertHunks(o))
 	}
 	if o.NewFile.IsZero() {
 		return fmt.Errorf("op: attr 缺少 NewFile (op=%s)", o.ID)
@@ -190,7 +192,7 @@ func (c *replayCtx) applyBlobPut(o *Op) error {
 	// 文件当前不存在。
 	if !ok {
 		if !o.BaseFile.IsZero() {
-			return c.conflict(o, ConflictMissingBase, nil, insertHunks(o), nil)
+			return c.conflict(o, ConflictMissingBase, nil, insertHunks(o))
 		}
 		c.entries[o.Path] = tree.Entry{
 			Name: o.Path, Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: o.NewFile,
@@ -208,25 +210,36 @@ func (c *replayCtx) applyBlobPut(o *Op) error {
 	}
 
 	// 目标已被第三方改动：二进制/大文件永不自动合并（§6.5）。
-	return c.conflict(o, ConflictBinary, fileHunks(e, c.cs), insertHunks(o),
-		[]Candidate{{Kind: ResolveTakeLower, Note: "保留当前内容"},
-			{Kind: ResolveTakeUpper, Note: "采用新内容"}})
+	return c.conflict(o, ConflictBinary, fileHunks(e, c.cs), insertHunks(o))
 }
 
 func (c *replayCtx) applyRename(o *Op) error {
 	e, ok := c.entries[o.Path]
 	if !ok {
-		return c.conflict(o, ConflictMissingBase, nil, insertHunks(o), nil)
+		return c.conflict(o, ConflictMissingBase, nil, insertHunks(o))
 	}
 	if o.DestPath == "" {
 		return fmt.Errorf("op: rename 缺少 DestPath (op=%s)", o.ID)
 	}
 	if _, taken := c.entries[o.DestPath]; taken {
-		return c.conflict(o, ConflictRenameVsEdit, nil, nil,
-			[]Candidate{{Kind: ResolveTakeLower, Note: "放弃重命名，保留原路径"}})
+		return c.conflict(o, ConflictRenameVsEdit, nil, nil)
 	}
 	if e.ID != o.BaseFile {
-		return c.conflict(o, ConflictRenameVsEdit, fileHunks(e, c.cs), insertHunks(o), nil)
+		// §6.3：「rename_vs_edit 且内容未分叉 -> 跟随重命名，在新路径应用」。
+		//
+		// 内容被对侧改过并不构成冲突 —— 把本侧的内容改动当作 hunk 放到**新路径
+		// 的内容**上。只有某个 hunk 确实放不下（两侧改了同一段）才报冲突。
+		ne := e
+		ne.Name = o.DestPath
+		if o.EntryKind != 0 {
+			ne.Kind = o.EntryKindOf()
+		}
+		c.entries[o.DestPath] = ne
+		delete(c.entries, o.Path)
+		if len(o.Hunks) == 0 {
+			return nil // 纯改名（本侧没改内容）
+		}
+		return c.applyHunksTo(o.DestPath, o)
 	}
 
 	ne := e
@@ -236,16 +249,23 @@ func (c *replayCtx) applyRename(o *Op) error {
 	}
 	c.entries[o.DestPath] = ne
 	delete(c.entries, o.Path)
+	// 本侧对内容也有改动时同样放到新路径上。
+	if len(o.Hunks) > 0 {
+		return c.applyHunksTo(o.DestPath, o)
+	}
 	return nil
 }
 
-func (c *replayCtx) applyModify(o *Op) error {
-	cur, ok, err := c.contentOf(o.Path)
+func (c *replayCtx) applyModify(o *Op) error { return c.applyHunksTo(o.Path, o) }
+
+// applyHunksTo 把 op 的 hunks 放到 path 上（rename 会改道到新路径）。
+func (c *replayCtx) applyHunksTo(path string, o *Op) error {
+	cur, ok, err := c.contentOf(path)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return c.conflict(o, ConflictMissingBase, nil, insertHunks(o), nil)
+		return c.conflictAt(path, o, ConflictMissingBase, nil, insertHunks(o))
 	}
 
 	// 逐 hunk 放置，**原地推进**目标。
@@ -258,10 +278,22 @@ func (c *replayCtx) applyModify(o *Op) error {
 			continue
 		}
 
+		// §6.3 第一条规则：两侧改的是**不重叠的行** —— 自动都保留。
+		//
+		// 判据（要求唯一匹配，不唯一就退回冲突，绝不猜）：
+		//   Remove 非空 -> 本侧要替换的那段原文在目标里仍**唯一**存在，
+		//                  说明对侧没碰这些行，直接把 Remove 换成 Insert。
+		//   Remove 为空 -> 对侧在同一锚点插过内容，本侧内容接在其后。
+		if next, ok := autoMerge(h, placed); ok {
+			placed = next
+			c.res.AutoMerged++
+			continue
+		}
+
 		// 未决冲突：先看是否已有记录的 resolution（§6.4）。
 		lower := Side{OpID: o.ID, Hunks: []Hunk{c.lowerHunk(h, placed)}}
 		upper := Side{OpID: o.ID, Hunks: []Hunk{*h}}
-		key := ConflictKey(c.opt.WsID, o.Path, lower.ContentHash(), upper.ContentHash())
+		key := ConflictKey(c.opt.WsID, path, lower.ContentHash(), upper.ContentHash())
 
 		if r, found, err := c.lookup(key); err != nil {
 			return err
@@ -274,7 +306,7 @@ func (c *replayCtx) applyModify(o *Op) error {
 		conf := Conflict{
 			Key:   key,
 			WsID:  c.opt.WsID,
-			Path:  o.Path,
+			Path:  path,
 			Kind:  ConflictOverlappingEdit,
 			Lower: lower,
 			Upper: upper,
@@ -292,8 +324,8 @@ func (c *replayCtx) applyModify(o *Op) error {
 	if err != nil {
 		return err
 	}
-	c.entries[o.Path] = tree.Entry{
-		Name: baseName(o.Path), Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: id,
+	c.entries[path] = tree.Entry{
+		Name: baseName(path), Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: id,
 	}
 	return nil
 }
@@ -342,10 +374,15 @@ func (c *replayCtx) lookup(key hash.ID) (Resolution, bool, error) {
 }
 
 // conflict 记录一个非行级冲突。
-func (c *replayCtx) conflict(o *Op, kind ConflictKind, lower, upper []Hunk, cands []Candidate) error {
+func (c *replayCtx) conflict(o *Op, kind ConflictKind, lower, upper []Hunk) error {
+	return c.conflictAt(o.Path, o, kind, lower, upper)
+}
+
+// conflictAt 在指定路径上记录一个非行级冲突（rename 用新路径）。
+func (c *replayCtx) conflictAt(path string, o *Op, kind ConflictKind, lower, upper []Hunk) error {
 	ls := Side{OpID: o.ID, Hunks: lower}
 	us := Side{OpID: o.ID, Hunks: upper}
-	key := ConflictKey(c.opt.WsID, o.Path, ls.ContentHash(), us.ContentHash())
+	key := ConflictKey(c.opt.WsID, path, ls.ContentHash(), us.ContentHash())
 
 	if r, found, err := c.lookup(key); err != nil {
 		return err
@@ -360,13 +397,13 @@ func (c *replayCtx) conflict(o *Op, kind ConflictKind, lower, upper []Hunk, cand
 	conf := Conflict{
 		Key:   key,
 		WsID:  c.opt.WsID,
-		Path:  o.Path,
+		Path:  path,
 		Kind:  kind,
 		Lower: ls,
 		Upper: us,
 	}
 	if c.opt.Candidates {
-		conf.Candidat = cands
+		conf.Candidat = candidatesFor(conf)
 	}
 	c.res.Conflicts = append(c.res.Conflicts, conf)
 	return nil
@@ -376,8 +413,17 @@ func (c *replayCtx) conflict(o *Op, kind ConflictKind, lower, upper []Hunk, cand
 func (c *replayCtx) applyWholeResolution(o *Op, r Resolution) error {
 	switch r.Kind {
 	case ResolveTakeUpper:
-		if o.Kind == KindDelete {
+		switch o.Kind {
+		case KindDelete:
 			return nil // 放弃删除
+		case KindRename:
+			// 跟随重命名：把 old 移到 new（内容沿用对侧当前的）。
+			if e, ok := c.entries[o.Path]; ok {
+				e.Name = o.DestPath
+				c.entries[o.DestPath] = e
+				delete(c.entries, o.Path)
+			}
+			return nil
 		}
 		if !o.NewFile.IsZero() {
 			c.entries[o.Path] = tree.Entry{
@@ -472,14 +518,54 @@ func sliceOf(src [][]byte, from, to int) [][]byte {
 	return out
 }
 
-// candidatesFor 合成候选解（§6.3）。仅实现确定性最强的几条规则；
-// 无法确定时返回空列表（调用方应交给 AI 决策）。
+// candidatesFor 合成候选解（§6.3）。全部是确定性的、可解释的规则，不引入 LLM；
+// 规则覆盖不到的冲突返回空列表，由调用方交给 AI 裁决。
+//
+// 「两侧改不重叠行」「同锚点插入」这两条会在 applyModify 里被 autoMerge **自动**
+// 消化掉，根本不会走到这里；能走到这里的 overlapping_edit 一定是两侧确实改了
+// 同一段内容的硬冲突。
 func candidatesFor(c Conflict) []Candidate {
 	var out []Candidate
-	out = append(out, Candidate{Kind: ResolveTakeLower, Note: "保留当前内容"})
-	out = append(out, Candidate{Kind: ResolveTakeUpper, Note: "采用来者的内容"})
-	if len(c.Upper.Hunks) == 1 && len(c.Upper.Hunks[0].Remove) == 0 {
-		out = append(out, Candidate{Kind: ResolveBoth, Note: "两侧都保留（插入到当前内容之后）"})
+	seen := map[ResolutionKind]bool{}
+	add := func(k ResolutionKind, note string) {
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, Candidate{Kind: k, Note: note})
+	}
+
+	switch c.Kind {
+	case ConflictAttr:
+		// §6.3：「attr_conflict -> 取 upper」。
+		add(ResolveTakeUpper, "采用新的 EOL 属性")
+		add(ResolveTakeLower, "保留当前属性")
+	case ConflictBinary:
+		// §6.3：「binary 且任一侧未变 -> 取变化的一侧」。未变的一侧在重放的
+		// 快路径里已经被消化（id 相等即幂等），能走到这里的都是**两侧都变了**，
+		// 因此只能二选一。
+		add(ResolveTakeUpper, "采用本侧的新内容")
+		add(ResolveTakeLower, "保留当前内容")
+	case ConflictDeleteVsEdit:
+		// §6.3：「delete_vs_edit 且修改全落在被删区间内 -> 取删除」。
+		// 本实现的 delete 是**整文件**删除，被删区间即整个文件，
+		// 修改必然落在其中，因此「取删除」总是可用，候选固定为两条。
+		add(ResolveTakeLower, "仍然删除（取删除）")
+		add(ResolveTakeUpper, "保留被删文件（放弃 delete）")
+	case ConflictRenameVsEdit:
+		add(ResolveTakeLower, "放弃重命名，保留原路径")
+		add(ResolveTakeUpper, "跟随重命名，采用本侧内容")
+	case ConflictOverlappingEdit:
+		add(ResolveTakeLower, "保留当前内容")
+		add(ResolveTakeUpper, "采用本侧内容")
+		if len(c.Upper.Hunks) == 1 && len(c.Upper.Hunks[0].Remove) == 0 {
+			// §6.3：「两侧在同锚点插入 -> 按 op seq 拼接」。本侧 op 的 seq
+			// 必然晚于目标里已有的内容，因此本侧拼接在**后面**。
+			add(ResolveBoth, "两侧都保留（本侧内容拼在当前内容之后）")
+		}
+	case ConflictMissingBase:
+		add(ResolveTakeUpper, "按本侧内容创建")
+		add(ResolveTakeLower, "放弃本侧改动")
 	}
 	return out
 }

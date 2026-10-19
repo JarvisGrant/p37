@@ -153,3 +153,59 @@ func abs(v int) int {
 	}
 	return v
 }
+
+// autoMerge 在「两侧改动不重叠」的前提下把一个放不下的 hunk 自动合并掉（§6.3）。
+//
+// 返回 false 表示无法确定 —— 调用方必须退回冲突，**绝不猜**。所有判据都要求
+// **唯一匹配**。
+//
+//   - Remove 非空：本侧要替换的那段原文在目标里仍唯一存在，说明对侧没有碰
+//     这些行，直接把 Remove 换成 Insert。
+//   - Remove 为空（纯插入）：对侧在同一锚点插入过内容。本侧 op 的 seq 必然
+//     晚于目标里已有的内容，因此把本侧内容拼在**后面**（即紧挨 After 之前），
+//     这就是 §6.3 的「按 op seq 拼接」。
+func autoMerge(h *Hunk, target [][]byte) ([][]byte, bool) {
+	if len(h.Remove) > 0 {
+		pos := matchPositions(target, h.Remove, 1)
+		if len(pos) != 1 {
+			return nil, false
+		}
+		return spliceAt(target, pos[0], len(h.Remove), h.Insert), true
+	}
+
+	// 纯插入：需要 Before / After 定位锚点，且二者都必须唯一。
+	switch {
+	case len(h.Before) == 0 && len(h.After) == 0:
+		// 无锚点（例如向空文件插入）。只有目标为空时才没有歧义。
+		if len(target) == 0 {
+			return append([][]byte(nil), h.Insert...), true
+		}
+		return nil, false
+
+	case len(h.Before) == 0:
+		pos := matchPositions(target, h.After, 1)
+		if len(pos) != 1 {
+			return nil, false
+		}
+		return spliceAt(target, pos[0], 0, h.Insert), true
+
+	case len(h.After) == 0:
+		pos := matchPositions(target, h.Before, 1)
+		if len(pos) != 1 {
+			return nil, false
+		}
+		return spliceAt(target, pos[0]+len(h.Before), 0, h.Insert), true
+
+	default:
+		bp := matchPositions(target, h.Before, 1)
+		if len(bp) != 1 {
+			return nil, false
+		}
+		start := bp[0] + len(h.Before)
+		ap := matchPositions(target[start:], h.After, 1)
+		if len(ap) != 1 {
+			return nil, false
+		}
+		return spliceAt(target, start+ap[0], 0, h.Insert), true
+	}
+}
