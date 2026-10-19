@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
@@ -566,7 +565,14 @@ func (m *Manager) FoldSet(wsID string) ([]*meta.Workspace, error) {
 		cur = w.ParentID
 	}
 	// 反转成 [根…ws]。
-	sort.SliceStable(out, func(i, j int) bool { return i > j })
+	//
+	// 注意：这里**只**做反转。此前还有一句
+	//   sort.SliceStable(out, func(i, j int) bool { return i > j })
+	// 它比较的是**下标**而不是元素，虽然效果也是反转，但紧接着又被下面的
+	// 显式反转抵消，最终返回的顺序是 [叶子…根] —— 折叠集合顺序反了。
+	// 后果：CollectOps 先拼叶子的 op 再拼父的，而叶子的 op 是**建立在父的
+	// 改动之上**算出来的，重放顺序颠倒；且 `leaf := fold[len(fold)-1]`
+	// 取到的是根，版本归属也会记到错误的工作区上。
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}

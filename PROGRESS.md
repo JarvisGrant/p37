@@ -11,9 +11,9 @@
 | **M2 树与 op** | 🟡 主体完成 | 缺：行级移动检测、fs watcher；stat_cache 已落 SQLite |
 | **M3 工作区与整合** | ✅ 完成 | OverlayFS 已在真机（Ubuntu 26.04 / ext4）验证；重启重挂与未挂载防护已补齐 |
 | **M4 冲突** | ✅ 核心完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
-| **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal、三层栈 + 分叉端到端用例齐备 |
+| **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal；三层栈 + 分叉端到端用例齐备（并借此修掉 S20） |
 
-测试：`go test ./...` 全绿（**100 个测试**）。约 15,850 行 Go（含测试）。
+测试：`go test ./...` 全绿（**108 个测试**）。约 16,200 行 Go（含测试）。
 交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
 
 **已可用的端到端路径**（本机用 `copy` 模式验证通过）：
@@ -63,6 +63,18 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 |---|---|---|---|
 | S15 | **daemon 重启后不恢复活跃工作区的挂载**（§7.7 步骤 3 未实现）。挂载消失后工作区目录变成空目录，`ws_sync` 会采集出「全部文件被删除」 | 新增 `workspace.RemountAll()`，在 `repo.Open` 的启动流程里、land 修复之后调用；只重建挂载，upper 层原样保留。由 `Options.RemountWorkspaces` 控制，**仅常驻 daemon 打开**（CLI 不重挂，避免与 daemon 打架） | 真机：重启前 6 个工作区 → 停止后 0 挂载 → 重启后 6 个挂载全部恢复、每个 1000 文件 |
 | S16 | **没有「应挂载却未挂载」的防护**。人为 `umount`、或清理工具误删挂载后，`ws_sync` 会安静地采集出 N 条 `delete`，落地即清空仓库 | `workspace.Sync` 在采集前校验：`materialize=overlay` 且不是挂载点 → 置 `state=broken` 并返回 `ErrNotMounted`（MCP 错误码 `WS_NOT_MOUNTED`）。挂载点判定改用 `/proc/self/mountinfo`，不再依赖不可靠的 `st_dev` 比较 | `mcpsrv.TestErrorCodesCoverNewStates`；真机：`umount` 后 `ws_sync` 返回 `WS_NOT_MOUNTED`，重启重挂后恢复正常 |
+
+### 栈折叠顺序（S20）
+
+补三层栈端到端用例时抓到的**正确性**缺陷。
+
+| 编号 | 问题 | 处理 | 回归测试 |
+|---|---|---|---|
+| S20 | `FoldSet` 里有一句 `sort.SliceStable(out, func(i, j int) bool { return i > j })` —— 它比较的是**下标**而不是元素，效果是把切片反转；但紧接着又有一句显式反转，两者相互抵消，折叠集合最终以 `[叶子…根]` 返回。后果有二：① `CollectOps` 把叶子的 op 拼在父的前面，而叶子的 hunk 锚点是**建立在父的改动之上**的，重放顺序颠倒会误报冲突或落错位置；② `leaf := fold[len(fold)-1]` 取到根，版本归属（agent / task_desc）记到错误的工作区 | 删掉那句排序，只保留显式反转 | `repo.TestStackFoldSetRootFirst`、`TestStackLeafOwnsVersion`、`TestStackParentAndChildEditSameFile`（**已验证**：把错误顺序放回去，三者分别以「顺序反了」「task_desc 记到根」「land 冲突」失败） |
+
+栈的端到端用例见 `internal/repo/stack_test.go`：三层折叠成一个版本、子可见父的未落地改动、
+冻结快照（父后续改动对子不可见，D23）、兄弟分叉各自落地、落地后幸存子的血缘重挂、
+`ws_drop` 的 `cascade` 语义（子重挂到祖父而非被删）。
 
 ### 性能修正（真机实测）
 
