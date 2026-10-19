@@ -20,6 +20,7 @@ import (
 	"github.com/chenyiwen/p37/internal/mcpsrv"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/repo"
+	"github.com/chenyiwen/p37/internal/watch"
 )
 
 func main() {
@@ -90,6 +91,25 @@ func runDaemon(root string, serveHTTP bool) error {
 	httpHandler := http.Handler(unixHandler)
 
 	logger := log.New(os.Stderr, "p37d ", log.LstdFlags|log.LUTC)
+
+	// 3b. 启动采集触发源 a（fs 事件）与 c（周期扫描）（§5.2、§4.7）。
+	w, err := watch.New(r, watch.Options{
+		Debounce:       config.Duration(cfg.Workspace.Debounce, 500*time.Millisecond),
+		ScanInterval:   config.Duration(cfg.Workspace.ScanInterval, 30*time.Second),
+		FallbackToRoot: watchFallbackNeeded(),
+		Logger:         logger,
+		OnSync: func(wsID string, took time.Duration) {
+			logger.Printf("自动采集 %s 完成（%s）", wsID, took.Round(time.Millisecond))
+		},
+	})
+	if err != nil {
+		_ = r.Close()
+		return err
+	}
+	w.Start()
+	defer func() { _ = w.Close() }()
+	logger.Printf("采集触发源已启动（debounce=%s，周期扫描=%s）",
+		cfg.Workspace.Debounce, cfg.Workspace.ScanInterval)
 
 	// 4. 监听。
 	sockPath := cfg.Daemon.Socket
@@ -245,4 +265,16 @@ func startupCheck(r *repo.Repo, cfg config.Config) error {
 		}
 	}
 	return nil
+}
+
+// watchFallbackNeeded 报告是否应降级为「只监听工作区根目录」（附录 G.3）。
+//
+// inotify 额度不足时，递归监听会在 64 个工作区上把额度耗尽；此时牺牲延迟
+// 换取可用性，深层改动交给周期扫描兜底。
+func watchFallbackNeeded() bool {
+	n, err := maxUserWatches()
+	if err != nil {
+		return false
+	}
+	return n < 64*8000
 }

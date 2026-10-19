@@ -277,6 +277,36 @@ func (r *Repo) writeHead(id hash.ID) error {
 	return err
 }
 
+// Sync 采集一个工作区（workspace.Manager.Sync 的便捷入口）。
+func (r *Repo) Sync(wsID string) error { return r.WS.Sync(wsID) }
+
+// LiveWorkspaces 返回当前应当被 fs watcher 监听的工作区（id → 目录）。
+//
+// 只包含 active / conflicted 且**确实可读**的工作区：broken（目录缺失或未挂载）
+// 与中间态（rebasing / integrating）都不监听 —— 前者监听的是空目录，后者
+// 的采集会被 Sync 自己拒绝。
+func (r *Repo) LiveWorkspaces() (map[string]string, error) {
+	all, err := r.DB.ListWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(all))
+	for i := range all {
+		w := &all[i]
+		switch w.State {
+		case meta.StateActive, meta.StateConflicted:
+		default:
+			continue
+		}
+		dir := r.MM.WorkspaceDir(w.ID)
+		if !r.MM.IsMounted(w.ID) && w.Materialize == meta.MaterializeOverlay {
+			continue // 未挂载 -> 目录是空的，监听没有意义
+		}
+		out[w.ID] = dir
+	}
+	return out, nil
+}
+
 // Head 返回主干 head。
 func (r *Repo) Head() (hash.ID, bool, error) { return r.DB.Head() }
 
