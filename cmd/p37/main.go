@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hash"
@@ -34,7 +35,7 @@ const usage = `p37 —— AI 原生版本控制系统
   status <root>                   打印仓库摘要
   doctor <root>                   运行部署自检（附录 G.4）
   fsck <root>                     校验对象完整性与封闭性
-  gc <root> [--prune] [--scrub] [--report-roots] [--workspaces]
+  gc <root> [--prune] [--scrub] [--pack] [--report-roots] [--workspaces]
                                   保留策略 + 对象回收 + 抽样校验
   migrate <root>                  向前迁移 format_ver
   ignore-check <root> <path>      检查某路径是否被忽略
@@ -379,7 +380,7 @@ func cmdFsck(root string, out, errw io.Writer) int {
 	if err != nil {
 		return fail(errw, err)
 	}
-	fmt.Fprintf(out, "objects/ 文件数   %d\nobject_index 行数 %d\n", onDisk, inIndex)
+	fmt.Fprintf(out, "对象总数（松散+打包）%d\nobject_index 行数 %d\n", onDisk, inIndex)
 
 	// 重建索引并比对（索引是纯缓存，可由对象自描述形态重建）。
 	idx := r.DB.ObjectIndex()
@@ -420,7 +421,7 @@ func cmdGC(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 
-	prune, scrub, workspacesOnly, rootsOnly := false, false, false, false
+	prune, scrub, workspacesOnly, rootsOnly, pack := false, false, false, false, false
 	for _, a := range args {
 		switch a {
 		case "--prune":
@@ -431,6 +432,8 @@ func cmdGC(root string, args []string, out, errw io.Writer) int {
 			workspacesOnly = true
 		case "--report-roots":
 			rootsOnly = true
+		case "--pack":
+			pack = true
 		default:
 			fmt.Fprintf(errw, "未知参数 %q\n", a)
 			return 2
@@ -468,6 +471,22 @@ func cmdGC(root string, args []string, out, errw io.Writer) int {
 	// 基底缓存 LRU（§4.8）。
 	if freed, err := r.MM.Evict(); err == nil && freed > 0 {
 		fmt.Fprintf(out, "已淘汰 overlay 基底缓存 %s\n", humanBytes(freed))
+	}
+
+	// 打包（§9 P2）：把松散小对象合并进 pack 文件。与其它回收一致，
+	// 只有 --prune 才真的执行；否则只报告。
+	if pack {
+		if !prune {
+			fmt.Fprintln(out, "（--pack 需要配合 --prune 才会真的打包；当前为预演）")
+		} else {
+			pr, err := r.Pack(cas.DefaultPackOptions())
+			if err != nil {
+				return fail(errw, err)
+			}
+			fmt.Fprintf(out, "打包: 新建 %d 个 pack，纳入对象 %d（%s），删除松散文件 %d，跳过超大对象 %d\n",
+				pr.PacksCreated, pr.ObjectsPacked, humanBytes(pr.BytesPacked),
+				pr.LooseRemoved, pr.SkippedLarge)
+		}
 	}
 
 	if scrub {

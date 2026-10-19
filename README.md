@@ -39,7 +39,7 @@ p37 的三个核心取舍：
 |---|---|---|
 | 提交单元 | 人工 commit | 一次整合（折叠集合 → 恰好一个版本） |
 | 中间过程 | 保留在历史中 | 不产生对象，落栈即焚 |
-| 存储 | 快照树 + delta 链 pack | 快照树 + CDC 分块 CAS |
+| 存储 | 快照树 + delta 链 pack | 快照树 + CDC 分块 CAS（小对象可打包） |
 | 同步 | push/fetch 协议 | 幂等增量包 + 对象存储 |
 | 合并 | 三方 diff3，抛标记行 | 带上下文 hunk rebase + 结构化冲突 + 候选解 |
 | 冲突解决 | 无记忆 | resolution 表，按内容键控、确定性、可重放 |
@@ -54,6 +54,7 @@ p37 init /srv/repo
 p37 import /srv/repo ./my-project     # 作为 v0 导入
 p37 status /srv/repo
 p37 doctor /srv/repo                  # 部署自检
+p37 gc /srv/repo --prune --pack       # 保留策略 + 回收 + 小对象打包（§9 P2）
 
 # 起 daemon，agent 通过 MCP 连接
 p37d --repo /srv/repo

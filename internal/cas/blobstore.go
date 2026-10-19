@@ -36,6 +36,9 @@ type Stat struct {
 type BlobStore interface {
 	// Get 读取 key 的内容。
 	Get(key string) (io.ReadCloser, Stat, error)
+	// GetRange 读取 key 的 [off, off+length) 字节（S3 的 Range GET）。
+	// off+length 超出末尾时返回可读到的部分（与 S3 一致）。
+	GetRange(key string, off, length int64) ([]byte, error)
 	// PutIfAbsent 写入 key；若已存在则返回 ErrExists（内容不覆盖）。
 	PutIfAbsent(key string, r io.Reader, size int64) error
 	// ListPrefix 按前缀列举。
@@ -319,6 +322,31 @@ func (l *LocalFS) Get(key string) (io.ReadCloser, Stat, error) {
 	return f, st, nil
 }
 
+// GetRange 实现 BlobStore（S3 的 Range GET）。
+func (l *LocalFS) GetRange(key string, off, length int64) ([]byte, error) {
+	if off < 0 || length < 0 {
+		return nil, fmt.Errorf("cas: 非法区间 [%d,%d)", off, off+length)
+	}
+	p, err := l.pathForKey(key)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, ErrNotExist
+		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
 // PutIfAbsent 实现 BlobStore。
 //
 // 直接以 O_CREAT|O_EXCL 写最终路径（而不是「写临时文件 → link」）：
@@ -455,6 +483,47 @@ func unshardKey(key string) string {
 		return key
 	}
 	return strings.Join(append(parts[:len(parts)-3], last), "/")
+}
+
+// PruneEmptyDirs 删除 prefix 目录下（不含 prefix 本身）的空目录。
+//
+// 本地后端把对象分片到两级目录，打包删掉松散文件后会留下大量空目录
+// （每个目录仍占一个块）。这是本地后端的清洁工作，S3 语义下是 no-op。
+func (l *LocalFS) PruneEmptyDirs(prefix string) error {
+	root := filepath.Join(l.root, filepath.FromSlash(strings.TrimSuffix(prefix, "/")))
+	var dirs []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() && filepath.Clean(p) != filepath.Clean(root) {
+			dirs = append(dirs, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// 深度优先（路径长者在后）逐层尝试删除：只删确认为空的目录。
+	for i := len(dirs) - 1; i >= 0; i-- {
+		ents, err := os.ReadDir(dirs[i])
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if len(ents) > 0 {
+			continue
+		}
+		if err := os.Remove(dirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // Delete 实现 BlobStore。

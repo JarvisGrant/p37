@@ -147,7 +147,7 @@ func Open(root string, opt Options) (*Repo, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	store := cas.NewStore(bs, db.ObjectIndex())
+	store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
 
 	mm, err := mountmgr.New(root, mountmgr.Options{
 		BaseCacheBytes: opt.BaseCacheBytes,
@@ -242,6 +242,23 @@ func (r *Repo) journalTask(desc string) string {
 		return ""
 	}
 	return desc
+}
+
+// Pack 把松散的小对象合并进 pack 文件（§9 P2 的离线打包）。
+//
+// 与 land 互斥（共用 landMu）：打包会删除松散对象，若与 land 并发，land
+// 可能正好在它删完之后去读那个对象。
+func (r *Repo) Pack(opt cas.PackOptions) (cas.PackResult, error) {
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
+	res, err := r.Store.PackLoose(opt)
+	if err != nil {
+		return res, err
+	}
+	if err := r.Store.Flush(); err != nil {
+		return res, err
+	}
+	return res, nil
 }
 
 // EpochSize 返回生效的 epoch 版本数（§9.4）。

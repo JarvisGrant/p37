@@ -56,6 +56,11 @@ type GCReport struct {
 	BytesReclaimed   int64 `json:"bytes_reclaimed"`
 	StatCacheCleared int64 `json:"stat_cache_cleared"`
 	Bootstrapped     bool  `json:"stat_cache_bootstrapped"`
+
+	// pack 回收（§9 P2）：只有当 pack 内所有对象都不可达时整包删除。
+	PacksDropped       int   `json:"packs_dropped"`
+	PackObjectsDropped int   `json:"pack_objects_dropped"`
+	PackBytesReclaimed int64 `json:"pack_bytes_reclaimed"`
 }
 
 // GC 执行一次保留 + mark-sweep（§10）。
@@ -212,6 +217,15 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		rep.ObjectsDeleted++
 		rep.BytesReclaimed += o.StoredSize
 	}
+	// 打包对象不能逐个删除：只有当 pack 内**所有**对象都不可达时整包删除。
+	sw, err := r.Store.SweepPacks(marked)
+	if err != nil {
+		return rep, err
+	}
+	rep.PacksDropped = sw.PacksDropped
+	rep.PackObjectsDropped = sw.ObjectsDropped
+	rep.PackBytesReclaimed = sw.BytesReclaimed
+	rep.BytesReclaimed += sw.BytesReclaimed
 
 	// stat 缓存必须清空：它可能持有「只被缓存引用」的中间 Tree 对象 id，
 	// 而那些对象刚刚被扫掉了。留着就是悬空引用 —— 下一次采集会直接返回一个

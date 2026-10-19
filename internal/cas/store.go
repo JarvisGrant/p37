@@ -449,3 +449,67 @@ func (s *Store) DeleteObject(id hash.ID) error {
 	}
 	return s.idx.Remove(id)
 }
+
+// PackLoose 把松散的小对象合并进 pack（§9 P2）。仅在带打包装饰层时可用。
+func (s *Store) PackLoose(opt PackOptions) (PackResult, error) {
+	ps, ok := s.bs.(*PackStore)
+	if !ok {
+		return PackResult{}, nil // 未启用打包：无操作
+	}
+	return ps.PackLoose(opt)
+}
+
+// SweepResult 是一次 pack 回收的结果。
+type SweepResult struct {
+	PacksDropped   int   `json:"packs_dropped"`
+	ObjectsDropped int   `json:"objects_dropped"`
+	BytesReclaimed int64 `json:"bytes_reclaimed"`
+}
+
+// SweepPacks 删除「全部对象都不可达」的 pack，并把这些对象从索引摘除。
+//
+// 只做整包回收：pack 内还有可达对象时保留（空间浪费有界，留待将来的 repack）。
+func (s *Store) SweepPacks(reachable map[hash.ID]struct{}) (SweepResult, error) {
+	var res SweepResult
+	ps, ok := s.bs.(*PackStore)
+	if !ok {
+		return res, nil
+	}
+	packs, err := ps.Packs()
+	if err != nil {
+		return res, err
+	}
+	for _, pid := range packs {
+		entries, err := ps.PackObjects(pid)
+		if err != nil {
+			return res, err
+		}
+		allDead := len(entries) > 0
+		for _, en := range entries {
+			if _, live := reachable[en.id]; live {
+				allDead = false
+				break
+			}
+		}
+		if !allDead {
+			continue
+		}
+		st, err := ps.base.Stat(packKey(pid))
+		var size int64
+		if err == nil {
+			size = st.Size
+		}
+		if err := ps.DeletePack(pid); err != nil {
+			return res, err
+		}
+		for _, en := range entries {
+			if err := s.idx.Remove(en.id); err != nil {
+				return res, err
+			}
+		}
+		res.PacksDropped++
+		res.ObjectsDropped += len(entries)
+		res.BytesReclaimed += size
+	}
+	return res, nil
+}
