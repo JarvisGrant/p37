@@ -70,6 +70,44 @@ func (m *Manager) Remount(wsID string, baseTree hash.ID, src ContentSource) erro
 	return m.mountWithLower(wsID, base)
 }
 
+// Relower 把工作区的 lowerdir 换成 newBase，**upper 层原样保留**（§4.9.2）。
+//
+// 与「整树覆写」的区别：换 lower 之后，工作区里那些「与旧基准相同、与新基准
+// 也相同」的文件根本不需要落进 upper —— 它们直接从新 lower 读。只有真正改过
+// 的文件才在 upper 里。64 并发 × 10 万文件时这是数量级的差别。
+//
+// 安全性：只卸载/重挂，不动 upper 里的任何字节。
+func (m *Manager) Relower(wsID string, newBase hash.ID, src ContentSource) error {
+	if err := m.unmountOverlay(wsID); err != nil {
+		return err
+	}
+	base, err := m.ensureBase(newBase, src)
+	if err != nil {
+		return err
+	}
+	// overlayfs 的 workdir 必须与本次挂载匹配；换 lower 时清掉重建最稳。
+	work := m.workDir(wsID)
+	if err := os.RemoveAll(work); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		return err
+	}
+
+	dir := m.WorkspaceDir(wsID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", base, m.upperDir(wsID), work)
+	if err := syscall.Mount("overlay", dir, "overlay", 0, opts); err != nil {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	// 释放旧基底的引用，改记新的。
+	m.releaseBase(wsID)
+	baseRefs.Store(wsID, base)
+	return nil
+}
+
 // IsMounted 报告工作区目录当前是否为挂载点。
 //
 // 通过 /proc/self/mountinfo 判断，比比较 st_dev 可靠（bind mount、tmpfs 等

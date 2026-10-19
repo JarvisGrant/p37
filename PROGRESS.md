@@ -102,6 +102,35 @@ D. rename 跟随（对侧改内容）-> can_land=true, conflicts=0
 回归测试：`TestAutoMergeAppendAfterChangedNeighbor`、
 `TestAutoMergeAppendWithTrailingEmptyAfter`、`TestAutoMergeInsertBetweenChangedLines`。
 
+### ws_rebase 增量重挂（S27，§4.9.2）+ 两处附带修复
+
+**问题**：`ws_rebase` 原来把**整棵目标树**写进工作区。overlay 模式下写一个文件
+就会 copy-up 到 upper，所以一次 rebase 之后 upper 里躺着的是整棵树 —— 64 并发
+× 10 万文件时是数量级的磁盘浪费。
+
+**改法**（§4.9.2 的「换 lower 重挂」）：
+
+1. 卸载 → 物化新基底 → **保留 upper、换 lower 重挂**（`mountmgr.Relower`）。
+2. 只把「新基准 → 目标树」的**差异**写进去（`applyDelta`）：
+   - 两边一致的文件**一个字节都不碰**（直接由新 lower 提供）
+   - 只在一侧存在的路径：写入或删除（删除由 overlayfs 自动落白洞）
+   - 未变的**子树整棵跳过**（靠树 id 相等判断）
+3. copy 模式没有 lower 可换，退回整树覆写；换 lower 失败也退回整树覆写
+   （宁可慢，不能错）。
+
+关键性质都有用例钉住：**未变文件的 mtime 不被改动**（证明真的没重写）、
+嵌套目录的删除生效、未跟踪文件保持不动。
+
+**附带修复的两处**（都是写这个功能时撞出来的）：
+
+| | 问题 |
+|---|---|
+| R1 | `mountmgr.releaseBase` 读的是一个**从未被写入**的 map（`wsBaseRef`），于是 `inUse` 只增不减 —— `Evict` 会认为所有基底都被引用，**基底缓存永远腾不出空间**。改为使用真正被写入的 `baseRefs`。 |
+| R2 | 符号链接**目标变化**原先走「删 + 建」，一次改链接记两个 op。改为 `blob_put` —— 它的重放规则恰好就是「目标 id == blob_before → 换成 blob_after」，表达更贴切、op 数减半。**类型**变化（文件↔链接）仍然走删+建，那不能糊。 |
+
+回归测试：`internal/workspace/delta_test.go`（3 个）、
+`internal/capture/symlink_test.go`（2 个）。
+
 ### 块移动检测（S26，§5.3 第 1、2 趟）
 
 此前 `merge.move_similarity` 零引用，而且**根本不做移动检测**：把一段代码整体

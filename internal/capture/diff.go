@@ -48,8 +48,25 @@ func Diff(wsID string, base, next *tree.Tree, ow ObjectWriter, opt Options) ([]o
 			})
 			deletes = append(deletes, len(ops)-1)
 
+		case ch.old.Kind == codec.EntrySymlink && ch.new.Kind == codec.EntrySymlink:
+			// 符号链接**目标变了**：用 blob_put 表达为一次修改（§6.5）。
+			//
+			// 早先这里走「删 + 建」，语义没错但会把一次改链接记成两个 op，
+			// 而且插入侧的类型信息要靠 EntryKind 单独承载。blob_put 的重放规则
+			// 恰好就是「目标 id == blob_before -> 直接换成 blob_after」，
+			// 与改一个链接目标完全对应。
+			if ch.old.ID == ch.new.ID {
+				continue
+			}
+			ops = append(ops, op.Op{
+				ID: newOpID(wsID, ch.path, seq, op.KindBlobPut), WsID: wsID,
+				Seq: nextSeq(), Kind: op.KindBlobPut, Path: ch.path,
+				BaseFile: ch.old.ID, NewFile: ch.new.ID,
+				EntryKind: codec.EntrySymlink, Derived: true,
+			})
+
 		case ch.old.Kind != codec.EntryFile || ch.new.Kind != codec.EntryFile:
-			// 文件↔符号链接之类的类型变化：按删 + 建处理。
+			// 文件↔符号链接之类的**类型**变化：按删 + 建处理。
 			ops = append(ops, op.Op{
 				ID: newOpID(wsID, ch.path, seq, op.KindDelete), WsID: wsID,
 				Seq: nextSeq(), Kind: op.KindDelete, Path: ch.path, BaseFile: ch.old.ID,

@@ -750,8 +750,12 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 		return &RebaseResult{Rebased: false, Conflicts: keys}, nil
 	}
 
-	// 覆写工作区内容（copy 与 overlay 都直接写文件，overlay 的 upper 同样生效）。
-	if err := m.overwriteWorkspace(wsID, res.Tree); err != nil {
+	// 让磁盘内容等于 res.Tree。
+	//
+	// overlay：**换 lower 重挂 + 只写差异**（§4.9.2）。这样 upper 里只有真正
+	// 改过的文件，而不是整棵树 —— 64 并发 × 10 万文件时这是数量级的差别。
+	// copy 模式没有 lower 可换，退回整树覆写。
+	if err := m.rebaseWorkspace(wsID, newBase, res.Tree); err != nil {
 		return nil, err
 	}
 	// 覆写完成 -> 记录新的物化时刻：之后的采集可以把「不比此刻更新」的文件
@@ -771,6 +775,160 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 	}
 	_ = m.db.UpdateWorkspaceState(wsID, meta.StateActive, m.now())
 	return &RebaseResult{Rebased: true}, nil
+}
+
+// rebaseWorkspace 让工作区磁盘内容等于 target，同时把 lower 换成 newBase。
+//
+// overlay 时走「换 lower 重挂 + 只写差异」；其余情况退回整树覆写。
+func (m *Manager) rebaseWorkspace(wsID string, newBase hash.ID, target *tree.Tree) error {
+	if m.mm.IsMounted(wsID) {
+		if err := m.mm.Relower(wsID, newBase, m.store); err != nil {
+			// 换 lower 失败（例如内核不允许）：退化为整树覆写，宁可慢不能错。
+			return m.overwriteWorkspace(wsID, target)
+		}
+		return m.applyDelta(wsID, newBase, target)
+	}
+	return m.overwriteWorkspace(wsID, target)
+}
+
+// flatEntry 是树的扁平视图里的一项。
+type flatEntry struct {
+	kind uint8
+	mode uint64
+	id   hash.ID
+}
+
+// flattenEntries 把一棵树压成 路径 -> {kind, mode, id}。
+func (m *Manager) flattenEntries(root hash.ID) (map[string]flatEntry, error) {
+	out := map[string]flatEntry{}
+	var walk func(id hash.ID, prefix string) error
+	walk = func(id hash.ID, prefix string) error {
+		t, err := m.store.GetTree(id)
+		if err != nil {
+			return err
+		}
+		for _, e := range t.Entries {
+			p := e.Name
+			if prefix != "" {
+				p = prefix + "/" + e.Name
+			}
+			out[p] = flatEntry{kind: e.Kind, mode: e.Mode, id: e.ID}
+			if e.Kind == codec.EntryTree {
+				if err := walk(e.ID, p); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := walk(root, ""); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// applyDelta 只把「新基准 -> target」的差异写进工作区。
+//
+// 前置条件：工作区已经以 newBase 为 lower 挂载，且 upper 里保存着 agent 的改动。
+// 于是「两边都没变的文件」根本不用碰 —— 它们从新 lower 直接读。
+//
+// 两个方向都要处理：
+//   - target 有、基准没有或不同 -> 写入（走 safefs，绝不穿过已有符号链接）
+//   - 基准有、target 没有       -> 删除（overlayfs 会自动在 upper 落白洞）
+func (m *Manager) applyDelta(wsID string, baseID hash.ID, target *tree.Tree) error {
+	dir := m.mm.WorkspaceDir(wsID)
+	base, err := m.flattenEntries(baseID)
+	if err != nil {
+		return err
+	}
+	want := map[string]flatEntry{}
+	if err := m.collectEntries(target, "", want); err != nil {
+		return err
+	}
+
+	// 1. 删除基准里有、目标里没有的路径。
+	for p := range base {
+		if _, ok := want[p]; ok {
+			continue
+		}
+		if _, err := codec.ValidatePath(p); err != nil {
+			continue
+		}
+		if err := safefs.RemoveUnder(dir, p); err != nil {
+			return err
+		}
+	}
+
+	// 2. 写入有差异的路径（未变的子树整棵跳过）。
+	return m.writeDeltaRel(dir, "", target, base)
+}
+
+// collectEntries 递归收集树里全部条目的扁平视图（含目录）。
+func (m *Manager) collectEntries(t *tree.Tree, prefix string, out map[string]flatEntry) error {
+	for _, e := range t.Entries {
+		p := e.Name
+		if prefix != "" {
+			p = prefix + "/" + e.Name
+		}
+		out[p] = flatEntry{kind: e.Kind, mode: e.Mode, id: e.ID}
+		if e.Kind == codec.EntryTree {
+			sub, err := m.store.GetTree(e.ID)
+			if err != nil {
+				return err
+			}
+			if err := m.collectEntries(sub, p, out); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// writeDeltaRel 递归写入 target 中与 base 不同的条目。
+func (m *Manager) writeDeltaRel(root, prefix string, t *tree.Tree, base map[string]flatEntry) error {
+	for _, e := range t.Entries {
+		rel := e.Name
+		if prefix != "" {
+			rel = prefix + "/" + e.Name
+		}
+		if b, ok := base[rel]; ok && b.kind == e.Kind && b.id == e.ID && b.mode == e.Mode {
+			continue // 与基准完全一致 -> 从 lower 读，不落 upper
+		}
+		switch e.Kind {
+		case codec.EntryTree:
+			if err := safefs.EnsureDirUnder(root, rel); err != nil {
+				return err
+			}
+			sub, err := m.store.GetTree(e.ID)
+			if err != nil {
+				return err
+			}
+			if err := m.writeDeltaRel(root, rel, sub, base); err != nil {
+				return err
+			}
+		case codec.EntrySymlink:
+			data, err := m.store.ReadBlob(e.ID)
+			if err != nil {
+				return err
+			}
+			if err := safefs.SymlinkUnder(root, rel, string(data)); err != nil {
+				return err
+			}
+		default:
+			data, err := m.store.ReadFileData(e.ID)
+			if err != nil {
+				return err
+			}
+			mode := os.FileMode(0o644)
+			if e.Mode == codec.ModeExecutable {
+				mode = 0o755
+			}
+			if err := safefs.WriteFileUnder(root, rel, data, mode); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // overwriteWorkspace 让工作区磁盘内容等于目标树（保留未跟踪文件不动）。

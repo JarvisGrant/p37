@@ -17,6 +17,12 @@ func (m *Manager) unmountOverlay(wsID string) error { return nil }
 // IsMounted 非 Linux 平台恒为 false（copy 模式无挂载概念）。
 func (m *Manager) IsMounted(wsID string) bool { return false }
 
+// Relower 非 Linux 平台不可用；copy 模式没有 lower 可换，调用方应回退到
+// 整树覆写。
+func (m *Manager) Relower(wsID string, newBase hash.ID, src ContentSource) error {
+	return ErrUnavailable
+}
+
 // Remount 非 Linux 平台不可用；copy 模式没有挂载需要恢复。
 func (m *Manager) Remount(wsID string, baseTree hash.ID, src ContentSource) error {
 	return nil

@@ -392,11 +392,13 @@ func (m *Manager) ensureBase(treeID hash.ID, src ContentSource) (string, error) 
 	return dir, nil
 }
 
-// wsBaseKey 记录某工作区引用的基底，供 Close 时释放。
-var wsBaseRef sync.Map // wsID -> hash.ID
-
+// releaseBase 释放一个工作区对基底的引用（Close / Relower 时调用）。
+//
+// 注意用的是 case.go 里的 `baseRefs` —— 写入它的地方是 mountWithLower /
+// Relower。早先这里读的是另一个**从未被写入**的 map，于是 inUse 只增不减，
+// `Evict` 会认为所有基底都在被引用，基底缓存永远腾不出空间。
 func (m *Manager) releaseBase(wsID string) {
-	if v, ok := wsBaseRef.LoadAndDelete(wsID); ok {
+	if v, ok := baseRefs.LoadAndDelete(wsID); ok {
 		id := v.(hash.ID)
 		m.mu.Lock()
 		if m.inUse[id] > 0 {
