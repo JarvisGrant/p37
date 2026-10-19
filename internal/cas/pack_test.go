@@ -245,6 +245,55 @@ func TestPackCorruptionDetected(t *testing.T) {
 	}
 }
 
+// TestPackStoreSeesExternalPack 回归：打包由**另一个进程**完成时，常驻进程的
+// 位置表必须能发现新 pack（否则「松散已删、位置表还是旧的」会误报 key 不存在）。
+func TestPackStoreSeesExternalPack(t *testing.T) {
+	base, _ := NewLocalFS(t.TempDir())
+	writer := NewStore(NewPackStore(base), NewMemIndex())
+	ids := make([]hash.ID, 0, 20)
+	for i := 0; i < 20; i++ {
+		id, err := writer.PutBlob([]byte{byte(i), 'e', 'x'})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	_ = writer.Flush()
+
+	// 常驻读端：先读一次，位置表被加载（此时还没有 pack）。
+	reader := NewPackStore(base)
+	if _, _, err := reader.Get(keyFor(ids[0])); err != nil {
+		t.Fatal(err)
+	}
+
+	// 「另一个进程」打包。
+	if _, err := NewPackStore(base).PackLoose(PackOptions{MinObjects: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 读端必须自动发现新 pack。
+	for i, id := range ids {
+		rc, _, err := reader.Get(keyFor(id))
+		if err != nil {
+			t.Fatalf("外部打包后读 %s 失败: %v", id, err)
+		}
+		b, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		want := encodeStored(codec.TypeBlob, []byte{byte(i), 'e', 'x'})
+		if !bytes.Equal(b, want) {
+			t.Fatalf("对象 %d 内容不符", i)
+		}
+	}
+	stats, err := reader.ListPrefix("objects/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != len(ids) {
+		t.Fatalf("ListPrefix = %d，期望 %d", len(stats), len(ids))
+	}
+}
+
+// TestSweepPacksDropsWhenAllUnreachable 覆盖整包回收。
 func TestSweepPacksDropsWhenAllUnreachable(t *testing.T) {
 	base, _ := NewLocalFS(t.TempDir())
 	idx := NewMemIndex()

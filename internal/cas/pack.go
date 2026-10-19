@@ -324,6 +324,65 @@ func decodePackIndex(footer []byte) ([]packEntry, error) {
 	return entries, nil
 }
 
+// refreshPacks 增量扫描 packs/：只读取尚未登记过的 pack 的索引。
+//
+// 打包是**另一个进程**（p37 gc --pack）做的维护操作，常驻 daemon 的位置表
+// 必须能发现新 pack，否则「松散副本已删、位置表还没更新」时会误报 key 不存在。
+func (ps *PackStore) refreshPacks() error {
+	stats, err := ps.base.ListPrefix("packs/")
+	if err != nil {
+		return err
+	}
+	ps.mu.RLock()
+	known := make(map[hash.ID]struct{}, len(ps.packs))
+	for _, p := range ps.packs {
+		known[p] = struct{}{}
+	}
+	loaded := ps.loaded
+	ps.mu.RUnlock()
+	if !loaded {
+		return ps.ensureLoaded()
+	}
+
+	type pending struct {
+		id   hash.ID
+		size int64
+	}
+	var fresh []pending
+	for _, st := range stats {
+		pid, err := hash.Parse(strings.TrimPrefix(st.Key, "packs/"))
+		if err != nil {
+			continue
+		}
+		if _, ok := known[pid]; ok {
+			continue
+		}
+		fresh = append(fresh, pending{id: pid, size: st.Size})
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for _, f := range fresh {
+		entries, err := ps.readFooter(f.id, f.size)
+		if err != nil {
+			return fmt.Errorf("cas: 读取 pack %s 索引失败: %w", f.id, err)
+		}
+		for _, en := range entries {
+			if _, dup := ps.locs[en.id]; dup {
+				continue
+			}
+			ps.locs[en.id] = packLoc{pack: f.id, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
+		}
+		if !ps.hasPackLocked(f.id) {
+			ps.packs = append(ps.packs, f.id)
+		}
+	}
+	sort.Slice(ps.packs, func(i, j int) bool { return bytes.Compare(ps.packs[i][:], ps.packs[j][:]) < 0 })
+	return nil
+}
+
 // lookup 返回对象所在 pack 的位置。
 func (ps *PackStore) lookup(id hash.ID) (packLoc, bool, error) {
 	if err := ps.ensureLoaded(); err != nil {
@@ -335,10 +394,22 @@ func (ps *PackStore) lookup(id hash.ID) (packLoc, bool, error) {
 	return loc, ok, nil
 }
 
+// lookupFresh 先查缓存；未命中时增量刷新 pack 列表再查一次。
+func (ps *PackStore) lookupFresh(id hash.ID) (packLoc, bool, error) {
+	loc, ok, err := ps.lookup(id)
+	if err != nil || ok {
+		return loc, ok, err
+	}
+	if err := ps.refreshPacks(); err != nil {
+		return packLoc{}, false, err
+	}
+	return ps.lookup(id)
+}
+
 // Get 实现 BlobStore。
 func (ps *PackStore) Get(key string) (io.ReadCloser, Stat, error) {
 	if id, ok := objectIDFromKey(key); ok {
-		if loc, found, err := ps.lookup(id); err != nil {
+		if loc, found, err := ps.lookupFresh(id); err != nil {
 			return nil, Stat{}, err
 		} else if found {
 			b, err := ps.readObject(loc)
@@ -355,7 +426,7 @@ func (ps *PackStore) Get(key string) (io.ReadCloser, Stat, error) {
 // GetRange 实现 BlobStore。
 func (ps *PackStore) GetRange(key string, off, length int64) ([]byte, error) {
 	if id, ok := objectIDFromKey(key); ok {
-		if loc, found, err := ps.lookup(id); err != nil {
+		if loc, found, err := ps.lookupFresh(id); err != nil {
 			return nil, err
 		} else if found {
 			if off < 0 || length < 0 || off > loc.length {
@@ -378,7 +449,7 @@ func (ps *PackStore) readObject(loc packLoc) ([]byte, error) {
 // Stat 实现 BlobStore。
 func (ps *PackStore) Stat(key string) (Stat, error) {
 	if id, ok := objectIDFromKey(key); ok {
-		if loc, found, err := ps.lookup(id); err != nil {
+		if loc, found, err := ps.lookupFresh(id); err != nil {
 			return Stat{}, err
 		} else if found {
 			return Stat{Key: key, Size: loc.length, ETag: id.String()}, nil
@@ -415,7 +486,7 @@ func (ps *PackStore) ListPrefix(prefix string) ([]Stat, error) {
 	if !(prefix == "" || strings.HasPrefix(prefix, "objects/") || strings.HasPrefix("objects/", prefix)) {
 		return out, nil
 	}
-	if err := ps.ensureLoaded(); err != nil {
+	if err := ps.refreshPacks(); err != nil {
 		return nil, err
 	}
 	seen := make(map[string]struct{}, len(out))
