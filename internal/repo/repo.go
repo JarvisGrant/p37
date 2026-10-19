@@ -245,7 +245,6 @@ func (r *Repo) journalTask(desc string) string {
 }
 
 // Pack 把松散的小对象合并进 pack 文件（§9 P2 的离线打包）。
-//
 // 与 land 互斥（共用 landMu）：打包会删除松散对象，若与 land 并发，land
 // 可能正好在它删完之后去读那个对象。
 func (r *Repo) Pack(opt cas.PackOptions) (cas.PackResult, error) {
@@ -259,6 +258,54 @@ func (r *Repo) Pack(opt cas.PackOptions) (cas.PackResult, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+// WithExclusive 在持有 land 互斥锁的情况下执行 fn。
+//
+// 供同步打包使用：生成增量包期间必须保证 head 与历史不被并发修改，否则
+// 包的 base/result 和对象闭包会对不上。
+func (r *Repo) WithExclusive(fn func() error) error {
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
+	return fn()
+}
+
+// AdvanceHead 把主干快进到 target（同步拉取用）。
+//
+// 只做快进：调用方必须先确认当前 head 是 target 的祖先。版本对象必须已存在于
+// 本地（拉取时已导入）。
+func (r *Repo) AdvanceHead(target hash.ID, epoch uint64) error {
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
+
+	if _, err := r.DB.GetVersion(target); err != nil {
+		return fmt.Errorf("repo: 目标版本不存在: %w", err)
+	}
+	old, hadOld, err := r.DB.Head()
+	if err != nil {
+		return err
+	}
+	chain, err := r.DB.VersionChain(target)
+	if err != nil {
+		return err
+	}
+	if err := r.writeHead(target); err != nil {
+		return err
+	}
+	if err := r.DB.SetMainlineHead(target, int64(len(chain)), epoch); err != nil {
+		return err
+	}
+	// 拉取到空仓库时，本地只有一个 p37-init 的空版本；让它留在 log 里会造成
+	// 「多出一版」的困惑。仅在没有任何工作区引用它时删除。
+	if hadOld && old != target {
+		if ov, err := r.DB.GetVersion(old); err == nil &&
+			ov.Parent.IsZero() && ov.Agent == "p37-init" {
+			if wss, err := r.DB.ListWorkspaces(); err == nil && len(wss) == 0 {
+				_ = r.DB.DeleteVersion(old)
+			}
+		}
+	}
+	return nil
 }
 
 // EpochSize 返回生效的 epoch 版本数（§9.4）。

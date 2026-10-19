@@ -19,6 +19,7 @@ import (
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/mcpsrv"
 	"github.com/chenyiwen/p37/internal/mountmgr"
+	"github.com/chenyiwen/p37/internal/remotesync"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/watch"
 )
@@ -79,6 +80,7 @@ func runDaemon(root string, serveHTTP bool) error {
 	}
 
 	srv := mcpsrv.New(r)
+	srv.SetSyncOptions(cfg.RemoteOptions(), cfg.Remote.Enabled)
 	// 两个平面分开（§11.2）：
 	//   unix socket —— 依赖文件权限（socket 本身 0600），不需要 token
 	//   HTTP        —— 必须带 Bearer token，否则任何本机进程都能写仓库
@@ -86,6 +88,30 @@ func runDaemon(root string, serveHTTP bool) error {
 	httpHandler := http.Handler(unixHandler)
 
 	logger := log.New(os.Stderr, "p37d ", log.LstdFlags|log.LUTC)
+
+	// 可选：定时把新版本打成增量包**暂存到本地 outbox**（不上传）。
+	autoCtx, autoCancel := context.WithCancel(context.Background())
+	defer autoCancel()
+	if d := config.Duration(cfg.Remote.AutoPrepareEvery, 0); d > 0 {
+		go func() {
+			t := time.NewTicker(d)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					if _, err := remotesync.Prepare(r, cfg.RemoteOptions(), false, false); err != nil {
+						if !errors.Is(err, remotesync.ErrUpToDate) &&
+							!errors.Is(err, remotesync.ErrNothingToPackage) {
+							logger.Printf("自动打包失败: %v", err)
+						}
+					}
+				case <-autoCtx.Done():
+					return
+				}
+			}
+		}()
+		logger.Printf("已启用定时打包（%s，仅暂存本地）", d)
+	}
 
 	// 3b. 启动采集触发源 a（fs 事件）与 c（周期扫描）（§5.2、§4.7）。
 	w, err := watch.New(r, watch.Options{

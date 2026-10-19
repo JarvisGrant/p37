@@ -97,6 +97,38 @@ journal 的 `task_desc` 为空、blame 对应行任务列为 `-`。
 新格式（冻结）：`P37PACK1` 头 + 对象字节 + 索引 + `P37PKEND` 尾。**注意**：这是
 在缺少 §9 原文时的**保守实现**，待内部规格回填后需逐字段对齐。
 
+### P3 · 远端同步（S3 兼容对象存储，已实现）
+
+同步单位是**增量包**，包先落本地 `outbox`、审查后再上传；远端只有少量包对象 +
+一个 ref，直接压掉对象存储的 PUT/GET/LIST 次数。
+
+| 项 | 设计 |
+|---|---|
+| **包内容** | `manifest.json`（可审查）+ `meta.json`（version/journal 行）+ `payload.pack`（整段 zstd 的对象原始字节 + 索引）。版本是元数据而非 CAS 对象，随包一起迁移，空仓库也能还原完整历史与 blame |
+| **增量** | 首次（base 全零）生成 checkpoint（全量闭包）；之后 `closure(result) − closure(base)` 生成 delta。delta 不含 base 已覆盖的对象，不重复占存储 |
+| **低频** | 默认把「上次已上传包之后的全部版本」合成一个包；`min_versions`/`min_bytes` 以下不生成（`--force` 覆盖）；首次 checkpoint 不受阈值限制。可选 `auto_prepare_every` 由 daemon 定时暂存（不上传） |
+| **压缩** | 与本地 P2 pack 不同，同步 payload 拼接**原始字节**后整体 zstd（默认 level 9）。小文件不再被每对象 zstd 帧放大：真机 200 文件仓库 payload 39.9 KiB → **18.2 KiB**；1 万小文件按同一比例估算约 0.4 MB（本地 P2 pack 约 2 MB） |
+| **S3 口** | `internal/remotesync` 的 `Remote` 接口 + `S3Remote`（aws-sdk-go-v2：SigV4、S3 兼容 endpoint、path-style、multipart 上传/下载、条件写）；另带 `DirRemote` 仅用于本地端到端。布局 `<prefix>/packages/<id>/{manifest,meta,payload}` + `<prefix>/refs/mainline.json` |
+| **凭证** | 只从环境变量 `P37_S3_ACCESS_KEY` / `P37_S3_SECRET_KEY`（可选 `P37_S3_SESSION_TOKEN`），不落仓库 |
+| **一致性** | 上传顺序：包对象 → 条件更新 ref → 标记 uploaded；ref 用 `If-Match`/`If-None-Match` CAS，冲突返回 `REMOTE_MOVED`。拉取先校验 manifest/meta/payload 哈希与逐对象内容哈希，全部通过才写库 |
+| **git 语义** | `fetch` 只导入对象并更新远端跟踪 ref；`pull` 仅在「本地是远端祖先」时快进；分叉（双方各有新提交）保持本地 head 不动并报告 ahead/behind，不自动合并。空仓库的 `p37-init` 视为空历史，可快进并在之后清理 |
+| **回收** | `sync prune --local` 清理已上传的本地包；`--remote` 保留「最新 checkpoint 及其之后的 delta」，删除更早的包（checkpoint 含全量闭包，删旧 delta 安全） |
+
+落地位置：
+
+```
+internal/remotesync/   manifest/meta/payload/prepare/stage/remote/dir/s3/push/fetch/prune/status
+internal/cas/store.go  GetStored / PutStored（松散与 P2 pack 内对象统一）
+internal/meta/         package+sync_state CRUD、InsertVersion 幂等、InsertJournalOnce
+cmd/p37, cmd/p37d     p37 sync ...、定时打包
+internal/mcpsrv        sync_status / sync_prepare / sync_list / sync_show
+```
+
+真机（P36 实例，Ubuntu 26.04 / ext4）复验：200 文件仓库 checkpoint 18.2 KiB
+上传 → 空仓库 pull 后 200 文件与源 `diff -r` 一致、`fsck` 通过、blame/版本链正常；
+随后 A 追加一版生成 delta（1.3 KiB）并推送，B pull 快进。daemon 运行时的
+`sync_prepare/list/show/status` 也通过 MCP 验证。
+
 ## 发布前的安全加固（已完成）
 
 开源发布前做了一轮审计，修掉 2 个真漏洞 + 2 项加固，并补了对应的回归测试。
@@ -497,7 +529,7 @@ Diff(T0,T1)   --Replay--> T2
    以及写时打包 / repack 压实。`blame_cache` 的回收已由 `meta.PruneVersion` 覆盖。
 3. ~~**`ws_rebase` 的「换 lower 只写 delta」**~~：已实现（S27）。
 4. ~~符号链接内容变化走 delete + create~~：已改为 `blob_put`（R2）。
-5. **P3 远端同步**：`sync_status` 目前是占位（本地 head 当远端返回）；需要 push/fetch 协议。
+5. ~~**P3 远端同步**~~：已实现（S3 兼容对象存储 + 增量包 + 本地暂存审查，见顶部 P3 节）。
 
 ### 下一步建议顺序
 

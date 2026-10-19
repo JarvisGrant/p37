@@ -97,10 +97,51 @@ conflict_resolve    →  逐条决策（take_lower / take_upper / both / custom�
 工作区：`ws_open` `ws_list` `ws_info` `ws_lease` `ws_sync` `ws_drop` `ws_rebase`
 冲突：`conflict_list` `conflict_show` `conflict_resolve` `conflict_resolve_all`
 整合：`land_preview` `ws_land` `version_revert`
-同步：`sync_status`
+同步：`sync_status` `sync_prepare` `sync_list` `sync_show`
+
+## 远端同步（P3）
+
+同步单位是**增量包**：包内是「版本/血缘元数据 + 对象闭包」，先落在本地
+`outbox` 供审查，再显式上传到 S3 兼容对象存储。包按「上次已上传包之后的所有
+版本」合并生成（低频），并对整段 payload 做 zstd 压缩（小文件多时收益明显）。
+
+```toml
+[remote]
+enabled         = true
+backend         = "s3"            # s3 | dir（dir 仅用于本地演练/测试）
+endpoint        = "https://s3.example.com"
+region          = "us-east-1"
+bucket          = "p37"
+prefix          = "repos/demo"
+path_style      = true
+
+# 低频 + 压缩
+min_versions      = 10
+min_bytes         = 4194304
+compress_level    = 9
+max_package_bytes = 536870912
+# auto_prepare_every = "1h"       # 可选：daemon 定时打包（只暂存，不上传）
+```
+
+凭证**只从环境变量读**：`P37_S3_ACCESS_KEY` / `P37_S3_SECRET_KEY`
+（可选 `P37_S3_SESSION_TOKEN`）。
+
+```bash
+p37 sync /srv/repo prepare            # 生成包到 .p37/sync/outbox（不上传）
+p37 sync /srv/repo list
+p37 sync /srv/repo show last --verify # 审查清单并逐对象校验
+p37 sync /srv/repo push               # 上传并条件更新远端 ref
+p37 sync /srv/repo pull               # 下载/导入对象 + 仅快进 head
+p37 sync /srv/repo status --remote
+```
+
+- 首次推送到空远端自动生成 **checkpoint**（全量）；之后是 **delta**。
+- `fetch` 只导入对象并更新远端跟踪状态；`pull` 仅在可快进时移动本地 head，
+  分叉时保持本地不动并报告 ahead/behind（不自动合并）。
+- 远端布局：`<prefix>/packages/<id>/{manifest.json,meta.json,payload.pack}` 与
+  `<prefix>/refs/mainline.json`。
 
 ## 文档
-
 | 文件 | 内容 |
 |---|---|
 | [`PROGRESS.md`](PROGRESS.md) | 实现进度、已知缺口、规格修正记录 |

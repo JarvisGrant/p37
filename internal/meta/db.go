@@ -172,6 +172,15 @@ func ensureColumnsTx(tx *sql.Tx) error {
 			}
 		}
 	}
+	// 远端同步状态（P3）。老仓库没有这张表，打开时补建。
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS sync_state (
+	  id              INTEGER PRIMARY KEY CHECK (id = 1),
+	  remote_head     TEXT,
+	  last_package_id TEXT,
+	  last_sync_ts    INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -370,6 +379,13 @@ var ddl = []string{
 	  uploaded       INTEGER NOT NULL DEFAULT 0 CHECK (uploaded IN (0,1))
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_package_epoch ON package(epoch)`,
+
+	`CREATE TABLE IF NOT EXISTS sync_state (
+	  id              INTEGER PRIMARY KEY CHECK (id = 1),
+	  remote_head     TEXT,
+	  last_package_id TEXT,
+	  last_sync_ts    INTEGER NOT NULL DEFAULT 0
+	)`,
 
 	`CREATE TABLE IF NOT EXISTS object_index (
 	  id       TEXT PRIMARY KEY,

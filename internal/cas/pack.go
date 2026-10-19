@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
 )
@@ -176,7 +178,29 @@ func parsePack(b []byte) ([]packEntry, error) {
 // MaxPackEntries 是单个 pack 的条目数上限（§13 的同类保护）。
 const MaxPackEntries = 1 << 20
 
-// packLoc 是一个已打包对象的位置。
+// DecodeStored 解开存储字节，返回类型与原文。
+func DecodeStored(b []byte) (uint8, []byte, error) { return decodeStored(b) }
+
+// EncodeStoredAt 用指定 zstd 等级把原文编成存储字节（level<=0 用默认等级）。
+//
+// 对象 id 由原文决定，因此重压不改变内容寻址，只影响传输体积。
+func EncodeStoredAt(typ uint8, raw []byte, level int) []byte {
+	if level <= 0 {
+		return encodeStored(typ, raw)
+	}
+	enc, err := zstd.NewWriter(nil,
+		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(level)),
+		zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		return encodeStored(typ, raw)
+	}
+	defer func() { _ = enc.Close() }()
+	comp := enc.EncodeAll(raw, make([]byte, 0, len(raw)/2+16))
+	out := make([]byte, 0, len(comp)+2)
+	out = append(out, storedFormat, typ)
+	return append(out, comp...)
+}
+
 type packLoc struct {
 	pack       hash.ID
 	off        int64

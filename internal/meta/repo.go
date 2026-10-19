@@ -72,7 +72,8 @@ func (d *DB) InsertVersion(v *version.Version) error {
 		_, err := tx.Exec(
 			`INSERT INTO version(id, parent, tree, epoch, agent, task_hash, task_desc,
 			                     ts, msg, ws_id, journal_id)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?)
+			 ON CONFLICT(id) DO NOTHING`,
 			id.String(), v.Parent.String(), v.Tree.String(), int64(v.Epoch),
 			v.Agent, v.TaskHash.String(), v.TaskDesc, v.TS, v.Msg,
 			nullableString(v.WsID), nullableInt(v.JournalID))

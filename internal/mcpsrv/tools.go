@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/op"
+	"github.com/chenyiwen/p37/internal/remotesync"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/workspace"
 )
@@ -647,24 +649,124 @@ func errorsIsLandConflict(err error) bool { return errors.Is(err, repo.ErrLandCo
 
 func (s *Server) registerSync() {
 	s.register("sync_status",
-		"返回本地同步状态。P3 的远端 push/fetch 尚未实现：当前 remote 相关字段为空，supported=false。",
+		"返回本地与远端同步状态：local_head / remote_head / 待上传包 / ahead-behind。远端 push/fetch 只通过 CLI 执行。",
 		`{"type":"object","additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			head, ok, err := s.R.Head()
+			st, err := remotesync.GetStatus(s.R, "", s.remoteConfigured)
 			if err != nil {
 				return nil, err
 			}
-			h := ""
-			if ok {
-				h = head.String()
-			}
-			// 不把本地 head 伪装成远端 head：P3 未实现时如实返回空。
-			return map[string]any{
-				"local_head": h, "remote_head": "",
-				"remote_configured": false, "supported": false,
-				"pending_packages": 0, "last_sync_ts": 0,
-			}, nil
+			return st, nil
 		})
+
+	s.register("sync_prepare",
+		"生成一个增量包到本地 outbox（只暂存、不上传）。force 忽略阈值，full 强制 checkpoint。",
+		`{"type":"object","properties":{"force":{"type":"boolean"},"full":{"type":"boolean"}},"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			a, err := decode[struct {
+				Force bool `json:"force"`
+				Full  bool `json:"full"`
+			}](raw)
+			if err != nil {
+				return nil, err
+			}
+			m, err := remotesync.Prepare(s.R, s.syncOpt, a.Force, a.Full)
+			if err != nil {
+				if errors.Is(err, remotesync.ErrUpToDate) || errors.Is(err, remotesync.ErrNothingToPackage) {
+					return map[string]any{"created": false, "reason": err.Error()}, nil
+				}
+				return nil, err
+			}
+			return map[string]any{"created": true, "manifest": m}, nil
+		})
+
+	s.register("sync_list",
+		"列出本地暂存的同步包（等待上传）。",
+		`{"type":"object","additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rows, err := s.R.DB.ListPackages()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]map[string]any, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, packageView(r, ""))
+			}
+			return out, nil
+		})
+
+	s.register("sync_show",
+		"查看一个暂存包的清单；verify 为真时全量校验分片与对象。",
+		`{"type":"object","properties":{"id":{"type":"string"},"verify":{"type":"boolean"}},"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			a, err := decode[struct {
+				ID     string `json:"id"`
+				Verify bool   `json:"verify"`
+			}](raw)
+			if err != nil {
+				return nil, err
+			}
+			row, err := s.findPackage(a.ID)
+			if err != nil {
+				return nil, err
+			}
+			m, err := remotesync.ReadStaged(*row)
+			if err != nil {
+				return nil, err
+			}
+			if a.Verify {
+				if _, err := remotesync.VerifyDir(row.LocalPath); err != nil {
+					return nil, err
+				}
+			}
+			return map[string]any{"manifest": m, "verified": a.Verify}, nil
+		})
+}
+
+// packageView 输出 snake_case 的包视图（附录 K 约定）。
+func packageView(r meta.PackageRow, note string) map[string]any {
+	return map[string]any{
+		"id":             r.ID,
+		"kind":           r.Kind,
+		"base_version":   r.BaseVersion,
+		"result_version": r.ResultVersion,
+		"epoch":          r.Epoch,
+		"created_ts":     r.CreatedTS,
+		"object_count":   r.ObjectCount,
+		"bytes":          r.ByteSize,
+		"uploaded":       r.Uploaded,
+		"local_path":     r.LocalPath,
+		"note":           note,
+	}
+}
+
+// findPackage 按 id / 唯一前缀 / last 找包记录。
+func (s *Server) findPackage(id string) (*meta.PackageRow, error) {
+	if id == "" || id == "last" {
+		row, err := s.R.DB.LastPackage()
+		if err != nil {
+			return nil, coded("NOT_FOUND", "没有本地暂存包")
+		}
+		return row, nil
+	}
+	rows, err := s.R.DB.ListPackages()
+	if err != nil {
+		return nil, err
+	}
+	var hit *meta.PackageRow
+	for i := range rows {
+		if rows[i].ID == id || (len(id) >= 4 && strings.HasPrefix(rows[i].ID, id)) {
+			if hit != nil {
+				return nil, coded("INVALID_ARGUMENT", "包 id 前缀 %q 匹配到多个", id)
+			}
+			rr := rows[i]
+			hit = &rr
+		}
+	}
+	if hit == nil {
+		return nil, coded("NOT_FOUND", "找不到包 %q", id)
+	}
+	return hit, nil
 }
 
 // wsIDOfConflict 由 key 反查工作区 id（用于解决后恢复状态）。

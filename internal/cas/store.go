@@ -450,6 +450,48 @@ func (s *Store) DeleteObject(id hash.ID) error {
 	return s.idx.Remove(id)
 }
 
+// GetStored 返回对象的**存储字节**（0x01||type||zstd(raw)），不解压。
+//
+// 同步打包需要把对象原样放进增量包；无论对象在松散文件还是 P2 pack 里，
+// 都通过 BlobStore 的统一读取路径取得。
+func (s *Store) GetStored(id hash.ID) ([]byte, error) {
+	rc, _, err := s.bs.Get(keyFor(id))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	b, err := io.ReadAll(io.LimitReader(rc, MaxObjectRawSize*2))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) < 2 || b[0] != storedFormat {
+		return nil, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 存储字节非法", id))
+	}
+	return b, nil
+}
+
+// PutStored 写入一份**已编码**的对象字节（同步拉取用）。
+//
+// 必须先解压校验 id = BLAKE3(raw)，因此远端包里的对象不能绕过完整性检查。
+func (s *Store) PutStored(id hash.ID, stored []byte) error {
+	typ, raw, err := decodeStored(stored)
+	if err != nil {
+		return errors.Join(ErrCorrupt, err)
+	}
+	if got := hash.Sum(raw); got != id {
+		return errors.Join(ErrCorrupt, fmt.Errorf("cas: 对象 %s 内容哈希为 %s", id, got))
+	}
+	if ok, err := s.idx.Has(id); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	if err := s.bs.PutIfAbsent(keyFor(id), bytes.NewReader(stored), int64(len(stored))); err != nil && !errors.Is(err, ErrExists) {
+		return err
+	}
+	return s.idx.Add(id, typ, int64(len(stored)), int64(len(raw)))
+}
+
 // PackLoose 把松散的小对象合并进 pack（§9 P2）。仅在带打包装饰层时可用。
 func (s *Store) PackLoose(opt PackOptions) (PackResult, error) {
 	ps, ok := s.bs.(*PackStore)

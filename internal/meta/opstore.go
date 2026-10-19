@@ -231,6 +231,25 @@ func (d *DB) InsertJournal(e JournalEntry) (int64, error) {
 	return id, err
 }
 
+// InsertJournalOnce 写入一条血缘；同一版本已存在时跳过（同步导入幂等）。
+func (d *DB) InsertJournalOnce(e JournalEntry) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM journal WHERE version_id = ?`,
+			e.VersionID).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+		_, err := tx.Exec(
+			`INSERT INTO journal(version_id, ws_id, agent, task_desc, ts, ops_json)
+			 VALUES(?,?,?,?,?,?)`,
+			e.VersionID, e.WsID, e.Agent, e.TaskDesc, e.TS, e.OpsJSON)
+		return err
+	})
+}
+
 // GetJournal 按版本 id 读取血缘。
 func (d *DB) GetJournal(versionID string) (*JournalEntry, error) {
 	var e JournalEntry

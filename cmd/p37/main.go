@@ -53,6 +53,16 @@ const usage = `p37 —— AI 原生版本控制系统
   revert <root> <version_id>
   blame <root> <path> [--range a-b] [--version <id>] [--hunk]
 
+远端同步（P3，S3 兼容对象存储）：
+  sync <root> prepare [--full] [--force]  生成增量包到本地 outbox（不上传）
+  sync <root> list                        列出本地暂存包
+  sync <root> show <id|last> [--verify]   查看/校验包
+  sync <root> status [--remote]           同步状态
+  sync <root> push [--all|<id>]           上传暂存包并更新远端 ref
+  sync <root> fetch                       下载远端包并导入对象（不移动 head）
+  sync <root> pull                        fetch + 仅快进本地 head
+  sync <root> prune [--local] [--remote]  清理已上传的本地包 / 远端旧包
+
 其它：
   version
   help
@@ -132,6 +142,8 @@ func run(args []string, out, errw io.Writer) int {
 		return cmdRevert(root, rest[1:], out, errw)
 	case "blame":
 		return cmdBlame(root, rest[1:], out, errw)
+	case "sync":
+		return cmdSync(root, rest[1:], out, errw)
 	default:
 		fmt.Fprintf(errw, "未知命令 %q\n\n%s", cmd, usage)
 		return 2

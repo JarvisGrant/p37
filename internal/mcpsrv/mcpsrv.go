@@ -19,6 +19,7 @@ import (
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/op"
+	"github.com/chenyiwen/p37/internal/remotesync"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/workspace"
 )
@@ -66,6 +67,16 @@ func coded(code, format string, args ...any) *CodedError {
 type Server struct {
 	R   *repo.Repo
 	Srv *mcp.Server
+
+	// syncOpt / remoteConfigured 供 sync_* 工具使用（由 daemon 注入）。
+	syncOpt          remotesync.Options
+	remoteConfigured bool
+}
+
+// SetSyncOptions 注入远端同步参数（p37d 在启动时调用）。
+func (s *Server) SetSyncOptions(opt remotesync.Options, configured bool) {
+	s.syncOpt = opt
+	s.remoteConfigured = configured
 }
 
 // New 构造并注册全部工具。

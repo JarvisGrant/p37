@@ -15,6 +15,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/capture"
 	"github.com/chenyiwen/p37/internal/mountmgr"
+	"github.com/chenyiwen/p37/internal/remotesync"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/tree"
 )
@@ -29,6 +30,7 @@ type Config struct {
 	Daemon    DaemonConfig    `toml:"daemon"`
 	Journal   JournalConfig   `toml:"journal"`
 	GC        GCConfig        `toml:"gc"`
+	Remote    RemoteConfig    `toml:"remote"`
 }
 
 // RepoConfig 对应 [repo]。
@@ -99,6 +101,32 @@ type GCConfig struct {
 	VerifyOnRead string  `toml:"verify_on_read"`
 }
 
+// RemoteConfig 对应 [remote]（§9 P3 远端同步）。
+//
+// 凭证**不在这里**：S3 的 access key / secret 只从环境变量读
+// （P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN）。
+type RemoteConfig struct {
+	Enabled   bool   `toml:"enabled"`
+	Backend   string `toml:"backend"` // s3 | dir
+	Endpoint  string `toml:"endpoint"`
+	Region    string `toml:"region"`
+	Bucket    string `toml:"bucket"`
+	Prefix    string `toml:"prefix"`
+	PathStyle bool   `toml:"path_style"`
+	// Dir 仅用于 backend=dir（本地目录演练/测试）。
+	Dir string `toml:"dir"`
+
+	// 打包策略：低频 + 压缩。
+	Outbox          string `toml:"outbox"`
+	MinVersions     int    `toml:"min_versions"`
+	MinBytes        int64  `toml:"min_bytes"`
+	CheckpointEvery int    `toml:"checkpoint_every"`
+	CompressLevel   int    `toml:"compress_level"`
+	MaxPackageBytes int64  `toml:"max_package_bytes"`
+	// AutoPrepareEvery 预留给 daemon 定时 prepare（只落本地，不上传）。
+	AutoPrepareEvery string `toml:"auto_prepare_every"`
+}
+
 // Default 返回附录 B 的默认配置。
 func Default() Config {
 	return Config{
@@ -134,6 +162,14 @@ func Default() Config {
 			LogLevel: "info", LandQueueMax: 256,
 		},
 		GC: GCConfig{ScrubSample: 0.01, VerifyOnRead: "sample"},
+		Remote: RemoteConfig{
+			Backend: "s3", PathStyle: true,
+			Outbox:          ".p37/sync/outbox",
+			MinVersions:     10,
+			MinBytes:        4 << 20,
+			CompressLevel:   9,
+			MaxPackageBytes: 512 << 20,
+		},
 	}
 }
 
@@ -248,6 +284,19 @@ func (c Config) RepoOptions() repo.Options {
 			ScrubSample:  c.GC.ScrubSample,
 			VerifyOnRead: c.GC.VerifyOnRead,
 		},
+	}
+}
+
+// RemoteOptions 由 [remote] 导出同步打包参数。
+func (c Config) RemoteOptions() remotesync.Options {
+	r := c.Remote
+	return remotesync.Options{
+		Outbox:          r.Outbox,
+		MinVersions:     r.MinVersions,
+		MinBytes:        r.MinBytes,
+		CheckpointEvery: r.CheckpointEvery,
+		CompressLevel:   r.CompressLevel,
+		MaxPackageBytes: r.MaxPackageBytes,
 	}
 }
 
