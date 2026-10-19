@@ -59,6 +59,22 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 约 240 KB）在对象库里约 **148 MB / 2 万个对象**（一对象一文件 + 4 KiB 块粒度），约 600×。
 这是 P2 的「打包」缺口（见下节），不是本轮可安全收口的小改动。
 
+### 补齐两处「声明未接线」的配置
+
+排查附录 B 的配置项时发现两项声明了但从未被读取，已接线：
+
+| 配置 | 处理 | 回归测试 |
+|---|---|---|
+| `journal.redact_task_desc` | 为真时血缘（journal）不落任务描述原文（版本行仍保留）。`repo.Options.RedactTaskDesc` 从配置映射；blame 的任务列随之显示为空 | `repo.TestRedactTaskDesc` |
+| `daemon.metrics_http` | 为真时在 HTTP 监听器上挂 `/metrics`（Prometheus 文本），与 MCP 共用同一监听器、同样要求 Bearer token；未开 `listen_http` 时启动即告警 | `mcpsrv.TestMetricsEndpoint` |
+
+真机复验：`/metrics` 无 token 返回 401、带 token 返回指标；`redact_task_desc=true` 时
+journal 的 `task_desc` 为空、blame 对应行任务列为 `-`。
+
+> 顺带核对：`DeleteBlameCacheForVersion` 虽无独立调用点，但 `meta.PruneVersion` 已在
+> 删除版本行时一并 `DELETE FROM blame_cache WHERE version_id = ?`，GC 剪枝不会留下
+> 悬空的 blame 缓存。PROGRESS 早前那条「等 GC 接」的说法已过时。
+
 ## 发布前的安全加固（已完成）
 
 开源发布前做了一轮审计，修掉 2 个真漏洞 + 2 项加固，并补了对应的回归测试。

@@ -236,6 +236,7 @@ func (c Config) RepoOptions() repo.Options {
 		Materialize:    c.MountMode(),
 		BaseCacheBytes: c.Workspace.BaseCacheBytes,
 		LandQueueMax:   c.Daemon.LandQueueMax,
+		RedactTaskDesc: c.Journal.RedactTaskDesc,
 		EpochSize:      c.Retention.EpochSize,
 		MaxActive:      c.Workspace.MaxActive,
 		MaxDepth:       c.Workspace.MaxDepth,

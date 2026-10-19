@@ -231,7 +231,7 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 		VersionID: v.ID().String(),
 		WsID:      leaf.ID,
 		Agent:     agent,
-		TaskDesc:  leaf.TaskDesc,
+		TaskDesc:  r.journalTask(leaf.TaskDesc),
 		TS:        v.TS,
 		OpsJSON:   journalOps(allOps),
 	}
@@ -377,7 +377,7 @@ func (r *Repo) Revert(versionID hash.ID) (hash.ID, error) {
 	v := version.New(head, res.Tree.ID(), uint64(epoch), "p37-revert", msg,
 		time.Now().UnixMilli(), msg)
 	j := meta.JournalEntry{
-		VersionID: v.ID().String(), Agent: "p37-revert", TaskDesc: msg,
+		VersionID: v.ID().String(), Agent: "p37-revert", TaskDesc: r.journalTask(msg),
 		TS: v.TS, OpsJSON: journalOps(inv),
 	}
 	if err := r.DB.CommitLand(v, j, nil); err != nil {

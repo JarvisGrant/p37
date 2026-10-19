@@ -151,9 +151,20 @@ func runDaemon(root string, serveHTTP bool) error {
 			_ = r.Close()
 			return fmt.Errorf("监听 %s 失败: %w", addr, err)
 		}
+		// /metrics 与 MCP 共用同一个 HTTP 监听器（附录 B 的 daemon.metrics_http）。
+		// 它同样要求 Bearer token：抓取端在 Prometheus 里配 bearer_token 即可。
+		if cfg.Daemon.MetricsHTTP {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", mcpsrv.MetricsHandler(srv))
+			mux.Handle("/", httpHandler)
+			httpHandler = mux
+			logger.Printf("已启用 /metrics（需要 Bearer token）")
+		}
 		httpHandler = mcpsrv.BearerAuth(httpHandler, cfg.Daemon.AuthToken)
 		listeners = append(listeners, listener{tcpLn, "http://" + addr + "/mcp"})
 		defer func() { _ = tcpLn.Close() }()
+	} else if cfg.Daemon.MetricsHTTP {
+		logger.Printf("警告: daemon.metrics_http 已启用，但未开启 HTTP 监听（listen_http=false）；/metrics 不生效")
 	}
 
 	unixSrv := &http.Server{Handler: unixHandler, ReadHeaderTimeout: 10 * time.Second}

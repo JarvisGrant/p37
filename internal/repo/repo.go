@@ -43,6 +43,9 @@ type Repo struct {
 	epochSize int
 	// gc 是保留与回收参数（§10）。
 	gc GCOptions
+	// redactTaskDesc 为真时血缘（journal）不落任务描述原文
+	// （附录 B 的 journal.redact_task_desc）。
+	redactTaskDesc bool
 
 	// landSem 限制并发进入 land 流水线的请求数（超出即拒绝）。
 	landSem chan struct{}
@@ -92,6 +95,9 @@ type Options struct {
 	MaxMatches int
 	// GC 是保留与回收参数（§10）。
 	GC GCOptions
+	// RedactTaskDesc 为真时血缘不写任务描述原文
+	// （附录 B 的 journal.redact_task_desc）。
+	RedactTaskDesc bool
 }
 
 // GCOptions 是保留与回收的参数（§10.3、§10.4）。
@@ -224,7 +230,18 @@ func Open(root string, opt Options) (*Repo, error) {
 
 	return &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
 		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
-		landSem: make(chan struct{}, qmax)}, nil
+		redactTaskDesc: opt.RedactTaskDesc,
+		landSem:        make(chan struct{}, qmax)}, nil
+}
+
+// journalTask 按 journal.redact_task_desc 决定写入血缘的任务描述。
+//
+// 为真时只保留「有这个版本」的事实，不持久化任务描述原文（隐私）。
+func (r *Repo) journalTask(desc string) string {
+	if r.redactTaskDesc {
+		return ""
+	}
+	return desc
 }
 
 // EpochSize 返回生效的 epoch 版本数（§9.4）。
@@ -334,7 +351,7 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 	if _, err := r.DB.InsertJournal(meta.JournalEntry{
 		VersionID: v.ID().String(),
 		Agent:     AgentImporter,
-		TaskDesc:  v.TaskDesc,
+		TaskDesc:  r.journalTask(v.TaskDesc),
 		TS:        v.TS,
 		OpsJSON:   "[]",
 	}); err != nil {
