@@ -14,7 +14,7 @@
 | **M4 冲突** | ✅ 核心完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
 | **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal；三层栈 + 分叉端到端用例齐备（并借此修掉 S20） |
 
-测试：`go test ./...` 全绿（**132 个测试**）。约 17,900 行 Go（含测试）。
+测试：`go test ./...` 全绿（**166 个测试**）。约 21,400 行 Go（含测试）。
 交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
 
 **已可用的端到端路径**（本机用 `copy` 模式验证通过）：
@@ -101,6 +101,25 @@ D. rename 跟随（对侧改内容）-> can_land=true, conflicts=0
 
 回归测试：`TestAutoMergeAppendAfterChangedNeighbor`、
 `TestAutoMergeAppendWithTrailingEmptyAfter`、`TestAutoMergeInsertBetweenChangedLines`。
+
+### 真机上抓到的两个严重缺陷（S28 / S29）
+
+这一轮所有功能都在真机（Ubuntu 26.04 / ext4 / overlay）上复验过，抓到两个
+**本地测试完全测不出来**的缺陷 —— 两条都出在「只有真机才会走的代码路径」上。
+
+| 编号 | 症状 | 根因 | 回归测试 |
+|---|---|---|---|
+| **S28** | **land 时 daemon 直接 panic 退出**。栈：`plan → mountmgr.Close → releaseBase` | `mountWithLower` 往 `baseRefs` 里存的是**基底目录路径字符串**，而 `releaseBase` 按 `hash.ID` 做类型断言。这是上一轮「修 R1」时引入的 —— 修之前那个 map 根本没人写，所以断言从来没被执行到 | `mountmgr.TestReleaseBaseNeverPanics`、`TestBaseRefsStoresTreeIDNotPath` |
+| **S29** | **rebase 之后 agent 的改动从 op-log 里消失**：`captured_ops` 变成 0，`ws_land` 报 `NOT_DIRTY` | 惰性 stat 判定的不变量是「物化完成时磁盘内容 == base_tree」。rebase 把磁盘写成了重放结果 `res.Tree`（≠ 新基准），不变量被打破；那些「mtime 不比物化时刻新」的路径被直接判成「未变、等于基准」 | `repo.TestRebaseThenLandKeepsChanges` |
+
+S29 是**早于本轮就存在**的老缺陷，只是此前没有任何用例走过「rebase 之后再
+采集 / 再落地」这条路径。修法：rebase 之后把物化时刻置 0（下一次采集走全量读）
+并清掉该工作区的 stat 缓存（`meta.StatCache.Clear`）—— 那次采集之后缓存重新填好，
+后续采集照常走快路径。两个测试都验证过：**还原修复即失败**。
+
+教训记在这里：**这两个缺陷的共同点是没有单元测试能覆盖的路径**（一个需要真实
+overlay 挂载并在 land 时触发，一个需要「rebase 之后再采集」的两步序列）。单元
+测试全绿并不能替代真机端到端走一遍。
 
 ### ws_rebase 增量重挂（S27，§4.9.2）+ 两处附带修复
 
