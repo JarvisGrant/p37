@@ -99,7 +99,6 @@ conflict_resolve    →  逐条决策（take_lower / take_upper / both / custom�
 
 | 文件 | 内容 |
 |---|---|
-| [`docs/DESIGN.md`](docs/DESIGN.md) | 完整实现规格（含编码格式、CDC 规范、histogram diff 规格、SQLite DDL、MCP Schema、测试清单、9+ 处实现反馈） |
 | [`PROGRESS.md`](PROGRESS.md) | 实现进度、已知缺口、规格修正记录 |
 | [`VERIFY.md`](VERIFY.md) | 真机（Ubuntu + ext4）验证清单 |
 
