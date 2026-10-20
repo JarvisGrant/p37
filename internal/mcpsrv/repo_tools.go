@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/config"
@@ -101,6 +102,14 @@ func (s *Server) registerRepoLineRead() {
 			}
 			def, _ := rr.DB.DefaultLine()
 			cfg, _ := config.Load(rr.Root)
+			rp := cfg.Remote.Prefix
+			if cfg.Remote.RemoteKey != "" {
+				if rp == "" {
+					rp = cfg.Remote.RemoteKey
+				} else {
+					rp = strings.Trim(rp, "/") + "/" + cfg.Remote.RemoteKey
+				}
+			}
 			out := map[string]any{
 				"root": st.Root, "default_line": def, "mainline_head": st.MainlineHead.String(),
 				"version_count": st.VersionCount, "epoch": st.Epoch,
@@ -108,7 +117,7 @@ func (s *Server) registerRepoLineRead() {
 				"lines": lines,
 				"remote": map[string]any{"enabled": cfg.Remote.Enabled,
 					"backend": cfg.Remote.Backend, "remote_key": cfg.Remote.RemoteKey,
-					"prefix": cfg.Remote.Prefix},
+					"prefix": cfg.Remote.Prefix, "remote_prefix": rp},
 			}
 			if s.Hub != nil {
 				if e, err := s.Hub.Get(repoArg(raw)); err == nil {

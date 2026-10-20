@@ -36,6 +36,7 @@
 | `repo_import` | 空仓库导入目录为 v0 |
 | `repo_export` | 把 line/version 物化到目录 |
 | `repo_set_remote` | 更新 per-repo `[remote]`；凭证只从环境变量读 |
+| `ws_disk_usage` | 按工作区统计磁盘占用 |
 
 ## 命名线
 
@@ -47,7 +48,7 @@
 | `line_protect` | `protected`, `force?` |
 | `line_reset` | `version`, `force?`, `reason?`, `expected_head?` |
 | `line_log` | line 祖先历史；`before_ts` + `before_id` 游标 |
-| `line_compare` | `a`, `b` → ahead/behind/merge_base |
+| `line_compare` | `a`, `b` → ahead/behind/merge_base + `a_files`/`b_files` |
 | `line_graph` / `version_graph` | DAG 节点/边 |
 | `line_merge` | `source`, `target`, `preview?`, `no_ff?`, `merge_id?`, `expected_head?`, `expected_source_head?`, `task?`, `idempotency_key?` |
 
@@ -128,7 +129,7 @@ ws_land_into(child, parent_ws,
 | `sync_status` | local/remote head、pending、ahead/behind、remote_key/prefix |
 | `sync_prepare` | 仅生成本地 outbox 包 |
 | `sync_list` / `sync_show` | 查看暂存包 |
-| `sync_push` | 显式同步推送；成功后 `durable=true` |
+| `sync_push` | 显式同步推送；成功后 `durable=true`；同 repo 并发返回 `sync_in_progress` |
 | `sync_fetch` | 下载对象/refs，不移动 head |
 | `sync_pull` | 下载并快进 line；分叉保留本地 |
 | `sync_restore` | 从完整 `remote_prefix` 恢复（可自建 repo） |

@@ -133,5 +133,7 @@ workspace 不恢复，P34 重新 `ws_open`。
 
 - 同一 `remote_prefix` 只允许单写者；P34 需要保证同一 app 的 push 串行。
 - 每个 app 持久化 `remote_prefix` / `remote_key`，不要从 repo name/id 推导。
-- `ws_land_into` 的幂等只保证同一 VM；子任务成果必须在 VM 删除前落入某条 line。
+- `ws_land` / `line_merge` 的 `idempotency_key` 写入 version 并随 sync 恢复；
+  `ws_land_into` 的幂等只保证同一 VM。
+- 子任务成果必须在 VM 删除前落入某条 line。
 - 多 line 仓库当前每次 push 生成全量 checkpoint；大仓库建议按会话保留 VM。

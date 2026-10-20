@@ -40,6 +40,8 @@
 - 多 line 仓库本轮使用全量 checkpoint 包（包含所有 line 可达版本），保证
   恢复时不会遗漏不在 default head 链上的 session line。
 - `expected_remote_generation` 不匹配返回 `sync_remote_moved`。
+- 同一 repo 的 push/fetch/pull/prepare/prune 互斥；并发返回 `sync_in_progress`。
+- `auto_push` 可在 `[remote]` 中开启；它只做异步便利推送。
 
 ## fetch / pull
 
