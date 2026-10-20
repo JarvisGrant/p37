@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/config"
 )
@@ -34,7 +35,8 @@ func TestSyncPushRestoreDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	hh.mustOK("ws_land", map[string]any{"repo": "app", "ws_id": wsID,
-		"target": map[string]any{"kind": "line", "id": "p34/session/s1"}})
+		"target":          map[string]any{"kind": "line", "id": "p34/session/s1"},
+		"idempotency_key": "turn-1"})
 
 	// 产生一个双亲 merge 版本，验证 restore 后 DAG 关系也恢复。
 	hh.mustOK("line_merge", map[string]any{"repo": "app", "source": "p34/session/s1",
@@ -89,5 +91,19 @@ func TestSyncPushRestoreDir(t *testing.T) {
 	}
 	if len(tree) == 0 {
 		t.Fatal("restored tree empty")
+	}
+	mh, err := r2.DB.LineHead("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mv, err := r2.DB.GetVersion(mh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mv.Parents) != 2 {
+		t.Fatalf("restored merge parents=%d", len(mv.Parents))
+	}
+	if v, _ := r2.DB.FindVersionByIdempotency("ws_land", "turn-1", time.Now().UnixMilli()); v == nil {
+		t.Fatal("restored idempotency key lost")
 	}
 }

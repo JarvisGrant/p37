@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +64,22 @@ func openRemote(root string) (remotesync.Remote, config.RemoteConfig, bool, erro
 	if !cfg.Remote.Enabled {
 		return nil, cfg.Remote, false, nil
 	}
+	if cfg.Remote.RemoteKey == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, cfg.Remote, true, err
+		}
+		cfg.Remote.RemoteKey = "rk_" + hex.EncodeToString(b[:])
+		if err := config.Save(root, cfg); err != nil {
+			return nil, cfg.Remote, true, err
+		}
+	}
+	prefix := cfg.Remote.Prefix
+	if prefix == "" {
+		prefix = cfg.Remote.RemoteKey
+	} else {
+		prefix = strings.Trim(prefix, "/") + "/" + cfg.Remote.RemoteKey
+	}
 	switch cfg.Remote.Backend {
 	case "dir":
 		dir := cfg.Remote.Dir
@@ -71,12 +89,13 @@ func openRemote(root string) (remotesync.Remote, config.RemoteConfig, bool, erro
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(root, dir)
 		}
+		dir = filepath.Join(dir, prefix)
 		r, err := remotesync.NewDirRemote(dir)
 		return r, cfg.Remote, true, err
 	case "s3", "":
 		c := remotesync.S3ConfigFromEnv(remotesync.S3Config{
 			Endpoint: cfg.Remote.Endpoint, Region: cfg.Remote.Region,
-			Bucket: cfg.Remote.Bucket, Prefix: cfg.Remote.Prefix,
+			Bucket: cfg.Remote.Bucket, Prefix: prefix,
 			PathStyle: cfg.Remote.PathStyle,
 		})
 		if c.AccessKey == "" || c.SecretKey == "" {

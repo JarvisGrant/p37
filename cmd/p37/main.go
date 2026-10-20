@@ -504,19 +504,28 @@ func cmdFsck(root string, out, errw io.Writer) int {
 		return 1
 	}
 
-	// 头部可达性。
-	head, ok, err := r.DB.Head()
+	// 头部可达性：遍历全部命名线。
+	lines, err := r.Lines()
 	if err != nil {
 		return fail(errw, err)
 	}
-	if !ok {
-		fmt.Fprintln(out, "主干尚未初始化")
-		return 1
+	if len(lines) == 0 {
+		head, ok, err := r.DB.Head()
+		if err != nil {
+			return fail(errw, err)
+		}
+		if !ok {
+			fmt.Fprintln(out, "主干尚未初始化")
+			return 1
+		}
+		lines = append(lines, meta.Line{Name: "(head)", Head: head})
 	}
-	if err := r.WalkHead(head, func(id string) error { return nil }); err != nil {
-		return fail(errw, fmt.Errorf("head 链不可达: %w", err))
+	for i := range lines {
+		if err := r.WalkHead(lines[i].Head, func(id string) error { return nil }); err != nil {
+			return fail(errw, fmt.Errorf("line %s 不可达: %w", lines[i].Name, err))
+		}
 	}
-	fmt.Fprintln(out, "head 链完整")
+	fmt.Fprintln(out, "全部 line head 链完整")
 	fmt.Fprintln(out, "fsck 通过")
 	return 0
 }
