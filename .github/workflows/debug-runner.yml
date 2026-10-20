@@ -1,0 +1,40 @@
+name: debug-runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: overlay capability probe
+        run: |
+          set -x
+          id
+          sudo capsh --print | head -30 || true
+          sudo mkdir -p /tmp/ovl-root/{lower,upper,work,mnt}
+          echo x | sudo tee /tmp/ovl-root/lower/x >/dev/null
+          if sudo mount -t overlay overlay \
+              -o lowerdir=/tmp/ovl-root/lower,upperdir=/tmp/ovl-root/upper,workdir=/tmp/ovl-root/work \
+              /tmp/ovl-root/mnt; then
+            echo ROOT_OVERLAY_OK
+            sudo umount /tmp/ovl-root/mnt
+          else
+            echo ROOT_OVERLAY_FAIL
+          fi
+          sudo useradd -m -s /bin/bash p36 || true
+          sudo mkdir -p /tmp/ovl-p36/{lower,upper,work,mnt}
+          echo x | sudo tee /tmp/ovl-p36/lower/x >/dev/null
+          sudo chown -R p36:p36 /tmp/ovl-p36
+          if sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+              --inh-caps=+sys_admin --ambient-caps=+sys_admin \
+              mount -t overlay overlay \
+              -o lowerdir=/tmp/ovl-p36/lower,upperdir=/tmp/ovl-p36/upper,workdir=/tmp/ovl-p36/work \
+              /tmp/ovl-p36/mnt; then
+            echo P36_OVERLAY_OK
+            sudo umount /tmp/ovl-p36/mnt
+          else
+            echo P36_OVERLAY_FAIL
+          fi
+          sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin capsh --print | head -30 || true
