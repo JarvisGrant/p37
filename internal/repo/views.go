@@ -295,15 +295,20 @@ func (r *Repo) LeaseViolations(wsID string) ([]string, error) {
 
 // WalkHead 沿 head 的 parent 链回溯，验证每个版本与其树都可读（fsck 用）。
 func (r *Repo) WalkHead(head hash.ID, fn func(id string) error) error {
-	cur := head
-	seen := 0
-	for {
+	stack := []hash.ID{head}
+	seen := map[hash.ID]bool{}
+	n := 0
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur.IsZero() || seen[cur] {
+			continue
+		}
+		seen[cur] = true
 		v, err := r.DB.GetVersion(cur)
 		if err != nil {
-			// 剪枝边界：gc 会删掉最老的一批版本，链上会留下指向已删除版本的
-			// parent。这时**正常结束**，而不是报错 —— 否则剪枝一次之后
-			// fsck 就再也跑不起来了。
-			return nil
+			// 剪枝边界：父版本已被回收时正常结束。
+			continue
 		}
 		if _, err := r.Store.GetTree(v.Tree); err != nil {
 			return fmt.Errorf("版本 %s 的树 %s 不可读: %w", cur, v.Tree, err)
@@ -313,13 +318,15 @@ func (r *Repo) WalkHead(head hash.ID, fn func(id string) error) error {
 				return err
 			}
 		}
-		seen++
-		if seen > 1_000_000 {
-			return errors.New("head 链过长，疑似存在环")
+		n++
+		if n > 1_000_000 {
+			return errors.New("版本图过大，疑似存在环")
 		}
-		if v.IsFirst() {
-			return nil
+		ps, err := r.DB.ParentIDs(cur)
+		if err != nil {
+			continue
 		}
-		cur = v.Parent
+		stack = append(stack, ps...)
 	}
+	return nil
 }

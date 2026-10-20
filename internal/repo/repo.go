@@ -47,6 +47,8 @@ type Repo struct {
 	// （附录 B 的 journal.redact_task_desc）。
 	redactTaskDesc bool
 
+	// syncMu 避免同一 repo 同时跑 push/fetch/pull。
+	syncMu sync.Mutex
 	// landSem 限制并发进入 land 流水线的请求数（超出即拒绝）。
 	landSem chan struct{}
 	// landMu 串行化整条 land 流水线（§7.4：一条全局 land 队列）。
@@ -617,4 +619,12 @@ func toJSONStrings(ss []string) string {
 // captureDiff 是 capture.Diff 的薄包装，避免 repo 直接依赖 capture 的类型别名。
 func captureDiff(src capture.ObjectWriter, wsID string, base, next *tree.Tree, opt capture.Options) ([]op.Op, error) {
 	return capture.Diff(wsID, base, next, src, opt)
+}
+
+// BeginSync 尝试取得该 repo 的同步独占权。返回 false 表示已有同步在跑。
+func (r *Repo) BeginSync() (func(), bool) {
+	if !r.syncMu.TryLock() {
+		return nil, false
+	}
+	return r.syncMu.Unlock, true
 }

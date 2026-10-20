@@ -619,3 +619,17 @@ func (d *DB) ListLinesIncludingDeleted() ([]Line, error) {
 	}
 	return out, rows.Err()
 }
+
+// SetLineHeadIf 条件移动 line head；当前 head 与 expected 不同则返回 ErrLineHeadMoved。
+func (d *DB) SetLineHeadIf(name string, head, expected hash.ID, ts int64) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		var cur string
+		if err := tx.QueryRow(`SELECT head FROM line WHERE name=? AND deleted_ts=0`, name).Scan(&cur); err != nil {
+			return err
+		}
+		if cur != expected.String() {
+			return ErrLineHeadMoved
+		}
+		return setLineHeadTx(tx, name, head, ts)
+	})
+}

@@ -47,6 +47,9 @@ func (d *DB) CommitLineLand(v *version.Version, j JournalEntry, line string,
 		if err := insertVersionTx(tx, v, j, idemTool, idemKey); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(`UPDATE repo SET version_count=(SELECT COUNT(*) FROM version) WHERE id=1`); err != nil {
+			return err
+		}
 		for _, wsID := range foldWsIDs {
 			if _, err := tx.Exec(
 				`INSERT INTO landed_ws(ws_id, version_id, target_kind, target_id, ts)
@@ -85,6 +88,9 @@ func (d *DB) CommitMerge(v *version.Version, j JournalEntry, line string,
 			return fmt.Errorf("%w: line %s head 已变化", ErrLineHeadMoved, line)
 		}
 		if err := insertVersionTx(tx, v, j, idemTool, idemKey); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE repo SET version_count=(SELECT COUNT(*) FROM version) WHERE id=1`); err != nil {
 			return err
 		}
 		_ = vid

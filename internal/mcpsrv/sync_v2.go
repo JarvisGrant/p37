@@ -74,6 +74,11 @@ func (s *Server) registerSyncV2() {
 			if remote == nil {
 				return nil, coded("sync_not_configured", "仓库未配置远端")
 			}
+			release, ok := rr.BeginSync()
+			if !ok {
+				return nil, coded("sync_in_progress", "该仓库已有同步在运行")
+			}
+			defer release()
 			res, err := remotesync.Fetch(ctx, rr, remote, cfg.RemoteOptions())
 			if err != nil {
 				return nil, classifySyncErr(err)
@@ -95,6 +100,11 @@ func (s *Server) registerSyncV2() {
 			if remote == nil {
 				return nil, coded("sync_not_configured", "仓库未配置远端")
 			}
+			release, ok := rr.BeginSync()
+			if !ok {
+				return nil, coded("sync_in_progress", "该仓库已有同步在运行")
+			}
+			defer release()
 			res, err := remotesync.Pull(ctx, rr, remote, cfg.RemoteOptions())
 			if err != nil {
 				return nil, classifySyncErr(err)
@@ -189,6 +199,11 @@ func (s *Server) registerSyncV2() {
 			if remote == nil {
 				return nil, coded("sync_not_configured", "远端未启用")
 			}
+			release, ok := rr.BeginSync()
+			if !ok {
+				return nil, coded("sync_in_progress", "该仓库已有同步在运行")
+			}
+			defer release()
 			res, err := remotesync.Pull(ctx, rr, remote, cfg2.RemoteOptions())
 			if err != nil {
 				return nil, classifySyncErr(err)
@@ -239,6 +254,11 @@ func (s *Server) registerSyncV2() {
 }
 
 func pushRepo(ctx context.Context, rr *repo.Repo, h *hub.Hub, full bool, expectedGen int64) (map[string]any, error) {
+	release, ok := rr.BeginSync()
+	if !ok {
+		return nil, coded("sync_in_progress", "该仓库已有同步在运行")
+	}
+	defer release()
 	remote, cfg, err := remoteFor(rr)
 	if err != nil {
 		return nil, err

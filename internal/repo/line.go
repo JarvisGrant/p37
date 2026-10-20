@@ -70,6 +70,8 @@ func (r *Repo) Line(name string) (*meta.Line, error) {
 
 // DeleteLine 删除一条 line。
 func (r *Repo) DeleteLine(name string, force bool) error {
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
 	l, err := r.Line(name)
 	if err != nil {
 		return err
@@ -122,6 +124,8 @@ func (r *Repo) ProtectLine(name string, protected, force bool) error {
 
 // ResetLine 把 line head 移到历史版本。
 func (r *Repo) ResetLine(name string, target string, force bool, reason string, expectedHead string) (*meta.Line, error) {
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
 	l, err := r.Line(name)
 	if err != nil {
 		return nil, err
@@ -155,7 +159,10 @@ func (r *Repo) ResetLine(name string, target string, force bool, reason string, 
 		return nil, errors.New("repo: force reset 必须提供 reason")
 	}
 	now := time.Now().UnixMilli()
-	if err := r.DB.SetLineHead(name, tid, now); err != nil {
+	if err := r.DB.SetLineHeadIf(name, tid, l.Head, now); err != nil {
+		if errors.Is(err, meta.ErrLineHeadMoved) {
+			return nil, ErrTargetMoved
+		}
 		return nil, err
 	}
 	_ = r.DB.RecordLineReset(name, l.Head, tid, reason, force, now)
@@ -164,6 +171,9 @@ func (r *Repo) ResetLine(name string, target string, force bool, reason string, 
 
 // LineLog 返回一条 line 的祖先历史。
 func (r *Repo) LineLog(name string, limit int, beforeTS int64, beforeID string) ([]VersionSummary, error) {
+	if name == "mainline" {
+		name, _ = r.DB.DefaultLine()
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -210,6 +220,13 @@ type LineCompare struct {
 
 // CompareLines 对比两条 line。
 func (r *Repo) CompareLines(a, b string) (*LineCompare, error) {
+	def, _ := r.DB.DefaultLine()
+	if a == "mainline" {
+		a = def
+	}
+	if b == "mainline" {
+		b = def
+	}
 	la, err := r.Line(a)
 	if err != nil {
 		return nil, err
@@ -371,6 +388,15 @@ type MergeOptions struct {
 func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult, error) {
 	source = strings.TrimPrefix(source, "line:")
 	target = strings.TrimPrefix(target, "line:")
+	if source == "mainline" || target == "mainline" {
+		def, _ := r.DB.DefaultLine()
+		if source == "mainline" {
+			source = def
+		}
+		if target == "mainline" {
+			target = def
+		}
+	}
 	release, err := r.enterLand()
 	if err != nil {
 		return nil, err
@@ -479,13 +505,16 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 	if ok, _ := r.DB.IsAncestor(targetHead, sourceHead); ok && !opt.NoFF {
 		if opt.Preview {
 			return &MergeResult{Source: source, Target: target, SourceHead: sourceHead,
-				TargetHead: targetHead, FastForward: true, CanMerge: true}, nil
+				TargetHead: targetHead, BaseVersion: targetHead, FastForward: true, CanMerge: true}, nil
 		}
-		if err := r.DB.SetLineHead(target, sourceHead, time.Now().UnixMilli()); err != nil {
+		if err := r.DB.SetLineHeadIf(target, sourceHead, targetHead, time.Now().UnixMilli()); err != nil {
+			if errors.Is(err, meta.ErrLineHeadMoved) {
+				return nil, ErrTargetMoved
+			}
 			return nil, err
 		}
 		res := &MergeResult{Source: source, Target: target, SourceHead: sourceHead,
-			TargetHead: sourceHead, FastForward: true, CanMerge: true}
+			TargetHead: sourceHead, BaseVersion: targetHead, FastForward: true, CanMerge: true}
 		r.putIdem("line_merge", opt.IdempotencyKey, res)
 		return res, nil
 	}
