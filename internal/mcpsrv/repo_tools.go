@@ -647,6 +647,9 @@ func landView2(res *repo.LandResult) map[string]any {
 	if !res.VersionID.IsZero() {
 		out["version_id"] = res.VersionID.String()
 	}
+	if res.State != "" {
+		out["state"] = res.State
+	}
 	return out
 }
 
