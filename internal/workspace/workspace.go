@@ -629,10 +629,14 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 	if w.LandedTS != 0 {
 		state = "landed"
 	}
+	pk, pid := w.ParentKind, w.ParentID
+	if w.BaseLine != "" {
+		pk, pid = "line", w.BaseLine
+	}
 	st := &Status{
 		ID:            w.ID,
-		ParentKind:    w.ParentKind,
-		ParentID:      w.ParentID,
+		ParentKind:    pk,
+		ParentID:      pid,
 		BaseVersion:   w.BaseVersion,
 		BaseLine:      w.BaseLine,
 		Dir:           m.mm.WorkspaceDir(wsID),

@@ -12,6 +12,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hub"
+	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
 )
 
@@ -92,7 +93,11 @@ func (s *Server) registerRepoLineRead() {
 			if err != nil {
 				return nil, err
 			}
-			lines, _ := rr.Lines()
+			rawLines, _ := rr.Lines()
+			lines := make([]meta.LineView, 0, len(rawLines))
+			for i := range rawLines {
+				lines = append(lines, rawLines[i].View())
+			}
 			ws, _ := rr.WS.List()
 			visible := 0
 			for i := range ws {

@@ -371,9 +371,13 @@ func (s *Server) registerWorkspace() {
 				if w.LandedTS != 0 {
 					state = "landed"
 				}
+				pk, pid := w.ParentKind, w.ParentID
+				if w.BaseLine != "" {
+					pk, pid = "line", w.BaseLine
+				}
 				out = append(out, map[string]any{
 					"ws_id": w.ID, "name": w.Name, "state": state,
-					"parent_kind": w.ParentKind, "parent_id": w.ParentID,
+					"parent_kind": pk, "parent_id": pid,
 					"base_version": w.BaseVersion.String(), "base_line": w.BaseLine,
 					"captured_ops": n, "conflict_count": c,
 					"materialize": w.Materialize, "dir": rr.WS.Dir(w.ID),
