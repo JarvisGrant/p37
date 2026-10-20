@@ -184,7 +184,7 @@ sudo systemctl enable p37d.service
 
 wait_socket() {
   for _ in $(seq 1 100); do
-    [ -S "$REPO/.p37/p37d.sock" ] && return 0
+    sudo test -S "$REPO/.p37/p37d.sock" && return 0
     sleep 0.2
   done
   return 1
@@ -200,7 +200,7 @@ start_root_daemon() {
     sh -c 'echo $$ > /run/p37d-root.pid; exec /usr/local/bin/p37-run' \
     > p37d-root.log 2>&1 &
   for _ in $(seq 1 100); do
-    if [ -S "$REPO/.p37/p37d.sock" ]; then
+    if sudo test -S "$REPO/.p37/p37d.sock"; then
       P37D_PID="$(sudo cat /run/p37d-root.pid 2>/dev/null || true)"
       return 0
     fi
@@ -214,7 +214,7 @@ stop_root_daemon() {
     sudo kill -TERM "$P37D_PID" 2>/dev/null || true
   fi
   for _ in $(seq 1 100); do
-    [ ! -S "$REPO/.p37/p37d.sock" ] && break
+    sudo test ! -S "$REPO/.p37/p37d.sock" && break
     sleep 0.2
   done
   P37D_PID=""
