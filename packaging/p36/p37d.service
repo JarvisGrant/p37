@@ -21,12 +21,11 @@ Environment=P37_PAYLOAD_MOUNT=/run/p37-payload
 Environment=P37_CONFIG=/usr/local/share/p37/config.toml
 Environment=TMPDIR=/srv/repo/.p37/tmp
 
-# systemd 创建 /run/p37-payload（属主 p36），p37-run 在里面只读挂载投递盘。
-# Preserve=yes 让停服后 payload 仍挂载，维护窗口才能继续用
-# /run/p37-payload/p37 gc；换 payload 盘仍需重启实例。
-RuntimeDirectory=p37-payload
-RuntimeDirectoryMode=0755
-RuntimeDirectoryPreserve=yes
+# /run/p37-payload 由 L1 的 /etc/tmpfiles.d/p37.conf 创建（属主 p36）。
+# 不要改用 RuntimeDirectory=：service 重启时 systemd 会尝试在该路径上重新
+# 创建/chmod 目录，而它已经是只读 payload 的挂载点，会报
+# status=233/RUNTIME_DIRECTORY（EROFS）。tmpfiles 不参与 unit 生命周期，
+# 停服后 payload 仍挂载，维护窗口可以继续用 /run/p37-payload/p37 gc。
 
 ExecStart=/usr/local/bin/p37-run
 Restart=on-failure

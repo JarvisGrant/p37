@@ -132,7 +132,9 @@ p37 status /srv/repo      # 期望：head 要么是旧值要么是新值，无�
 - P36 设备顺序：`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
 - `p37d.service` 使用 `User=p36` + `AmbientCapabilities=CAP_SYS_ADMIN`，
   **不要**加会创建私有 mount namespace 的 `PrivateTmp`/`Protect*`；
-- unit 使用 `RuntimeDirectoryPreserve=yes`，停服后 payload 仍挂载。
+- `/run/p37-payload` 由 `/etc/tmpfiles.d/p37.conf` 创建；不要用
+  `RuntimeDirectory=`（service 重启时会在只读 payload 挂载点上重建目录而失败）。
+  停服后 payload 仍挂载。
 
 GitHub Actions 的 `release.yml` 会自动跑第 6.1–6.6；也可以在已发布 Release 上
 手动触发 `p36-acceptance.yml`。

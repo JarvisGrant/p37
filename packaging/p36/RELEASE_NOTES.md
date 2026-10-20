@@ -31,8 +31,10 @@
 - `p37d.service` 以 `User=p36` 运行，授予 `CAP_SYS_ADMIN`；**不要**加会创建
   私有 mount namespace 的 `PrivateTmp`/`Protect*` 选项，否则 agent 看不到
   payload 和 workspace overlay。
-- 停服后 `RuntimeDirectoryPreserve=yes` 保留 payload 挂载，维护窗口可直接用
-  `/run/p37-payload/p37 gc`。换 payload 盘需重启实例。
+- `/run/p37-payload` 由 `/etc/tmpfiles.d/p37.conf` 创建，不用 `RuntimeDirectory=`
+  （service 重启时 systemd 会在只读 payload 挂载点上重建目录而失败）。停服后
+  payload 仍挂载，维护窗口可直接用 `/run/p37-payload/p37 gc`。换 payload 盘需
+  重启实例。
 
 部署细节与验收步骤见仓库 `packaging/p36/README.md` 与 `VERIFY.md`。
 

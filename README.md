@@ -133,8 +133,10 @@ systemctl stop p37d
 systemctl start p37d
 ```
 
-P36 的 unit 使用 `RuntimeDirectoryPreserve=yes`，停服后 payload 仍挂载，
-所以维护窗口里 `/run/p37-payload/p37` 仍可用；换 payload 盘需重启实例。
+P36 的 `/run/p37-payload` 由 `/etc/tmpfiles.d/p37.conf` 创建（不用
+`RuntimeDirectory=`，避免 service 重启时在只读挂载点上重建目录）；停服后
+payload 仍挂载，所以维护窗口里 `/run/p37-payload/p37` 仍可用；换 payload 盘
+需重启实例。
 `p37 gc` 检测到同仓库 daemon 持锁时会拒绝执行；`--force` 是显式逃生口，
 会打印警告，不推荐在线使用。`fsck`、`migrate`、`import` 等写命令也应在
 维护窗口执行。在线 GC 尚未实现。

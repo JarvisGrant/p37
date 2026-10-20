@@ -3,7 +3,7 @@
 #
 # 契约：
 #   1. 按 ext4 label 等宿主投递的只读小盘；
-#   2. 只读挂载到 /run/p37-payload（由 systemd RuntimeDirectory 创建）；
+#   2. 只读挂载到 /run/p37-payload（由 L1 的 /etc/tmpfiles.d/p37.conf 创建）；
 #   3. 校验 p37/p37d/manifest；
 #   4. 首次启动幂等 init；
 #   5. exec p37d。

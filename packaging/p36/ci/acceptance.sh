@@ -127,7 +127,9 @@ sudo install -m 0755 "$BOOTSTRAP_DIR/p37-mount" /usr/local/bin/p37-mount
 sudo install -D -m 0644 "$BOOTSTRAP_DIR/config.toml" /usr/local/share/p37/config.toml
 sudo install -D -m 0644 "$BOOTSTRAP_DIR/p37d.service" /etc/systemd/system/p37d.service
 sudo install -D -m 0644 "$BOOTSTRAP_DIR/90-p37.conf" /etc/sysctl.d/90-p37.conf
+sudo install -D -m 0644 "$BOOTSTRAP_DIR/tmpfiles-p37.conf" /etc/tmpfiles.d/p37.conf
 sudo sysctl --system >/dev/null
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/p37.conf
 
 say "生成 96 MiB payload"
 truncate -s 96M "$PAYLOAD"
@@ -161,11 +163,14 @@ sudo systemctl start p37d.service || true
 if ! wait_socket; then
   NNP_FAILED=1
   echo "NoNewPrivileges=yes 首次启动未成功，记录并尝试去掉 NNP"
+  sudo systemctl stop p37d.service || true
+  sudo systemctl reset-failed p37d.service || true
   sudo systemctl status p37d.service --no-pager || true
   sudo journalctl -u p37d.service -n 160 --no-pager || true
   sudo mkdir -p /etc/systemd/system/p37d.service.d
   printf '[Service]\nNoNewPrivileges=no\n' | sudo tee /etc/systemd/system/p37d.service.d/98-no-nnp.conf >/dev/null
   sudo systemctl daemon-reload
+  sudo systemctl reset-failed p37d.service || true
   sudo systemctl start p37d.service || true
   if ! wait_socket; then
     echo "去掉 NoNewPrivileges 后仍未启动，验收失败"
@@ -177,7 +182,7 @@ fi
 echo "NNP_FAILED=$NNP_FAILED"
 
 # --check / doctor 适合 daemon 启动前：先让 p37-run 完成挂载与 init，
-# 停服（RuntimeDirectoryPreserve 会保留 payload），在 daemon 停止状态下检查。
+# 停服（tmpfiles 创建的目录不会随 unit 清理，payload 保留），在 daemon 停止状态下检查。
 say "停服后做启动前检查（payload 应保留）"
 sudo systemctl stop p37d.service
 [ -x /run/p37-payload/p37 ] || { echo "停服后 payload 被卸载，p37 不可用"; exit 1; }

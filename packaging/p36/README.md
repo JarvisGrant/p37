@@ -18,7 +18,8 @@ L1 应用层（P36 把平台胶水放这里）
 ├── /usr/local/bin/p37-mount        # Go 挂载助手（按 label 只读挂载）
 ├── /usr/local/share/p37/config.toml
 ├── /etc/systemd/system/p37d.service
-└── /etc/sysctl.d/90-p37.conf
+├── /etc/sysctl.d/90-p37.conf
+└── /etc/tmpfiles.d/p37.conf
 
 P37PAYLOAD（宿主投递，只读 ext4，额外一块 virtio-blk）
 P36 中设备顺序：
@@ -53,7 +54,7 @@ make release VERSION=0.1.0
 
 make p36-bootstrap
 # dist/p37-mount-linux-amd64
-# dist/p36-bootstrap/{p37-run,p37-mcp,p37-mount,config.toml,p37d.service,90-p37.conf}
+# dist/p36-bootstrap/{p37-run,p37-mcp,p37-mount,config.toml,p37d.service,90-p37.conf,tmpfiles-p37.conf}
 ```
 
 发布 tar 的根目录严格只有：
@@ -106,6 +107,7 @@ install -m 0755 dist/p36-bootstrap/p37-mount   /mnt/l1/usr/local/bin/p37-mount
 install -m 0644 dist/p36-bootstrap/config.toml /mnt/l1/usr/local/share/p37/config.toml
 install -m 0644 dist/p36-bootstrap/p37d.service /mnt/l1/etc/systemd/system/p37d.service
 install -m 0644 dist/p36-bootstrap/90-p37.conf /mnt/l1/etc/sysctl.d/90-p37.conf
+install -m 0644 dist/p36-bootstrap/tmpfiles-p37.conf /mnt/l1/etc/tmpfiles.d/p37.conf
 ```
 
 P36 的 L1 `install.sh` 还应：
@@ -114,6 +116,8 @@ P36 的 L1 `install.sh` 还应：
 - 确保 `p36` 能读 `/dev/disk/by-label/P37PAYLOAD` 对应的块设备
   （`SupplementaryGroups=disk` 或 udev 规则）；
 - 执行 `sysctl --system`（或确保实例启动时应用 `/etc/sysctl.d/90-p37.conf`）；
+- 执行 `systemd-tmpfiles --create /etc/tmpfiles.d/p37.conf` 创建
+  `/run/p37-payload`（属主 `p36:p36`）；
 - `systemctl enable p37d.service`。
 
 `p37d.service` 使用 `User=p36`、`AmbientCapabilities=CAP_SYS_ADMIN`、
@@ -124,9 +128,13 @@ P36 的 L1 `install.sh` 还应：
 > mount namespace 的选项。p37d 在里面挂载 payload 和 workspace overlay，
 > agent 的 shell 与 `p37-mcp` 在宿主 namespace，看不到私有 namespace 的挂载。
 >
-> unit 使用 `RuntimeDirectoryPreserve=yes`，停服后 payload 仍挂载；维护窗口
-> 可以直接使用 `/run/p37-payload/p37 gc`。换 payload 盘仍需重启实例。需要
-> 彻底卸载时手工执行 `systemctl stop p37d && sudo umount /run/p37-payload`。
+> unit **不使用** `RuntimeDirectory=`，而用 `/etc/tmpfiles.d/p37.conf` 创建
+> `/run/p37-payload`。原因是：service 重启时 systemd 会尝试在 RuntimeDirectory
+> 路径上重新创建/chmod 目录，而它已经是只读 payload 的挂载点，会报
+> `status=233/RUNTIME_DIRECTORY`（EROFS）。tmpfiles 不参与 unit 生命周期，
+> 停服后 payload 仍挂载；维护窗口可以直接使用 `/run/p37-payload/p37 gc`。
+> 换 payload 盘仍需重启实例。需要彻底卸载时手工执行
+> `systemctl stop p37d && sudo umount /run/p37-payload`。
 
 MCP 客户端配置：
 
@@ -146,8 +154,8 @@ MCP 客户端配置：
 4. 启动实例；`p37-run` 挂载新盘并校验 `manifest.version` 与 `p37d --version`。
 5. 仓库格式不变，不需要 `p37 migrate`。
 
-> 只 `systemctl restart p37d` 时，旧 payload 可能仍挂在 `/run/p37-payload`
-> （`RuntimeDirectoryPreserve=yes`）；**换盘请重启实例**。这是当前已知限制。
+> 只 `systemctl restart p37d` 时，旧 payload 可能仍挂在 `/run/p37-payload`；
+> **换盘请重启实例**。这是当前已知限制。
 
 仅修改平台胶水（`p37-run`/`p37-mcp`/`p37-mount`/unit/config/sysctl）时，
 需要重建 **L1**；日常升级 p37 只换 payload 盘。
@@ -213,4 +221,4 @@ P36 应使用 `--strict`。inotify 不足只 WARN，不会自动修改内核参�
 | 实例内仓库 | `/srv/repo`（L2 ext4，`p36:p36` 可写，建议 `0750`） |
 | 挂载点 | `/run/p37-payload` |
 | 运行时环境 | `P37_REPO=/srv/repo`、`P37_PAYLOAD_LABEL=P37PAYLOAD`、`TMPDIR=/srv/repo/.p37/tmp` |
-| L1 必需文件 | `p37-run`、`p37-mcp`、`p37-mount`、`config.toml`、`p37d.service`、`90-p37.conf` |
+| L1 必需文件 | `p37-run`、`p37-mcp`、`p37-mount`、`config.toml`、`p37d.service`、`90-p37.conf`、`tmpfiles-p37.conf` |

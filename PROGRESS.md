@@ -62,7 +62,9 @@ P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制�
   `ProtectSystem`、`ProtectHome`、`ReadWritePaths`、`ProtectKernel*`、
   `ProtectControlGroups`，否则 agent 的 shell 与 `p37-mcp` 看不到 payload
   和 workspace overlay。保留 `NoNewPrivileges` + `CAP_SYS_ADMIN`。
-- **停服保留 payload**：unit 使用 `RuntimeDirectoryPreserve=yes`，不用
+- **停服保留 payload**：`/run/p37-payload` 改由 `/etc/tmpfiles.d/p37.conf`
+  创建，不用 `RuntimeDirectory=`（否则 service 重启时 systemd 会在只读
+  payload 挂载点上重建目录，报 `status=233/RUNTIME_DIRECTORY`），也不用
   `ExecStopPost=umount`；否则停服后维护窗口没有 `p37` 可执行。
 - **payload 固定 96 MiB**：32 MiB 的 ext4 扣掉 journal/元数据后放不下约
   30 MiB 的两个二进制；生成示例使用 `mkfs.ext4 -m 0`。
