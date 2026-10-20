@@ -11,30 +11,38 @@ jobs:
         run: |
           set -x
           id
-          sudo capsh --print | head -30 || true
-          sudo mkdir -p /tmp/ovl-root/{lower,upper,work,mnt}
-          echo x | sudo tee /tmp/ovl-root/lower/x >/dev/null
-          if sudo mount -t overlay overlay \
-              -o lowerdir=/tmp/ovl-root/lower,upperdir=/tmp/ovl-root/upper,workdir=/tmp/ovl-root/work \
-              /tmp/ovl-root/mnt; then
-            echo ROOT_OVERLAY_OK
-            sudo umount /tmp/ovl-root/mnt
-          else
-            echo ROOT_OVERLAY_FAIL
-          fi
           sudo useradd -m -s /bin/bash p36 || true
           sudo mkdir -p /tmp/ovl-p36/{lower,upper,work,mnt}
           echo x | sudo tee /tmp/ovl-p36/lower/x >/dev/null
           sudo chown -R p36:p36 /tmp/ovl-p36
-          if sudo setpriv --reuid=p36 --regid=p36 --init-groups \
-              --inh-caps=+sys_admin --ambient-caps=+sys_admin \
-              mount -t overlay overlay \
-              -o lowerdir=/tmp/ovl-p36/lower,upperdir=/tmp/ovl-p36/upper,workdir=/tmp/ovl-p36/work \
-              /tmp/ovl-p36/mnt; then
-            echo P36_OVERLAY_OK
-            sudo umount /tmp/ovl-p36/mnt
-          else
-            echo P36_OVERLAY_FAIL
-          fi
+          cat > /tmp/probe.py <<'PY'
+          import ctypes, os
+          target = "/tmp/ovl-p36/mnt"
+          os.makedirs(target, exist_ok=True)
+          libc = ctypes.CDLL(None, use_errno=True)
+          opts = b"lowerdir=/tmp/ovl-p36/lower,upperdir=/tmp/ovl-p36/upper,workdir=/tmp/ovl-p36/work"
+          r = libc.mount(b"overlay", target.encode(), b"overlay", 0, opts)
+          e = ctypes.get_errno()
+          print("mount_rc", r, "errno", e, os.strerror(e) if e else "")
+          if r == 0:
+              libc.umount2(target.encode(), 2)
+          PY
+          chmod 0755 /tmp/probe.py
+          python3 /tmp/probe.py
           sudo setpriv --reuid=p36 --regid=p36 --init-groups \
-            --inh-caps=+sys_admin --ambient-caps=+sys_admin capsh --print | head -30 || true
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py || true
+          sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin capsh --print | grep -E 'Current:|Ambient set|no-new-privs' || true
+      - name: systemd NNP ambient probe
+        run: |
+          set -x
+          sudo systemd-run --unit=p37probe-nnp --property=User=p36 \
+            --property=AmbientCapabilities=CAP_SYS_ADMIN \
+            --property=CapabilityBoundingSet=CAP_SYS_ADMIN \
+            --property=NoNewPrivileges=yes --wait --collect \
+            /bin/sh -c 'capsh --print | grep -E "Current:|Ambient set|no-new-privs"' || true
+          sudo systemd-run --unit=p37probe-nonnp --property=User=p36 \
+            --property=AmbientCapabilities=CAP_SYS_ADMIN \
+            --property=CapabilityBoundingSet=CAP_SYS_ADMIN \
+            --property=NoNewPrivileges=no --wait --collect \
+            /bin/sh -c 'capsh --print | grep -E "Current:|Ambient set|no-new-privs"' || true
