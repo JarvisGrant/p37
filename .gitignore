@@ -14,6 +14,11 @@ workspaces/
 coverage.txt
 *.prof
 
+# 本地环境变量（真实 token 不要提交）
+.env
+.env.*
+!.env.example
+
 # 编辑器与系统
 .DS_Store
 .idea/
@@ -23,3 +28,17 @@ coverage.txt
 
 # 本地临时目录
 /tmp/
+
+# P36 CI 验收产物
+/acceptance-output.log
+/acceptance.json
+/acceptance-ws.txt
+/acceptance-mcp.log
+/check.json
+/doctor.txt
+/findmnt-*.txt
+/gc-*.out
+/mcp-probe.json
+/ws-list.txt
+/tar-files.txt
+/payload-root.txt

@@ -8,7 +8,7 @@
 #   4. 首次启动幂等 init；
 #   5. exec p37d。
 #
-# 改动此脚本意味着要重建 L0；日常升级 p37 只换 P37PAYLOAD 盘并重启实例。
+# 改动此脚本意味着要重建 L1；日常升级 p37 只换 P37PAYLOAD 盘并重启实例。
 set -eu
 
 REPO=${P37_REPO:-/srv/repo}

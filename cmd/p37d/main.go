@@ -33,7 +33,7 @@ func main() {
 		serveHTTP      = flag.Bool("http", false, "额外监听 HTTP（需配置 auth_token）")
 		version        = flag.Bool("version", false, "打印版本")
 		stdio          = flag.Bool("stdio", false, "作为 stdio MCP 代理连接现有 daemon（不取仓库锁）")
-		check          = flag.Bool("check", false, "健康检查（不取仓库锁）")
+		check          = flag.Bool("check", false, "启动前健康检查（不取仓库锁；会做少量写探测）")
 		jsonOut        = flag.Bool("json", false, "--check 输出 JSON")
 		strict         = flag.Bool("strict", false, "--check 将 ext4 等部署项视为必需")
 		connectTimeout = flag.Duration("connect-timeout", 15*time.Second,

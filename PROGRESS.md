@@ -52,6 +52,27 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 全绿；linux/amd64 发布物由 `make release` 生成。仓库格式兼容性由既有
 `meta.FormatVer=1` 与黄金向量测试继续保证。
 
+### P36 返工（L1 胶水 / 共享 mount namespace / 96 MiB payload）
+
+P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制语义仍未变：
+
+- **胶水放 L1**：P36 不改 L0；`p37-run`/`p37-mcp`/`p37-mount`/config/unit/
+  sysctl 都放 L1。只有 `p37`/`p37d` 在 payload。
+- **不创建私有 mount namespace**：`p37d.service` 删除 `PrivateTmp`、
+  `ProtectSystem`、`ProtectHome`、`ReadWritePaths`、`ProtectKernel*`、
+  `ProtectControlGroups`，否则 agent 的 shell 与 `p37-mcp` 看不到 payload
+  和 workspace overlay。保留 `NoNewPrivileges` + `CAP_SYS_ADMIN`。
+- **停服保留 payload**：unit 使用 `RuntimeDirectoryPreserve=yes`，不用
+  `ExecStopPost=umount`；否则停服后维护窗口没有 `p37` 可执行。
+- **payload 固定 96 MiB**：32 MiB 的 ext4 扣掉 journal/元数据后放不下约
+  30 MiB 的两个二进制；生成示例使用 `mkfs.ext4 -m 0`。
+- **设备顺序**：P36 中 `vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
+  `p37-mount` 仍按 label 挂载。
+- **新增 `packaging/p36/90-p37.conf`**：inotify 额度由 P36 L1 install.sh 安装。
+- **发布流程**：`make release` 增加 dirty 检查、manifest version/commit 自检、
+  release notes 生成；GitHub Actions 负责 tag → build → P36 验收 → Release，
+  另保留对已发布 Release 的 `workflow_dispatch` 验收。
+
 ## 真机第二遍（S30–S34 + 采集提速）
 
 在 P36 实例（Ubuntu 26.04 / ext4 / overlay，2 vCPU / 1 GiB）上按 `VERIFY.md` 又走了一遍

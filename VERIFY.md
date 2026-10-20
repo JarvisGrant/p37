@@ -124,18 +124,34 @@ p37 status /srv/repo      # 期望：head 要么是旧值要么是新值，无�
 
 ## 6. P36 部署验收（本轮新增）
 
-前置：L2 的 `/srv/repo` 为 ext4、属主 `p36:p36`；宿主已投递 label
-`P37PAYLOAD` 的只读 ext4 盘；`p37d.service` 使用 `User=p36` +
-`AmbientCapabilities=CAP_SYS_ADMIN`。
+前置：
+
+- L0 不改；平台胶水在 L1；`p37`/`p37d` 只来自 payload；
+- L2 的 `/srv/repo` 为 ext4、属主 `p36:p36`（建议 `0750`）；
+- 宿主已投递 label `P37PAYLOAD` 的只读 ext4 盘，固定 **96 MiB**；
+- P36 设备顺序：`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
+- `p37d.service` 使用 `User=p36` + `AmbientCapabilities=CAP_SYS_ADMIN`，
+  **不要**加会创建私有 mount namespace 的 `PrivateTmp`/`Protect*`；
+- unit 使用 `RuntimeDirectoryPreserve=yes`，停服后 payload 仍挂载。
+
+GitHub Actions 的 `release.yml` 会自动跑第 6.1–6.6；也可以在已发布 Release 上
+手动触发 `p36-acceptance.yml`。
 
 ```bash
-# 6.1 从只读 payload 执行（不要先 cp 到可写目录）
-/run/p37-payload/p37 --version
-/run/p37-payload/p37d --version
+# 6.1 服务外 findmnt：payload 与 keeper workspace
+#     ws_land 会删除工作区，所以需要一个不落地的工作区做挂载检查。
+#     payload 根目录应严格只有 p37/p37d/manifest.json；如果 mkfs.ext4 -d
+#     生成了 lost+found，用 debugfs -w -R "rmdir /lost+found" 删除。
+findmnt -T /run/p37-payload                  # 应为 ext4
+find /run/p37-payload -maxdepth 1 -mindepth 1 -printf '%f\n' | sort
+findmnt -T /srv/repo/workspaces/<keeper_ws>  # 应为 overlay
 
-# 6.2 健康检查：0=通过，1=必需项失败，2=用法
+# 6.2 启动前检查（daemon 停止时；--check 有写探测）
+systemctl stop p37d
 /run/p37-payload/p37d --check --strict --repo /srv/repo
 /run/p37-payload/p37d --check --strict --json --repo /srv/repo | jq .
+/run/p37-payload/p37 doctor /srv/repo
+systemctl start p37d
 
 # 6.3 幂等 init（第二次必须返回 0 且不改 config）
 /run/p37-payload/p37 init --if-missing --config /usr/local/share/p37/config.toml /srv/repo
@@ -146,13 +162,14 @@ sha256sum /srv/repo/.p37/config.toml
 # 6.4 两个 agent 经 stdio 并发（MCP 客户端 command=/usr/local/bin/p37-mcp）
 #     各自 ws_open → 改文件 → ws_sync → ws_land，断言两个 ws_id 不同、
 #     两次 land 都成功、version_log 至少 3 个版本。
+#     另外开一个 keeper 工作区不落地，用于 6.1/6.5 的 findmnt。
 
 # 6.5 重启恢复
 systemctl restart p37d
-findmnt -T /srv/repo/workspaces/<ws_id>     # 应为 overlay
-/run/p37-payload/p37 status /srv/repo
+findmnt -T /srv/repo/workspaces/<keeper_ws>  # 应为 overlay
+/run/p37-payload/p37 ws-list /srv/repo
 
-# 6.6 GC 保护
+# 6.6 GC 保护（停服后 payload 仍挂载）
 systemctl start p37d
 /run/p37-payload/p37 gc /srv/repo --prune; echo $?   # 期望非 0
 systemctl stop p37d
@@ -161,4 +178,5 @@ systemctl stop p37d
 
 验收记录请附：`p37d --check --json` 全文、`findmnt`、两个 stdio 客户端的
 `ws_id` 与 `version_log`、GC 拒绝的退出码与 stderr、`manifest.json` 与
-发布 tar 的 sha256。
+发布 tar 的 sha256，以及 `NNP_FAILED`（若 NNP 下 mount 失败，附去掉 NNP 的
+第二次结果）。

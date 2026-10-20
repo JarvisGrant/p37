@@ -1,0 +1,180 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（例如 v0.1.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  # 可选，配置位置见 .env.example。
+  # 留空时 GH_TOKEN 回退到 GitHub Actions 自动注入的 github.token。
+  P37_RELEASE_TOKEN: ${{ secrets.P37_RELEASE_TOKEN }}
+  GH_TOKEN: ${{ secrets.P37_RELEASE_TOKEN || github.token }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: resolve tag/version
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          test -n "$TAG"
+          VERSION="${TAG#v}"
+          test -n "$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "building $TAG (version=$VERSION) from $(git rev-parse HEAD)"
+      - name: test
+        run: make test
+      - name: build release
+        run: make release VERSION=${{ steps.meta.outputs.version }}
+      - name: build L1 bootstrap
+        run: make p36-bootstrap VERSION=${{ steps.meta.outputs.version }}
+      - name: verify release
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ steps.meta.outputs.version }}"
+          TARBALL="dist/p37-linux-amd64-$V.tar.gz"
+          test -f "$TARBALL"
+          test "$(tar -tzf "$TARBALL" | wc -l | tr -d ' ')" = "3"
+          for f in p37 p37d manifest.json; do
+            tar -tzf "$TARBALL" | grep -qx "$f"
+          done
+          manifest="dist/p37-linux-amd64-$V/manifest.json"
+          got_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest")"
+          got_commit="$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest")"
+          test "$got_version" = "$V"
+          test "$got_commit" = "$(git rev-parse HEAD)"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum -c "p37-linux-amd64-$V.tar.gz.sha256")
+          else
+            (cd dist && shasum -a 256 -c "p37-linux-amd64-$V.tar.gz.sha256")
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p37-release
+          if-no-files-found: error
+          path: |
+            dist/p37-linux-amd64-${{ steps.meta.outputs.version }}.tar.gz
+            dist/p37-linux-amd64-${{ steps.meta.outputs.version }}.tar.gz.sha256
+            dist/RELEASE_NOTES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p37-l1-bootstrap
+          if-no-files-found: error
+          path: dist/p36-bootstrap/
+
+  p36-acceptance:
+    needs: build
+    runs-on: ${{ vars.P37_RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: p37-release
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: p37-l1-bootstrap
+          path: dist/p36-bootstrap
+      - name: run P36 acceptance
+        env:
+          P37_VERSION: ${{ needs.build.outputs.version }}
+          P37_TAG: ${{ needs.build.outputs.tag }}
+          P37_ARTIFACT_DIR: ${{ github.workspace }}/dist
+          P37_BOOTSTRAP_DIR: ${{ github.workspace }}/dist/p36-bootstrap
+          P37_REPO: /srv/repo
+        run: |
+          chmod +x packaging/p36/ci/acceptance.sh
+          bash packaging/p36/ci/acceptance.sh
+      - name: upload acceptance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p36-acceptance-logs
+          if-no-files-found: warn
+          path: |
+            acceptance-output.log
+            acceptance.json
+            acceptance-ws.txt
+            check.json
+            doctor.txt
+            findmnt-*.txt
+            gc-*.out
+            acceptance-mcp.log
+            mcp-probe.json
+            ws-list.txt
+            tar-files.txt
+            payload-root.txt
+
+  publish:
+    needs: [build, p36-acceptance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: p37-release
+          path: dist
+      - name: publish GitHub Release
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+            gh release edit "$TAG" --title "p37 $VERSION" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
+              --title "p37 $VERSION" \
+              --notes-file dist/RELEASE_NOTES.md
+          fi
+          rm -rf verify && mkdir verify
+          gh release download "$TAG" --pattern 'p37-linux-amd64-*.tar.gz*' --dir verify
+          (cd verify && if command -v sha256sum >/dev/null 2>&1; then sha256sum -c *.sha256; else shasum -a 256 -c *.sha256; fi)
+          echo "release_url=$(gh release view "$TAG" --json url -q .url)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: print release URL
+        run: |
+          echo "release: $(gh release view "${{ needs.build.outputs.tag }}" --json url -q .url)"

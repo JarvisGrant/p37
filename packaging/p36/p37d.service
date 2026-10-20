@@ -1,8 +1,9 @@
 [Unit]
 Description=p37 version control daemon
-Documentation=https://github.com/chenyiwen/p37
+Documentation=https://github.com/JarvisGrant/p37
 After=local-fs.target
-# L2 的 /srv/repo 必须已经挂载；P36 的 L2 是实例主盘，通常 local-fs 之后已就绪。
+# /srv/repo 由 P36 的 L1 install.sh 预创建（p36:p36 0750）。
+# 不存在时服务不启动，这是故意的 fail-fast。
 ConditionPathIsDirectory=/srv/repo
 
 [Service]
@@ -10,7 +11,8 @@ Type=simple
 User=p36
 Group=p36
 # p36 需要读 /dev/disk/by-label/P37PAYLOAD 对应的 virtio-blk。
-# 若 L0 里没有 disk 组，改成 udev 规则把该设备 GROUP 设为 p36。
+# P36 中该盘是第三块（vda=root，vdb=P36AGENT，vdc=P37PAYLOAD）。
+# 若 L1 里没有 disk 组，改用 udev 规则把该设备 GROUP 设为 p36。
 SupplementaryGroups=disk
 
 Environment=P37_REPO=/srv/repo
@@ -20,8 +22,11 @@ Environment=P37_CONFIG=/usr/local/share/p37/config.toml
 Environment=TMPDIR=/srv/repo/.p37/tmp
 
 # systemd 创建 /run/p37-payload（属主 p36），p37-run 在里面只读挂载投递盘。
+# Preserve=yes 让停服后 payload 仍挂载，维护窗口才能继续用
+# /run/p37-payload/p37 gc；换 payload 盘仍需重启实例。
 RuntimeDirectory=p37-payload
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 ExecStart=/usr/local/bin/p37-run
 Restart=on-failure
@@ -36,17 +41,20 @@ AmbientCapabilities=CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_SYS_ADMIN
 NoNewPrivileges=yes
 
-# 所有可写状态只允许落在 /srv/repo；/run 只用于投递盘挂载点。
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ReadWritePaths=/srv/repo /run/p37-payload
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
+# 不要加入 PrivateTmp/ProtectSystem/ProtectHome/ReadWritePaths/ProtectKernel*/
+# ProtectControlGroups 等会创建私有 mount namespace 的选项：
+# p37d 在里面挂载 /run/p37-payload 和 workspace overlay，而 agent 的 shell
+# 与 /usr/local/bin/p37-mcp 在宿主 namespace，看不到私有 namespace 的挂载。
+# 这是 P36 验收里必须从“服务外 shell”执行 findmnt 的原因。
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+
+# 手工卸载 payload：
+#   systemctl stop p37d
+#   sudo umount /run/p37-payload
+# 不建议加 ExecStopPost=umount：那会让停服后的 p37 CLI 随 payload 一起消失，
+# 维护窗口无法执行 p37 gc。
 
 [Install]
 WantedBy=multi-user.target

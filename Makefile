@@ -20,8 +20,9 @@ LDFLAGS := -s -w \
 VERSION_SLUG := $(subst /,_,$(VERSION))
 RELEASE_NAME := p37-linux-amd64-$(VERSION_SLUG)
 RELEASE_DIR  := $(OUT)/$(RELEASE_NAME)
+RELEASE_NOTES := $(OUT)/RELEASE_NOTES.md
 
-.PHONY: all build test vet fmt cross release p36-bootstrap clean
+.PHONY: all build test vet fmt cross release release-check p36-bootstrap clean
 
 all: fmt vet test build
 
@@ -46,12 +47,22 @@ cross:
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build ./... && echo OK; \
 	done
 
+## release-check 拒绝在脏工作区上构建：否则 manifest 会写出“干净 commit
+## + 脏二进制”的组合。
+release-check:
+	@if [ -n "$$(git status --porcelain)" ]; then \
+	  echo "release: 工作区不干净，拒绝构建"; \
+	  git status --short; \
+	  exit 1; \
+	fi
+
 ## release 产出 linux/amd64 的静态发布物：
 ##   dist/p37-linux-amd64-<version>.tar.gz
 ##   dist/p37-linux-amd64-<version>.tar.gz.sha256
+##   dist/RELEASE_NOTES.md（给 GitHub Release 用，不进 tar）
 ## tar 根目录严格只有 p37、p37d、manifest.json。
-release: test
-	rm -rf $(RELEASE_DIR) $(RELEASE_DIR).tar.gz $(RELEASE_DIR).tar.gz.sha256
+release: release-check test
+	rm -rf $(RELEASE_DIR) $(RELEASE_DIR).tar.gz $(RELEASE_DIR).tar.gz.sha256 $(RELEASE_NOTES)
 	mkdir -p $(RELEASE_DIR)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(RELEASE_DIR)/p37  ./cmd/p37
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(RELEASE_DIR)/p37d ./cmd/p37d
@@ -64,17 +75,27 @@ release: test
 	  (cd $(OUT) && shasum -a 256 $(RELEASE_NAME).tar.gz > $(RELEASE_NAME).tar.gz.sha256); \
 	fi
 	@test "$$(find $(RELEASE_DIR) -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
+	@want="$$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(RELEASE_DIR)/manifest.json)"; \
+	  test "$$want" = "$(VERSION)" || { echo "release: manifest.version=$$want，期望 $(VERSION)"; exit 1; }
+	@want="$$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' $(RELEASE_DIR)/manifest.json)"; \
+	  test "$$want" = "$(COMMIT)" || { echo "release: manifest.commit=$$want，期望 $(COMMIT)"; exit 1; }
+	sed -e 's|@VERSION@|$(VERSION)|g' \
+	    -e 's|@COMMIT@|$(COMMIT)|g' \
+	    -e 's|@BUILD_TIME@|$(BUILD_TIME)|g' \
+	    -e 's|@GO_VERSION@|$(GO_VERSION)|g' \
+	    packaging/p36/RELEASE_NOTES.md > $(RELEASE_NOTES)
 	@echo "release: $(OUT)/$(RELEASE_NAME).tar.gz"
+	@echo "release notes: $(RELEASE_NOTES)"
 	@cat $(RELEASE_DIR).tar.gz.sha256
 
-## p36-bootstrap 生成 L0 侧的稳定胶水（不属于发布 tar）：
+## p36-bootstrap 生成平台胶水（P36 使用 L1，不属于发布 tar）：
 ##   dist/p37-mount-linux-amd64
-##   dist/p36-bootstrap/{p37-run,p37-mcp,p37-mount,config.toml,p37d.service}
-p36-bootstrap:
+##   dist/p36-bootstrap/{p37-run,p37-mcp,p37-mount,config.toml,p37d.service,90-p37.conf}
+p36-bootstrap: release-check
 	mkdir -p $(OUT)/p36-bootstrap
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(OUT)/p37-mount-linux-amd64 ./cmd/p37-mount
 	cp $(OUT)/p37-mount-linux-amd64 $(OUT)/p36-bootstrap/p37-mount
-	cp packaging/p36/p37-run packaging/p36/p37-mcp packaging/p36/config.toml packaging/p36/p37d.service $(OUT)/p36-bootstrap/
+	cp packaging/p36/p37-run packaging/p36/p37-mcp packaging/p36/config.toml packaging/p36/p37d.service packaging/p36/90-p37.conf $(OUT)/p36-bootstrap/
 	chmod 0755 $(OUT)/p36-bootstrap/p37-run $(OUT)/p36-bootstrap/p37-mcp $(OUT)/p36-bootstrap/p37-mount
 	@echo "p36-bootstrap: $(OUT)/p36-bootstrap"
 

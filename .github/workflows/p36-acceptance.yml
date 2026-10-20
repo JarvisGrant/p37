@@ -1,0 +1,92 @@
+name: p36-acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要验收的 GitHub Release tag（例如 v0.1.0）"
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  # 公开仓库通常不需要；私有仓库/组织策略可用同一个可选 secret。
+  GH_TOKEN: ${{ secrets.P37_RELEASE_TOKEN || github.token }}
+
+concurrency:
+  group: p36-acceptance-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    runs-on: ${{ vars.P37_RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: system info
+        run: |
+          lsb_release -a || true
+          uname -a
+          go version
+      - name: resolve tag/version
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          test -n "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: download release assets
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          mkdir -p dist/release
+          gh release download "$TAG" \
+            --pattern 'p37-linux-amd64-*.tar.gz*' \
+            --dir dist/release
+          ls -l dist/release
+      - name: build L1 bootstrap from the same tag
+        run: make p36-bootstrap VERSION=${{ steps.meta.outputs.version }}
+      - name: run P36 acceptance
+        env:
+          P37_VERSION: ${{ steps.meta.outputs.version }}
+          P37_TAG: ${{ steps.meta.outputs.tag }}
+          P37_ARTIFACT_DIR: ${{ github.workspace }}/dist/release
+          P37_BOOTSTRAP_DIR: ${{ github.workspace }}/dist/p36-bootstrap
+          P37_REPO: /srv/repo
+        run: |
+          chmod +x packaging/p36/ci/acceptance.sh
+          bash packaging/p36/ci/acceptance.sh
+      - name: upload acceptance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p36-acceptance-${{ steps.meta.outputs.tag }}
+          if-no-files-found: warn
+          path: |
+            acceptance-output.log
+            acceptance.json
+            acceptance-ws.txt
+            check.json
+            doctor.txt
+            findmnt-*.txt
+            gc-*.out
+            acceptance-mcp.log
+            mcp-probe.json
+            ws-list.txt
+            tar-files.txt
+            payload-root.txt
