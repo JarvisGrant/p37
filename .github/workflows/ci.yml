@@ -11,19 +11,10 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      # GitHub runner 的 /tmp 可能是粗粒度 mtime 的文件系统；p37 的 stat
-      # 快路径按 mtime_ns 判定，测试需要纳秒级时间戳。runner.temp 与
-      # workspace 同文件系统（ext4）。
-      TMPDIR: ${{ runner.temp }}/p37-test-tmp
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: prepare TMPDIR
-        run: |
-          mkdir -p "$TMPDIR"
-          echo "TMPDIR=$TMPDIR fs=$(stat -f -c %T "$TMPDIR")"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -34,6 +25,12 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test
-        run: go test ./... -count=1
+        run: |
+          # GitHub runner 的 /tmp 可能是粗粒度 mtime 的文件系统；p37 的
+          # stat 快路径按 mtime_ns 判定，测试需要纳秒级时间戳。
+          export TMPDIR="${RUNNER_TEMP}/p37-test-tmp"
+          mkdir -p "$TMPDIR"
+          echo "TMPDIR=$TMPDIR fs=$(stat -f -c %T "$TMPDIR")"
+          go test ./... -count=1
       - name: cross-build
         run: make cross
