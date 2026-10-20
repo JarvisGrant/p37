@@ -132,6 +132,8 @@ sudo install -D -m 0644 "$BOOTSTRAP_DIR/p37d.service" /etc/systemd/system/p37d.s
 sudo install -D -m 0644 "$BOOTSTRAP_DIR/90-p37.conf" /etc/sysctl.d/90-p37.conf
 sudo install -D -m 0644 "$BOOTSTRAP_DIR/tmpfiles-p37.conf" /etc/tmpfiles.d/p37.conf
 sudo sysctl --system >/dev/null
+# runner 可能已有更高优先级的 sysctl.d 覆盖 90-p37.conf；验收时显式确保额度。
+sudo sysctl -w fs.inotify.max_user_watches=1048576 fs.inotify.max_user_instances=4096 >/dev/null
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/p37.conf
 
 say "生成 96 MiB payload"
