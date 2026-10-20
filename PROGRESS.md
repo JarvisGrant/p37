@@ -44,7 +44,7 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 | 幂等初始化 | `p37 init --if-missing`、`p37 init --config <file>`；已有仓库绝不覆盖 config |
 | 部署健康检查 | `internal/health` + `p37d --check [--json] [--strict]`；可写/ext4/同 FS/OverlayFS/inotify/磁盘/daemon 状态 |
 | GC 维护保护 | `internal/repolock`；daemon 持锁时 `p37 gc` 拒绝，`--force` 才显式跳过 |
-| 默认值适配 20GB L2 | `base_cache_bytes=4 GiB`、`warn_disk_bytes=12 GiB`、`max_active=8`（硬上限仍 64） |
+| 默认值适配 20GB L2 | `base_cache_bytes=4 GiB`、`warn_disk_bytes=8 GiB`、`max_active=4`（v0.1.13 copy 回退；硬上限仍 64） |
 | P36 部署包 | `packaging/p36/`：`p37d.service`、`p37-run`、`p37-mcp`、`config.toml`、`p37-mount` Go 挂载助手 |
 
 测试新增：stdio 双客户端并发闭环、daemon 不在时的错误、init 幂等/模板、
@@ -74,6 +74,22 @@ P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制�
 - **发布流程**：`make release` 增加 dirty 检查、manifest version/commit 自检、
   release notes 生成；GitHub Actions 负责 tag → build → P36 验收 → Release，
   另保留对已发布 Release 的 `workflow_dispatch` 验收。
+
+### v0.1.13（P36 非 root overlay EPERM 的默认回退）
+
+真实 P36 实测：`User=p36 + NoNewPrivileges=yes + CAP_SYS_ADMIN` 下 payload
+挂载、MCP/CLI/land/GC 正常，但 overlay mount 返回 `permission denied`；root
+下 overlay 正常。因此 v0.1.13 只改 packaging/docs：
+
+- `config.toml` 默认 `materialize="auto"`，`max_active=4`、
+  `warn_disk_bytes=8 GiB`；copy 模式每个工作区是一份完整树。
+- 验收读取 `ws_open`/`ws_list` 的实际 `materialize`，输出
+  `MATERIALIZE=copy|overlay`；copy 下只要求工作区在 `/srv/repo` ext4 上。
+- 默认 acceptance 不再自动 root fallback；只有
+  `P37_ALLOW_ROOT_FALLBACK=1` 才做 root 对照。`p37 doctor` 在 copy 下仍会
+  报 `[FAIL] OverlayFS`，正式门禁改用 `p37d --check --strict`。
+- 新增可选 `config-overlay.toml` + `p37d-root-overlay.service`（root+overlay）。
+- 产品 `cmd/`、`internal/` 未改；仓库格式仍为 `format_ver=1`。
 
 ## 真机第二遍（S30–S34 + 采集提速）
 

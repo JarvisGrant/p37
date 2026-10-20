@@ -1,0 +1,46 @@
+[Unit]
+Description=p37 version control daemon (optional root + OverlayFS)
+Documentation=https://github.com/JarvisGrant/p37
+After=local-fs.target
+ConditionPathIsDirectory=/srv/repo
+# 与默认的 User=p36 + auto 单元互斥，避免两个 daemon 抢同一把仓库锁。
+Conflicts=p37d.service
+
+[Service]
+Type=simple
+# 仅用于 P36 明确允许 root、且需要 OverlayFS 的场景。
+# 默认部署请使用 p37d.service（User=p36 + auto + copy 回退）。
+User=root
+Group=root
+SupplementaryGroups=disk
+
+Environment=P37_REPO=/srv/repo
+Environment=P37_PAYLOAD_LABEL=P37PAYLOAD
+Environment=P37_PAYLOAD_MOUNT=/run/p37-payload
+Environment=P37_CONFIG=/usr/local/share/p37/config-overlay.toml
+Environment=TMPDIR=/srv/repo/.p37/tmp
+
+ExecStart=/usr/local/bin/p37-run
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+# root 本身已有挂载权限；保留能力边界，避免不必要的 capability。
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+NoNewPrivileges=yes
+
+# 与默认单元相同：不要加会创建私有 mount namespace 的 Protect*/PrivateTmp。
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# 手工卸载 payload：
+#   systemctl stop p37d-root-overlay
+#   sudo umount /run/p37-payload
+
+[Install]
+WantedBy=multi-user.target

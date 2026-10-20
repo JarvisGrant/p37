@@ -1,0 +1,35 @@
+# 可选：root + OverlayFS 部署的配置模板。
+#
+# 仅当 P36 明确允许 p37d 以 root 运行、且希望使用 OverlayFS 时使用。
+# 默认部署应使用 config.toml（User=p36 + materialize=auto + copy 回退）。
+#
+# 安装示例：
+#   install -m 0644 config-overlay.toml /usr/local/share/p37/config-overlay.toml
+#   install -m 0644 p37d-root-overlay.service /etc/systemd/system/p37d-root-overlay.service
+#   systemctl disable --now p37d.service
+#   systemctl enable --now p37d-root-overlay.service
+
+[repo]
+format_ver = 1
+
+[workspace]
+materialize = "overlay"
+base_cache_bytes = 4294967296
+# overlay 下每个工作区只存 upper 层，20 GiB L2 可以放宽到 8。
+max_active = 8
+warn_disk_bytes = 12884901888
+scan_interval = "30s"
+debounce = "500ms"
+
+[daemon]
+listen_http = false
+log_level = "info"
+
+[retention]
+keep_versions = 200
+keep_epochs = 20
+epoch_size = 50
+
+[gc]
+scrub_sample = 0.01
+verify_on_read = "sample"

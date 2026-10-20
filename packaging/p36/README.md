@@ -19,7 +19,8 @@ L1 应用层（P36 把平台胶水放这里）
 ├── /usr/local/share/p37/config.toml
 ├── /etc/systemd/system/p37d.service
 ├── /etc/sysctl.d/90-p37.conf
-└── /etc/tmpfiles.d/p37.conf
+├── /etc/tmpfiles.d/p37.conf
+│   （可选 root+overlay：config-overlay.toml + p37d-root-overlay.service）
 
 P37PAYLOAD（宿主投递，只读 ext4，额外一块 virtio-blk）
 P36 中设备顺序：
@@ -32,7 +33,7 @@ P36 中设备顺序：
 
 L2 /srv/repo（每实例可写 ext4）
 ├── .p37/                           # 元数据库、CAS、overlay upper、tmp
-└── workspaces/                     # OverlayFS 工作区挂载点
+└── workspaces/                     # overlay 挂载点，或 auto 回退后的 copy 目录
 ```
 
 L2 必须预先把 `/srv/repo` 建成 `p36:p36` 可写（建议 `0750`）；p37d 以 `p36`
@@ -42,6 +43,12 @@ ext4 上。
 `p37d.service` 有 `ConditionPathIsDirectory=/srv/repo`，所以 **`/srv/repo`
 必须在服务启动前存在**。P36 的 L1 `install.sh` 负责创建它；不存在时服务不
 启动是故意的 fail-fast。
+
+默认 `materialize = "auto"`：先尝试 OverlayFS，失败自动回退 copy。
+Ubuntu 26.04 非 root 下 overlay 可能 `EPERM`（即使有 `CAP_SYS_ADMIN`），
+这时工作区是 `/srv/repo/workspaces` 下的普通目录，不是 overlay。
+copy 模式每个工作区是一份完整树；默认 `max_active=4`、`warn_disk_bytes=8 GiB`，
+按实际仓库体积和 L2 容量调整。
 
 ## 2. 构建与发布物
 
@@ -55,6 +62,7 @@ make release VERSION=0.1.0
 make p36-bootstrap
 # dist/p37-mount-linux-amd64
 # dist/p36-bootstrap/{p37-run,p37-mcp,p37-mount,config.toml,p37d.service,90-p37.conf,tmpfiles-p37.conf}
+# 可选 root+overlay：config-overlay.toml、p37d-root-overlay.service
 ```
 
 发布 tar 的根目录严格只有：
@@ -108,6 +116,10 @@ install -m 0644 dist/p36-bootstrap/config.toml /mnt/l1/usr/local/share/p37/confi
 install -m 0644 dist/p36-bootstrap/p37d.service /mnt/l1/etc/systemd/system/p37d.service
 install -m 0644 dist/p36-bootstrap/90-p37.conf /mnt/l1/etc/sysctl.d/90-p37.conf
 install -m 0644 dist/p36-bootstrap/tmpfiles-p37.conf /mnt/l1/etc/tmpfiles.d/p37.conf
+
+# 可选：root + overlay 变体（默认不装）
+# install -m 0644 dist/p36-bootstrap/config-overlay.toml /mnt/l1/usr/local/share/p37/config-overlay.toml
+# install -m 0644 dist/p36-bootstrap/p37d-root-overlay.service /mnt/l1/etc/systemd/system/p37d-root-overlay.service
 ```
 
 P36 的 L1 `install.sh` 还应：
@@ -121,7 +133,12 @@ P36 的 L1 `install.sh` 还应：
 - `systemctl enable p37d.service`。
 
 `p37d.service` 使用 `User=p36`、`AmbientCapabilities=CAP_SYS_ADMIN`、
-`NoNewPrivileges=yes`。`p37-mount` 用 `mount(2)`，不依赖 setuid `mount`。
+`NoNewPrivileges=yes`、`materialize=auto`。`p37-mount` 用 `mount(2)`，不依赖
+setuid `mount`。
+
+如果 P36 明确允许 root，且必须使用 OverlayFS，可启用可选的
+`p37d-root-overlay.service`（`User=root` + `config-overlay.toml`）。它与默认
+unit 互斥；默认部署仍保持 `User=p36` + auto。
 
 > **不要**给 unit 加 `PrivateTmp`、`ProtectSystem=strict`、`ProtectHome`、
 > `ReadWritePaths`、`ProtectKernel*`、`ProtectControlGroups` 等会创建私有
@@ -153,6 +170,11 @@ MCP 客户端配置：
 3. 停止实例（或按 P36 的方式替换第三块磁盘 `vdc`）。
 4. 启动实例；`p37-run` 挂载新盘并校验 `manifest.version` 与 `p37d --version`。
 5. 仓库格式不变，不需要 `p37 migrate`。
+
+> **从 v0.1.12 升级到 v0.1.13**：已有仓库的 `.p37/config.toml` 可能仍写着
+> `materialize = "overlay"`。`p37 init --if-missing` 不会覆盖现有配置；
+> 请先把它改成 `auto`（或 `copy`），否则 p37d 仍会按 overlay 启动并失败。
+> 新实例使用 v0.1.13 的模板会自动是 auto。
 
 > 只 `systemctl restart p37d` 时，旧 payload 可能仍挂在 `/run/p37-payload`；
 > **换盘请重启实例**。这是当前已知限制。
@@ -194,6 +216,10 @@ P36 应使用 `--strict`。inotify 不足只 WARN，不会自动修改内核参�
 +sys_admin` 或 `p37-run` 的 unit 环境），不要用 root 直接跑后留下 root 属主的
 `.p37` 子目录。
 
+auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式门禁用
+`p37d --check --strict`。`p37 doctor` 的 OverlayFS 判定更严格，copy 模式下
+会显示 `[FAIL] OverlayFS`，这是预期，不应据此判定 P36 部署失败。
+
 如果后续需要在线监控，应单独实现只读检查，而不是高频调用 `--check`。
 
 ## 8. 已知限制
@@ -206,10 +232,14 @@ P36 应使用 `--strict`。inotify 不足只 WARN，不会自动修改内核参�
   因此 MCP 客户端进程必须与 p37d 同 uid（默认都是 `p36`）；换用户会连不上。
 - 没有自更新；不要试图在实例内替换 `/run/p37-payload` 下的文件。
 - `p37d --check` 有写探测，不适合当作在线探针。
-- GitHub-hosted runner 可能禁止非 root 进程挂载 OverlayFS（即使有 ambient
-  `CAP_SYS_ADMIN`）。Actions 验收脚本在这种情况下会退化为 `User=root` 并在
-  日志中标记 `ROOT_FALLBACK=1`；**真实 P36 验收必须用 `User=p36` 的 P36 实例
-  或 self-hosted runner**（`vars.P37_RUNNER`）。
+- Ubuntu 26.04 非 root 下 OverlayFS 可能 `EPERM`（即使有 ambient
+  `CAP_SYS_ADMIN`）。默认 auto 会回退 copy；copy 模式磁盘占用 ≈ 仓库树 ×
+  活跃工作区数，必须按 L2 容量收紧 `max_active` / `warn_disk_bytes`。
+- 默认 acceptance **不再自动 root fallback**；只有显式
+  `P37_ALLOW_ROOT_FALLBACK=1` 才退化 root 做对照。真实 P36 仍应验证
+  `User=p36` + auto copy；root+overlay 用可选变体。
+- `p37 doctor` 在 copy 模式下会报 `[FAIL] OverlayFS`，这是检查器的既有严格
+  判定；P36 正式门禁看 `p37d --check --strict`。
 
 ## 9. P36 集成需要的字段
 
@@ -224,5 +254,7 @@ P36 应使用 `--strict`。inotify 不足只 WARN，不会自动修改内核参�
 | VM 创建参数（建议名） | `p37PayloadPath`、`p37PayloadVersion`、`p37PayloadSHA256` |
 | 实例内仓库 | `/srv/repo`（L2 ext4，`p36:p36` 可写，建议 `0750`） |
 | 挂载点 | `/run/p37-payload` |
+| 工作区模式 | 默认 `workspace.materialize = "auto"`；非 root overlay EPERM 时回退 copy |
 | 运行时环境 | `P37_REPO=/srv/repo`、`P37_PAYLOAD_LABEL=P37PAYLOAD`、`TMPDIR=/srv/repo/.p37/tmp` |
 | L1 必需文件 | `p37-run`、`p37-mcp`、`p37-mount`、`config.toml`、`p37d.service`、`90-p37.conf`、`tmpfiles-p37.conf` |
+| L1 可选文件 | `config-overlay.toml`、`p37d-root-overlay.service`（root+overlay 变体） |

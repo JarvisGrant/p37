@@ -243,7 +243,14 @@ if ! wait_socket; then
   sudo systemctl reset-failed p37d.service || true
   sudo systemctl start p37d.service || true
   if ! wait_socket; then
-    echo "去掉 NoNewPrivileges 后仍未启动；runner 可能禁止 p36 挂载 overlay，退化到 root 直接进程"
+    if [ "${P37_ALLOW_ROOT_FALLBACK:-0}" != "1" ]; then
+      echo "p37d 在 User=p36 + auto 下仍未启动；默认不允许 root fallback。"
+      echo "如果只是测试环境需要 root 对照，设置 P37_ALLOW_ROOT_FALLBACK=1。"
+      sudo systemctl status p37d.service --no-pager || true
+      sudo journalctl -u p37d.service -n 160 --no-pager || true
+      exit 1
+    fi
+    echo "允许 root fallback：去掉 NNP 后仍未启动，退化到 root 直接进程"
     ROOT_FALLBACK=1
     sudo systemctl stop p37d.service || true
     sudo systemctl reset-failed p37d.service || true
@@ -279,8 +286,13 @@ for f in p37 p37d manifest.json; do grep -qx "$f" payload-root.txt; done
 say "p37d --check --strict"
 as_caps /run/p37-payload/p37d --check --strict --json --repo "$REPO" | tee check.json
 
-say "p37 doctor"
-as_caps /run/p37-payload/p37 doctor "$REPO" | tee doctor.txt
+say "p37 doctor（copy 模式下 OverlayFS FAIL 是预期，不作为硬门禁）"
+set +e
+as_caps /run/p37-payload/p37 doctor "$REPO" > doctor.txt 2>&1
+DOCTOR_EXIT=$?
+set -e
+cat doctor.txt
+echo "DOCTOR_EXIT=$DOCTOR_EXIT"
 
 say "重新启动 p37d（NNP_FAILED=$NNP_FAILED ROOT_FALLBACK=$ROOT_FALLBACK）"
 if [ "$ROOT_FALLBACK" = 1 ]; then
@@ -311,9 +323,28 @@ sudo cp "$REPO/.p37/acceptance.json" acceptance.json
 sudo cp "$REPO/.p37/acceptance-ws.txt" acceptance-ws.txt
 cat acceptance.json
 
+MAT="$(jq -r '.keeper_materialize // empty' acceptance.json)"
+case "$MAT" in
+  copy|overlay) ;;
+  *) echo "无法从 acceptance.json 读取 materialize（得到 %q）" "$MAT"; exit 1 ;;
+esac
+echo "MATERIALIZE=$MAT"
+if [ "$DOCTOR_EXIT" -ne 0 ] && [ "$MAT" != "copy" ]; then
+  echo "doctor 退出码 $DOCTOR_EXIT，且 materialize=$MAT，不是预期的 copy 回退"
+  exit 1
+fi
+if [ "$DOCTOR_EXIT" -ne 0 ]; then
+  echo "DOCTOR_EXIT=$DOCTOR_EXIT（copy 模式下 OverlayFS FAIL 预期）"
+fi
+
 WS1="$(head -n 1 acceptance-ws.txt)"
-say "服务外 findmnt：workspace $WS1"
+say "服务外 findmnt：workspace $WS1（MATERIALIZE=$MAT）"
 findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace.txt
+if [ "$MAT" = "overlay" ]; then
+  grep -q overlay findmnt-workspace.txt
+else
+  grep -q ext4 findmnt-workspace.txt
+fi
 
 say "重启 p37d"
 if [ "$ROOT_FALLBACK" = 1 ]; then
@@ -324,6 +355,11 @@ else
   wait_socket || { echo "重启后 socket 未出现"; exit 1; }
 fi
 findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace-after-restart.txt
+if [ "$MAT" = "overlay" ]; then
+  grep -q overlay findmnt-workspace-after-restart.txt
+else
+  grep -q ext4 findmnt-workspace-after-restart.txt
+fi
 as_app /run/p37-payload/p37 ws-list "$REPO" | tee ws-list.txt
 
 say "GC 拒绝（daemon 运行中）"
@@ -348,8 +384,9 @@ set -e
 cat gc-stopped.out
 [ "$GC_STOPPED_CODE" -eq 0 ]
 
-say "acceptance ok (NNP_FAILED=$NNP_FAILED ROOT_FALLBACK=$ROOT_FALLBACK)"
+say "acceptance ok (NNP_FAILED=$NNP_FAILED ROOT_FALLBACK=$ROOT_FALLBACK MATERIALIZE=$MAT)"
 {
   echo "NNP_FAILED=$NNP_FAILED"
   echo "ROOT_FALLBACK=$ROOT_FALLBACK"
+  echo "MATERIALIZE=$MAT"
 } | tee -a "$GITHUB_STEP_SUMMARY" 2>/dev/null || true

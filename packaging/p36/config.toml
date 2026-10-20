@@ -11,14 +11,16 @@
 format_ver = 1
 
 [workspace]
-# P36 工作区必须走 OverlayFS；20 GiB 的 L2 承受不了 copy 模式。
-materialize = "overlay"
-# 4 GiB 基底缓存；超出后 LRU 淘汰。
+# Ubuntu 26.04 非 root 下 OverlayFS 可能 EPERM（即使有 CAP_SYS_ADMIN）。
+# auto 会先尝试 overlay，失败后回退 copy；真实工作区模式写入 workspace.materialize。
+materialize = "auto"
+# 4 GiB 基底缓存；只有 overlay 模式使用，copy 模式不使用。
 base_cache_bytes = 4294967296
-# 剩余空间低于 12 GiB 时 doctor/check 告警。
-warn_disk_bytes = 12884901888
-# 20 GiB L2 上默认 8 个活跃工作区；硬上限仍是 64。
-max_active = 8
+# copy 模式每个工作区都是完整树；20 GiB L2 上默认 4 个活跃工作区。
+# 两个 agent 并发 + 一个 keeper 验收工作区至少需要 3 个。
+max_active = 4
+# copy 模式磁盘占用更高；剩余空间低于 8 GiB 就告警。
+warn_disk_bytes = 8589934592
 scan_interval = "30s"
 debounce = "500ms"
 

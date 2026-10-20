@@ -27,6 +27,9 @@
 - P36 设备顺序：`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；按 label 挂载，
   不依赖顺序。
 - 仓库固定在 L2 的 `/srv/repo`（`p36:p36`，建议 `0750`，ext4）。
+- 默认 `workspace.materialize = "auto"`：Ubuntu 26.04 非 root 下 OverlayFS
+  可能 `EPERM`，自动回退 copy；copy 模式默认 `max_active=4`、
+  `warn_disk_bytes=8 GiB`。
 - MCP 客户端使用 `/usr/local/bin/p37-mcp`（内部 `p37d --stdio --repo /srv/repo`）。
 - `p37d.service` 以 `User=p36` 运行，授予 `CAP_SYS_ADMIN`；**不要**加会创建
   私有 mount namespace 的 `PrivateTmp`/`Protect*` 选项，否则 agent 看不到
@@ -41,12 +44,18 @@
 ## 已知限制
 
 - 在线 GC 未实现；`p37 gc` 在 daemon 运行时拒绝，需维护窗口。
+- copy 模式下 `p37 doctor` 仍会把 OverlayFS 标成 `FAIL`；正式门禁用
+  `p37d --check --strict`（auto 下 overlay 只 WARN）。
 - payload 换盘需要重启实例；服务级 restart 不保证换盘。
 - `p37d --check` 有少量写探测，适合启动前检查，不建议作为在线高频探针。
-- GitHub-hosted runner 可能禁止非 root 挂载 OverlayFS；Actions 验收会退化
-  `User=root` 并标记 `ROOT_FALLBACK=1`。真实 P36 的 `User=p36` 验收需用
-  P36 实例或 self-hosted runner（`vars.P37_RUNNER`）。
+- Ubuntu 26.04 非 root 下 OverlayFS 可能 `EPERM`；默认 auto 回退 copy。
+  copy 模式磁盘 ≈ 仓库树 × 活跃工作区数，需按 L2 容量调整 `max_active` /
+  `warn_disk_bytes`。默认 acceptance 不再自动 root fallback；只有显式
+  `P37_ALLOW_ROOT_FALLBACK=1` 才退化 root 做对照。root+overlay 用
+  `config-overlay.toml` + `p37d-root-overlay.service`。
 - `p37d --stdio` 在启动时快照 daemon 工具清单；daemon 升级后客户端应重连。
 - HTTP 模式仍强制 `auth_token`；stdio 模式依赖 unix socket `0600`，客户端需与
   p37d 同 uid。
 - 仓库格式 `format_ver=1` 不变，不需要 `p37 migrate`。
+- 从 v0.1.12 升级：已有 `.p37/config.toml` 若仍是 `materialize="overlay"`，
+  请改成 `auto`（或 `copy`）；`init --if-missing` 不会覆盖旧配置。

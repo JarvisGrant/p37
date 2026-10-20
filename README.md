@@ -86,12 +86,17 @@ HTTP 模式（**必须**配置 `auth_token`）：
 P36 的 L0 保持不变，平台胶水放 L1，L2 每实例可写。p37/p37d **不烙进镜像**：
 宿主投递一块只读 ext4 小盘（label `P37PAYLOAD`，固定 96 MiB），实例内的稳定
 脚本挂到 `/run/p37-payload` 后执行。P36 中它是第三块 virtio-blk：
-`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`。仓库固定在 `/srv/repo`，
-工作区用 OverlayFS；p37d 以非 root 用户 `p36` 运行，systemd 只授予
-`CAP_SYS_ADMIN`。
+`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`。仓库固定在 `/srv/repo`；
+p37d 以非 root 用户 `p36` 运行，systemd 只授予 `CAP_SYS_ADMIN`。
+
+Ubuntu 26.04 非 root 下 OverlayFS 可能返回 `EPERM`（即使有 `CAP_SYS_ADMIN`）。
+因此 P36 默认 `workspace.materialize = "auto"`：优先 overlay，失败自动回退
+copy。copy 模式每个工作区是一份完整树，20GB L2 上需要更保守的
+`max_active` / `warn_disk_bytes`。只有明确允许 root 时，才使用可选的
+`config-overlay.toml` + `p37d-root-overlay.service` 走 OverlayFS。
 
 ```bash
-make release VERSION=0.1.0       # 发布 tar + sha256
+make release VERSION=0.1.13      # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 
@@ -105,12 +110,19 @@ daemon 启动前检查，不建议作为在线高频探针。
 
 | 配置 | 默认值 | 说明 |
 |---|---:|---|
-| `workspace.base_cache_bytes` | 4 GiB | overlay 基底缓存上限 |
-| `workspace.warn_disk_bytes` | 12 GiB | 剩余空间低于此值时 doctor/check 告警 |
-| `workspace.max_active` | 8 | 活跃工作区默认上限（硬上限仍是 64） |
+| `workspace.materialize` | `auto` | 优先 overlay，失败回退 copy |
+| `workspace.base_cache_bytes` | 4 GiB | overlay 基底缓存上限（copy 不用） |
+| `workspace.warn_disk_bytes` | 8 GiB | copy 模式更早告警 |
+| `workspace.max_active` | 4 | 两个 agent + keeper 验收至少需要 3；硬上限仍是 64 |
 
-P36 模板显式写 `materialize = "overlay"`：20GB 盘上静默回退 copy 会迅速耗尽
-磁盘，因此宁可让启动失败并要求修复 OverlayFS。
+`p37 doctor` 在 copy 模式下仍会把 `OverlayFS` 标成 `FAIL`（这是检查器的既有
+严格判定）；P36 的正式门禁应使用 `p37d --check --strict`，auto 下 overlay
+不可用只 WARN。实际工作区模式看 `ws_open`/`ws_list` 的 `materialize`，或验收
+脚本输出的 `MATERIALIZE=copy|overlay`。
+
+从 v0.1.12 升级时，已有仓库的 `.p37/config.toml` 若仍是
+`materialize = "overlay"`，需要手工改成 `auto`（或 `copy`）；
+`p37 init --if-missing` 不会覆盖旧配置。
 
 本轮适配**不改变仓库格式**：`format_ver` 仍为 1，无需 `p37 migrate`；配置新增
 项都是可选的，旧仓库直接打开即可。

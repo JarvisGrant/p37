@@ -27,14 +27,20 @@ cd /path/to/p37 && go build -o /usr/local/bin/p37 ./cmd/p37 \
 
 规格 §16 要求动 `mountmgr` 之前先验四件事。任一失败就要调整方案。
 
+> v0.1.13 起 P36 默认 `workspace.materialize = "auto"`。Ubuntu 26.04 非 root
+> 下 overlay mount 可能返回 `EPERM`；此时自动回退 copy。`p37 doctor` 的
+> `[FAIL] OverlayFS` 在 copy 模式下是**预期**，不要误判为部署失败；正式门禁
+> 用 `p37d --check --strict`（auto 下 overlay 只 WARN）。真实工作区模式看
+> `ws_open`/`ws_list` 的 `materialize`，或验收脚本输出的 `MATERIALIZE=copy|overlay`。
+
 ```bash
 p37 init /srv/repo
-p37 doctor /srv/repo
+p37 doctor /srv/repo        # copy 模式下 OverlayFS FAIL 可接受，记录即可
 ```
 
 | # | 验证项 | 通过判据 | 失败时的动作 |
 |---|---|---|---|
-| 1.1 | **能否挂载 OverlayFS** | `doctor` 输出 `[OK] OverlayFS 可用` | 若报 `OVERLAY_UNAVAILABLE`：按附录 G.2 给 `CAP_SYS_ADMIN`；仍失败则接受 `copy` 模式并重估并发上限 |
+| 1.1 | **能否挂载 OverlayFS** | `doctor` 输出 `[OK] OverlayFS 可用`，或 `materialize=auto` 下记录 `MATERIALIZE=copy` | 若报 `OVERLAY_UNAVAILABLE`：确认 `CAP_SYS_ADMIN`；仍失败则接受 `copy` 并重估 `max_active`/`warn_disk_bytes` |
 | 1.2 | **换 lower 重挂**（§4.9.2 步骤 5b） | `ws-rebase` 后工作区内容正确 | 记录失败细节，需调整 §4.9.2 的实现（见 §3） |
 | 1.3 | **stat 的 inode 是否可靠** | 连续两次采集之间，未改动的文件不触发哈希；且 daemon 重启后仍成立 | 若不成立：按 §4.7 的降级开关把 `InodeReliable` 置 false（配置 `workspace` 下加开关） |
 | 1.4 | **fsnotify 是否可靠** | 直接改文件后，采集能在 `scan_interval` 内发现；批量操作（`git checkout` 式）不丢事件 | 若不可靠：提高触发源 b/c 权重，并把 `scan_interval` 调小 |
@@ -132,6 +138,8 @@ p37 status /srv/repo      # 期望：head 要么是旧值要么是新值，无�
 - P36 设备顺序：`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
 - `p37d.service` 使用 `User=p36` + `AmbientCapabilities=CAP_SYS_ADMIN`，
   **不要**加会创建私有 mount namespace 的 `PrivateTmp`/`Protect*`；
+- `workspace.materialize = "auto"`；非 root overlay 失败时接受 copy 回退；
+- copy 模式建议 `max_active=4`、`warn_disk_bytes=8 GiB`；
 - `/run/p37-payload` 由 `/etc/tmpfiles.d/p37.conf` 创建；不要用
   `RuntimeDirectory=`（service 重启时会在只读 payload 挂载点上重建目录而失败）。
   停服后 payload 仍挂载。
@@ -146,13 +154,15 @@ GitHub Actions 的 `release.yml` 会自动跑第 6.1–6.6；也可以在已发�
 #     生成了 lost+found，用 debugfs -w -R "rmdir /lost+found" 删除。
 findmnt -T /run/p37-payload                  # 应为 ext4
 find /run/p37-payload -maxdepth 1 -mindepth 1 -printf '%f\n' | sort
-findmnt -T /srv/repo/workspaces/<keeper_ws>  # 应为 overlay
+findmnt -T /srv/repo/workspaces/<keeper_ws>  # overlay 或 copy 下的 /srv/repo ext4
+# 记录 MATERIALIZE=copy|overlay（见 6.4 的 acceptance.json / ws-list）
 
 # 6.2 启动前检查（daemon 停止时；--check 有写探测）
 systemctl stop p37d
 /run/p37-payload/p37d --check --strict --repo /srv/repo
 /run/p37-payload/p37d --check --strict --json --repo /srv/repo | jq .
-/run/p37-payload/p37 doctor /srv/repo
+# copy 模式下 doctor 的 OverlayFS FAIL 是预期；正式门禁看上面的 check.json
+/run/p37-payload/p37 doctor /srv/repo || true
 systemctl start p37d
 
 # 6.3 幂等 init（第二次必须返回 0 且不改 config）
@@ -165,11 +175,12 @@ sha256sum /srv/repo/.p37/config.toml
 #     各自 ws_open → 改文件 → ws_sync → ws_land，断言两个 ws_id 不同、
 #     两次 land 都成功、version_log 至少 3 个版本。
 #     另外开一个 keeper 工作区不落地，用于 6.1/6.5 的 findmnt。
+#     读取 keeper 的 materialize，输出 MATERIALIZE=copy|overlay。
 
 # 6.5 重启恢复
 systemctl restart p37d
-findmnt -T /srv/repo/workspaces/<keeper_ws>  # 应为 overlay
-/run/p37-payload/p37 ws-list /srv/repo
+findmnt -T /srv/repo/workspaces/<keeper_ws>  # overlay 或 /srv/repo ext4
+/run/p37-payload/p37 ws-list /srv/repo        # 最后一列 materialize
 
 # 6.6 GC 保护（停服后 payload 仍挂载）
 systemctl start p37d
@@ -178,12 +189,14 @@ systemctl stop p37d
 /run/p37-payload/p37 gc /srv/repo --prune --pack     # 期望 0
 ```
 
-如果是在 GitHub-hosted runner 上跑，遇到 OverlayFS `permission denied` 时脚本会
-退化 `User=root` 并在日志里写 `ROOT_FALLBACK=1`；这只是 CI 环境限制，不能替代
-真实 P36 的 `User=p36` 验收。真实验收请用 P36 实例或 self-hosted runner
-（`vars.P37_RUNNER`）。
+v0.1.13 起默认验收**不再自动 root fallback**：P36 在 `materialize=auto` 下
+走 copy，日志输出 `MATERIALIZE=copy`。只有显式 `P37_ALLOW_ROOT_FALLBACK=1`
+才退化 root（用于对照/调试）；它不能替代真实 P36 的 `User=p36` 验收。
 
-验收记录请附：`p37d --check --json` 全文、`findmnt`、两个 stdio 客户端的
-`ws_id` 与 `version_log`、GC 拒绝的退出码与 stderr、`manifest.json` 与
-发布 tar 的 sha256，以及 `NNP_FAILED`（若 NNP 下 mount 失败，附去掉 NNP 的
-第二次结果）。
+root + overlay 是可选变体：`config-overlay.toml` +
+`p37d-root-overlay.service`；仅当 P36 明确允许 root 时使用。
+
+验收记录请附：`p37d --check --json` 全文、`MATERIALIZE=copy|overlay`、
+`findmnt`、两个 stdio 客户端的 `ws_id` 与 `version_log`、GC 拒绝的退出码与
+stderr、`manifest.json` 与发布 tar 的 sha256，以及 `ROOT_FALLBACK`/`NNP_FAILED`
+（默认都应为 0）。

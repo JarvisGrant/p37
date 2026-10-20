@@ -5,6 +5,8 @@ After=local-fs.target
 # /srv/repo 由 P36 的 L1 install.sh 预创建（p36:p36 0750）。
 # 不存在时服务不启动，这是故意的 fail-fast。
 ConditionPathIsDirectory=/srv/repo
+# 可选的 root + OverlayFS 单元不能同时运行。
+Conflicts=p37d-root-overlay.service
 
 [Service]
 Type=simple
@@ -20,6 +22,7 @@ Environment=P37_PAYLOAD_LABEL=P37PAYLOAD
 Environment=P37_PAYLOAD_MOUNT=/run/p37-payload
 Environment=P37_CONFIG=/usr/local/share/p37/config.toml
 Environment=TMPDIR=/srv/repo/.p37/tmp
+# 默认 config.toml 是 materialize=auto：非 root overlay EPERM 时回退 copy。
 
 # /run/p37-payload 由 L1 的 /etc/tmpfiles.d/p37.conf 创建（属主 p36）。
 # 不要改用 RuntimeDirectory=：service 重启时 systemd 会尝试在该路径上重新
