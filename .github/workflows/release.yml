@@ -75,9 +75,11 @@ jobs:
           V="${{ steps.meta.outputs.version }}"
           TARBALL="dist/p37-linux-amd64-$V.tar.gz"
           test -f "$TARBALL"
-          test "$(tar -tzf "$TARBALL" | wc -l | tr -d ' ')" = "3"
+          LIST="${RUNNER_TEMP}/p37-tar-list.txt"
+          tar -tzf "$TARBALL" > "$LIST"
+          test "$(wc -l < "$LIST" | tr -d ' ')" = "3"
           for f in p37 p37d manifest.json; do
-            tar -tzf "$TARBALL" | grep -qx "$f"
+            grep -qx "$f" "$LIST"
           done
           manifest="dist/p37-linux-amd64-$V/manifest.json"
           got_version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest")"
