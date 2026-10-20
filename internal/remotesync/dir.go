@@ -43,7 +43,15 @@ func (d *DirRemote) PutPackage(ctx context.Context, m *Manifest, srcDir string) 
 		return err
 	}
 	for _, p := range m.Parts {
-		if err := copyFile(filepath.Join(srcDir, p.Name), filepath.Join(dst, p.Name)); err != nil {
+		src, err := partPath(srcDir, p.Name)
+		if err != nil {
+			return err
+		}
+		dstPath, err := partPath(dst, p.Name)
+		if err != nil {
+			return err
+		}
+		if err := copyFile(src, dstPath); err != nil {
 			return err
 		}
 	}
@@ -68,7 +76,15 @@ func (d *DirRemote) GetPackage(ctx context.Context, id, dst string) (*Manifest, 
 		return nil, err
 	}
 	for _, p := range m.Parts {
-		if err := copyFile(filepath.Join(d.pkgDir(id), p.Name), filepath.Join(dst, p.Name)); err != nil {
+		src, err := partPath(d.pkgDir(id), p.Name)
+		if err != nil {
+			return nil, err
+		}
+		dstPath, err := partPath(dst, p.Name)
+		if err != nil {
+			return nil, err
+		}
+		if err := copyFile(src, dstPath); err != nil {
 			return nil, err
 		}
 	}

@@ -80,8 +80,11 @@ func (m *Manifest) Verify() error {
 	var total int64
 	var objs int
 	for _, p := range m.Parts {
-		if p.Name == "" || p.Hash == "" || p.Bytes <= 0 {
+		if p.Hash == "" || p.Bytes <= 0 {
 			return fmt.Errorf("%w: 分片信息不完整", ErrCorruptPackage)
+		}
+		if err := checkPartName(p.Name); err != nil {
+			return err
 		}
 		total += p.Bytes
 		objs += p.Objects
@@ -133,6 +136,31 @@ func ReadManifest(dir string) (*Manifest, error) {
 	return DecodeManifest(b)
 }
 
+// checkPartName 校验分片文件名。
+//
+// 分片名来自远端清单，属于**不可信输入**：它只应是包目录下的单段文件名。
+// 若允许 ".." 或路径分隔符，filepath.Join(dir, name) 会把读写带到包目录之外
+// （CWE-22），而 name 不参与 ComputeID，攻击者可以随意替换。这里同时用
+// 「显式拒绝」与「归一化后必须相等」两道判断，避免不同平台的歧义。
+func checkPartName(name string) error {
+	if name == "" || name == "." || name == ".." ||
+		filepath.IsAbs(name) || filepath.VolumeName(name) != "" ||
+		strings.ContainsAny(name, `/\`) ||
+		filepath.Base(name) != name {
+		return fmt.Errorf("%w: 非法分片名 %q", ErrCorruptPackage, name)
+	}
+	return nil
+}
+
+// partPath 返回分片在包目录内的安全路径。所有按清单读写分片的地方都必须
+// 经它拼路径，不能直接 filepath.Join(dir, p.Name)。
+func partPath(dir, name string) (string, error) {
+	if err := checkPartName(name); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
+}
+
 // WriteDir 把清单与全部分片写进 dir。
 func (m *Manifest) WriteDir(dir string, metaBytes []byte, parts map[string][]byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -146,7 +174,11 @@ func (m *Manifest) WriteDir(dir string, metaBytes []byte, parts map[string][]byt
 		if !ok {
 			return fmt.Errorf("remotesync: 缺少分片 %s", p.Name)
 		}
-		if err := os.WriteFile(filepath.Join(dir, p.Name), b, 0o600); err != nil {
+		dst, err := partPath(dir, p.Name)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, b, 0o600); err != nil {
 			return err
 		}
 	}

@@ -41,9 +41,14 @@ jobs:
       - name: resolve tag/version
         id: meta
         shell: bash
+        # 不要把 ${{ }} 直接插进脚本：tag 由用户输入/仓库内容决定，
+        # 经 env 传递才能避免脚本注入。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
           else
             TAG="${GITHUB_REF_NAME}"
           fi
@@ -61,18 +66,23 @@ jobs:
           export P37_FORCE_HASH=1
           make test
       - name: build release
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           export TMPDIR="${RUNNER_TEMP}/p37-test-tmp"
           mkdir -p "$TMPDIR"
           export P37_FORCE_HASH=1
-          make release VERSION=${{ steps.meta.outputs.version }}
+          make release VERSION="$VERSION"
       - name: build L1 bootstrap
-        run: make p36-bootstrap VERSION=${{ steps.meta.outputs.version }}
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: make p36-bootstrap VERSION="$VERSION"
       - name: verify release
         shell: bash
+        env:
+          V: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          V="${{ steps.meta.outputs.version }}"
           TARBALL="dist/p37-linux-amd64-$V.tar.gz"
           test -f "$TARBALL"
           LIST="${RUNNER_TEMP}/p37-tar-list.txt"
@@ -189,5 +199,7 @@ jobs:
           (cd verify && if command -v sha256sum >/dev/null 2>&1; then sha256sum -c *.sha256; else shasum -a 256 -c *.sha256; fi)
           echo "release_url=$(gh release view "$TAG" --json url -q .url --repo "$GITHUB_REPOSITORY")" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: print release URL
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
-          echo "release: $(gh release view "${{ needs.build.outputs.tag }}" --json url -q .url --repo "$GITHUB_REPOSITORY")"
+          echo "release: $(gh release view "$TAG" --json url -q .url --repo "$GITHUB_REPOSITORY")"

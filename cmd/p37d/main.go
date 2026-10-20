@@ -84,6 +84,15 @@ func printVersion(out io.Writer) {
 		buildinfo.Version, buildinfo.Commit, buildinfo.BuildTime, buildinfo.GoVersion)
 }
 
+// HTTP 服务的资源限额（见 runDaemon 的注释）。
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = 60 * time.Second
+	httpIdleTimeout       = 120 * time.Second
+	httpMaxHeaderBytes    = 64 << 10
+	httpMaxBodyBytes      = 16 << 20
+)
+
 func runDaemon(root string, serveHTTP bool) error {
 	cfg, err := config.Load(root)
 	if err != nil {
@@ -227,8 +236,25 @@ func runDaemon(root string, serveHTTP bool) error {
 		logger.Printf("警告: daemon.metrics_http 已启用，但未开启 HTTP 监听（listen_http=false）；/metrics 不生效")
 	}
 
-	unixSrv := &http.Server{Handler: unixHandler, ReadHeaderTimeout: 10 * time.Second}
-	httpSrv := &http.Server{Handler: httpHandler, ReadHeaderTimeout: 10 * time.Second}
+	// HTTP 限额：MCP 调用只传小段 JSON，这些值只防滥用，不限制工具耗时。
+	//
+	// 不设 WriteTimeout：land / land_preview / blame 可能跑很久，写超时会
+	// 截断响应；慢连接由 ReadTimeout/IdleTimeout 兜底。
+	unixSrv := &http.Server{
+		Handler:           mcpsrv.LimitBodyBytes(unixHandler, httpMaxBodyBytes),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
+	}
+	// unix socket 只服务本机，且 stdio 代理会长期保持空闲连接，因此不设
+	// IdleTimeout；TCP 端口补齐全部限额。
+	httpSrv := &http.Server{
+		Handler:           mcpsrv.LimitBodyBytes(httpHandler, httpMaxBodyBytes),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
+	}
 
 	errCh := make(chan error, len(listeners))
 	for i, l := range listeners {

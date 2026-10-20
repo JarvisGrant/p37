@@ -41,11 +41,16 @@ jobs:
       - name: resolve tag/version
         id: meta
         shell: bash
+        # tag 来自用户输入/Release 事件，必须经 env 传入脚本，不能直接插值。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="$RELEASE_TAG"
           else
-            TAG="${{ inputs.tag }}"
+            TAG="$INPUT_TAG"
           fi
           test -n "$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -60,7 +65,9 @@ jobs:
             --dir dist/release
           ls -l dist/release
       - name: build L1 bootstrap from the same tag
-        run: make p36-bootstrap VERSION=${{ steps.meta.outputs.version }}
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: make p36-bootstrap VERSION="$VERSION"
       - name: run P36 acceptance
         env:
           P37_VERSION: ${{ steps.meta.outputs.version }}

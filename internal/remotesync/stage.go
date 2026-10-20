@@ -3,7 +3,6 @@ package remotesync
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
@@ -68,7 +67,11 @@ func verifyDir(dir string, importFn func(id hash.ID, stored []byte) error) (*Man
 		}
 	}
 	for _, p := range m.Parts {
-		b, err := os.ReadFile(filepath.Join(dir, p.Name))
+		pf, err := partPath(dir, p.Name)
+		if err != nil {
+			return nil, err
+		}
+		b, err := os.ReadFile(pf)
 		if err != nil {
 			return nil, err
 		}

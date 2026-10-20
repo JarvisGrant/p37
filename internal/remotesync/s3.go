@@ -101,7 +101,11 @@ func (s *S3Remote) PutPackage(ctx context.Context, m *Manifest, srcDir string) e
 		return err
 	}
 	for _, p := range m.Parts {
-		if err := s.putFile(ctx, s.pkgKey(m.ID, p.Name), filepath.Join(srcDir, p.Name)); err != nil {
+		src, err := partPath(srcDir, p.Name)
+		if err != nil {
+			return err
+		}
+		if err := s.putFile(ctx, s.pkgKey(m.ID, p.Name), src); err != nil {
 			return err
 		}
 	}
@@ -149,7 +153,11 @@ func (s *S3Remote) GetPackage(ctx context.Context, id, dst string) (*Manifest, e
 		return nil, err
 	}
 	for _, p := range m.Parts {
-		if err := s.getFile(ctx, s.pkgKey(id, p.Name), filepath.Join(dst, p.Name)); err != nil {
+		dstPath, err := partPath(dst, p.Name)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.getFile(ctx, s.pkgKey(id, p.Name), dstPath); err != nil {
 			return nil, err
 		}
 	}
