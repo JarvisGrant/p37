@@ -65,6 +65,9 @@ type Manager struct {
 	repoRoot string
 	opt      Options
 
+	// baseMu 串行化基底的首次物化。两个 ws_open 同时命中同一基底时，
+	// 如果都去写 <base>.tmp 再 rename，会一个成功、另一个 ENOENT。
+	baseMu  sync.Mutex
 	mu      sync.Mutex
 	bases   map[hash.ID]string // 已物化的基底树 -> 目录
 	inUse   map[hash.ID]int    // 引用计数
@@ -356,6 +359,9 @@ func (m *Manager) caseWalk(src ContentSource, t *tree.Tree, prefix string) error
 
 // ensureBase 物化（或复用）一棵基底树，返回其目录并增加引用计数。
 func (m *Manager) ensureBase(treeID hash.ID, src ContentSource) (string, error) {
+	m.baseMu.Lock()
+	defer m.baseMu.Unlock()
+
 	m.mu.Lock()
 	if dir, ok := m.bases[treeID]; ok {
 		m.inUse[treeID]++
