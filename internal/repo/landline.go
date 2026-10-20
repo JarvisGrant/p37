@@ -16,6 +16,7 @@ import (
 // ErrHasActiveChildren 表示工作区仍有活跃子工作区，不能直接 land 到 line。
 var ErrHasActiveChildren = errors.New("repo: 工作区仍有活跃子工作区")
 var ErrTargetInvalid = errors.New("repo: 非法 land 目标")
+var ErrPreviewExpired = errors.New("repo: land_into preview 已过期")
 
 // LandOptions 控制 land 行为。
 type LandOptions struct {
@@ -279,6 +280,13 @@ func (r *Repo) LandInto(wsID, parentWsID, expectedParentTree, previewID, idemKey
 
 func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	expectedParentTree, previewID, idemKey string) (*LandResult, error) {
+	if previewID != "" {
+		if pw, err := r.DB.GetWorkspace(previewID); err == nil {
+			if time.Now().UnixMilli()-pw.CreatedTS > int64(24*time.Hour/time.Millisecond) {
+				return nil, ErrPreviewExpired
+			}
+		}
+	}
 	child, err := r.WS.Get(wsID)
 	if err != nil {
 		return nil, err

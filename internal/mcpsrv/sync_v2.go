@@ -295,7 +295,7 @@ func pushRepo(ctx context.Context, rr *repo.Repo, h *hub.Hub, full bool, expecte
 			return nil, err
 		}
 	}
-	m, err := remotesync.Prepare(rr, cfg.RemoteOptions(), true, true)
+	m, err := remotesync.Prepare(rr, cfg.RemoteOptions(), true, full)
 	if err != nil && !errors.Is(err, remotesync.ErrUpToDate) && !errors.Is(err, remotesync.ErrNothingToPackage) {
 		return nil, err
 	}

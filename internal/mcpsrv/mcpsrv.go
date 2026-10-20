@@ -234,6 +234,8 @@ func classify(err error) (code, msg string, detail any) {
 		return "merge_base_ambiguous", err.Error(), nil
 	case errors.Is(err, repo.ErrMergeExpired):
 		return "merge_expired", err.Error(), nil
+	case errors.Is(err, repo.ErrPreviewExpired):
+		return "preview_expired", err.Error(), nil
 	case errors.Is(err, repo.ErrHasActiveChildren):
 		return "ws_has_active_children", err.Error(), nil
 	case errors.Is(err, workspace.ErrNotFound):

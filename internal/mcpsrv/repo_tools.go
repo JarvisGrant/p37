@@ -11,7 +11,6 @@ import (
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hub"
-	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
 )
 
@@ -252,9 +251,21 @@ func (s *Server) registerRepoLineRead() {
 			if err != nil {
 				return nil, err
 			}
-			out := make([]meta.LineView, 0, len(ls))
+			wss, _ := rr.WS.List()
+			out := make([]map[string]any, 0, len(ls))
 			for i := range ls {
-				out = append(out, ls[i].View())
+				n := 0
+				for j := range wss {
+					if !wss[j].Hidden && wss[j].BaseLine == ls[i].Name && wss[j].LandedTS == 0 {
+						n++
+					}
+				}
+				v := ls[i].View()
+				out = append(out, map[string]any{
+					"name": v.Name, "head": v.Head, "protected": v.Protected,
+					"created_from": v.CreatedFrom, "created_ts": v.CreatedTS,
+					"updated_ts": v.UpdatedTS, "workspace_count": n,
+				})
 			}
 			return out, nil
 		})

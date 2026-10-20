@@ -207,15 +207,17 @@ func (r *Repo) LineLog(name string, limit int, beforeTS int64, beforeID string) 
 
 // LineCompare 返回两条 line 的 ahead/behind 与 merge base。
 type LineCompare struct {
-	A          string    `json:"a"`
-	B          string    `json:"b"`
-	AHead      hash.ID   `json:"a_head"`
-	BHead      hash.ID   `json:"b_head"`
-	Ahead      int       `json:"ahead"`
-	Behind     int       `json:"behind"`
-	MergeBase  hash.ID   `json:"merge_base"`
-	MergeBases []hash.ID `json:"merge_bases,omitempty"`
-	Diverged   bool      `json:"diverged"`
+	A          string     `json:"a"`
+	B          string     `json:"b"`
+	AHead      hash.ID    `json:"a_head"`
+	BHead      hash.ID    `json:"b_head"`
+	Ahead      int        `json:"ahead"`
+	Behind     int        `json:"behind"`
+	MergeBase  hash.ID    `json:"merge_base"`
+	MergeBases []hash.ID  `json:"merge_bases,omitempty"`
+	Diverged   bool       `json:"diverged"`
+	AChanged   []FileStat `json:"a_files,omitempty"`
+	BChanged   []FileStat `json:"b_files,omitempty"`
 }
 
 // CompareLines 对比两条 line。
@@ -261,6 +263,26 @@ func (r *Repo) CompareLines(a, b string) (*LineCompare, error) {
 	out.MergeBase = base
 	out.MergeBases = all
 	out.Diverged = out.Ahead > 0 && out.Behind > 0
+	if !base.IsZero() {
+		if bv, err := r.DB.GetVersion(base); err == nil {
+			if bt, err := r.Store.GetTree(bv.Tree); err == nil {
+				if av, err := r.DB.GetVersion(la.Head); err == nil {
+					if at, err := r.Store.GetTree(av.Tree); err == nil {
+						if ops, err := capture.Diff("__cmp_a__", bt, at, r.Store, r.CaptureOpt); err == nil {
+							out.AChanged = summarize(ops)
+						}
+					}
+				}
+				if bv2, err := r.DB.GetVersion(lb.Head); err == nil {
+					if bt2, err := r.Store.GetTree(bv2.Tree); err == nil {
+						if ops, err := capture.Diff("__cmp_b__", bt, bt2, r.Store, r.CaptureOpt); err == nil {
+							out.BChanged = summarize(ops)
+						}
+					}
+				}
+			}
+		}
+	}
 	return out, nil
 }
 
