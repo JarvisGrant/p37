@@ -94,12 +94,18 @@ func (s *Server) registerRepoLineRead() {
 			}
 			lines, _ := rr.Lines()
 			ws, _ := rr.WS.List()
+			visible := 0
+			for i := range ws {
+				if !ws[i].Hidden {
+					visible++
+				}
+			}
 			def, _ := rr.DB.DefaultLine()
 			cfg, _ := config.Load(rr.Root)
 			out := map[string]any{
 				"root": st.Root, "default_line": def, "mainline_head": st.MainlineHead.String(),
 				"version_count": st.VersionCount, "epoch": st.Epoch,
-				"workspace_count": len(ws), "format_ver": st.FormatVer,
+				"workspace_count": visible, "format_ver": st.FormatVer,
 				"lines": lines,
 				"remote": map[string]any{"enabled": cfg.Remote.Enabled,
 					"backend": cfg.Remote.Backend, "remote_key": cfg.Remote.RemoteKey,
@@ -450,6 +456,9 @@ func (s *Server) registerRepoLineRead() {
 					return nil, coded("merge_base_ambiguous", "%v", err)
 				}
 				return nil, err
+			}
+			if cfg, err := config.Load(rr.Root); err == nil && cfg.Remote.AutoPush {
+				go func() { _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
 			}
 			return mergeView(res), nil
 		})

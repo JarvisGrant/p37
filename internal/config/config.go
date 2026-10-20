@@ -106,27 +106,27 @@ type GCConfig struct {
 // 凭证**不在这里**：S3 的 access key / secret 只从环境变量读
 // （P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN）。
 type RemoteConfig struct {
-	Enabled   bool   `toml:"enabled"`
-	Backend   string `toml:"backend"` // s3 | dir
-	Endpoint  string `toml:"endpoint"`
-	Region    string `toml:"region"`
-	Bucket    string `toml:"bucket"`
-	Prefix    string `toml:"prefix"`
-	RemoteKey string `toml:"remote_key"`
-	PathStyle bool   `toml:"path_style"`
-	AutoPush  bool   `toml:"auto_push"`
+	Enabled   bool   `toml:"enabled" json:"enabled"`
+	Backend   string `toml:"backend" json:"backend"` // s3 | dir
+	Endpoint  string `toml:"endpoint" json:"endpoint"`
+	Region    string `toml:"region" json:"region"`
+	Bucket    string `toml:"bucket" json:"bucket"`
+	Prefix    string `toml:"prefix" json:"prefix"`
+	RemoteKey string `toml:"remote_key" json:"remote_key"`
+	PathStyle bool   `toml:"path_style" json:"path_style"`
+	AutoPush  bool   `toml:"auto_push" json:"auto_push"`
 	// Dir 仅用于 backend=dir（本地目录演练/测试）。
-	Dir string `toml:"dir"`
+	Dir string `toml:"dir" json:"dir"`
 
 	// 打包策略：低频 + 压缩。
-	Outbox          string `toml:"outbox"`
-	MinVersions     int    `toml:"min_versions"`
-	MinBytes        int64  `toml:"min_bytes"`
-	CheckpointEvery int    `toml:"checkpoint_every"`
-	CompressLevel   int    `toml:"compress_level"`
-	MaxPackageBytes int64  `toml:"max_package_bytes"`
+	Outbox          string `toml:"outbox" json:"outbox"`
+	MinVersions     int    `toml:"min_versions" json:"min_versions"`
+	MinBytes        int64  `toml:"min_bytes" json:"min_bytes"`
+	CheckpointEvery int    `toml:"checkpoint_every" json:"checkpoint_every"`
+	CompressLevel   int    `toml:"compress_level" json:"compress_level"`
+	MaxPackageBytes int64  `toml:"max_package_bytes" json:"max_package_bytes"`
 	// AutoPrepareEvery 预留给 daemon 定时 prepare（只落本地，不上传）。
-	AutoPrepareEvery string `toml:"auto_prepare_every"`
+	AutoPrepareEvery string `toml:"auto_prepare_every" json:"auto_prepare_every"`
 }
 
 // Default 返回附录 B 的默认配置。

@@ -275,11 +275,16 @@ func (s *Server) resolveVersion(r *repo.Repo, id string) (hash.ID, error) {
 		}
 		return head, nil
 	}
-	h, err := hash.Parse(id)
-	if err != nil {
-		return hash.ID{}, coded("version_not_found", "非法版本 id %q", id)
+	if h, err := hash.Parse(id); err == nil {
+		return h, nil
 	}
-	return h, nil
+	if len(id) >= 4 {
+		h, err := r.DB.FindVersionByPrefix(id)
+		if err == nil {
+			return h, nil
+		}
+	}
+	return hash.ID{}, coded("version_not_found", "非法版本 id %q", id)
 }
 
 // --- 工作区 -------------------------------------------------------------
@@ -783,6 +788,9 @@ func (s *Server) registerLand() {
 					return landView2(res), nil
 				}
 				return nil, err
+			}
+			if cfg, err := config.Load(rr.Root); err == nil && cfg.Remote.AutoPush {
+				go func() { _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
 			}
 			return landView2(res), nil
 		})

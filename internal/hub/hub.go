@@ -66,12 +66,14 @@ func New(root string, cfg config.Config) (*Hub, error) {
 		}
 	}
 	_ = os.Chmod(ctl, 0o700)
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(ctl, "registry.db")+
+	regPath := filepath.Join(ctl, "registry.db")
+	db, err := sql.Open("sqlite", "file:"+regPath+
 		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
+	_ = os.Chmod(regPath, 0o600)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS repo (
 	  id            TEXT PRIMARY KEY,
 	  name          TEXT NOT NULL UNIQUE,
@@ -87,6 +89,9 @@ func New(root string, cfg config.Config) (*Hub, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	_ = os.Chmod(regPath, 0o600)
+	_ = os.Chmod(regPath+"-wal", 0o600)
+	_ = os.Chmod(regPath+"-shm", 0o600)
 	return &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}}, nil
 }
 

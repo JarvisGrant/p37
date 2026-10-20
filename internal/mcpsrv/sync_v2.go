@@ -204,14 +204,18 @@ func (s *Server) registerSyncV2() {
 				return nil, err
 			}
 			var a struct {
-				DryRun bool `json:"dry_run"`
-				Remote bool `json:"remote"`
-				Local  bool `json:"local"`
+				DryRun *bool `json:"dry_run"`
+				Remote bool  `json:"remote"`
+				Local  bool  `json:"local"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
-			if a.DryRun {
+			dry := true
+			if a.DryRun != nil {
+				dry = *a.DryRun
+			}
+			if dry {
 				return map[string]any{"dry_run": true, "remote": 0, "local": 0}, nil
 			}
 			remote, _, err := remoteFor(rr)

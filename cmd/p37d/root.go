@@ -148,25 +148,27 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 	fail := false
 	for _, e := range entries {
 		it := item{ID: e.ID, Name: e.Name, Path: e.Path, OK: true}
-		r, err := h.Open(e.ID)
-		if err == nil {
-			if ls, err := r.Lines(); err == nil {
-				it.Lines = len(ls)
-			}
-			if strict {
+		if _, err := os.Stat(filepath.Join(e.Path, ".p37", "p37.db")); err != nil {
+			it.OK = false
+			it.Error = err.Error()
+		}
+		if it.OK && strict {
+			r, err := h.Open(e.ID)
+			if err != nil {
+				it.OK = false
+				it.Error = err.Error()
+			} else {
+				if ls, err := r.Lines(); err == nil {
+					it.Lines = len(ls)
+				}
 				for _, l := range mustLines(r) {
 					if err := r.WalkHead(l.Head, nil); err != nil {
 						it.OK = false
 						it.Error = err.Error()
-						fail = true
 						break
 					}
 				}
 			}
-		} else {
-			it.OK = false
-			it.Error = err.Error()
-			fail = true
 		}
 		if !it.OK {
 			fail = true

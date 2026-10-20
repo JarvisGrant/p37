@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
@@ -163,6 +164,12 @@ func (r *Repo) ResetLine(name string, target string, force bool, reason string, 
 
 // LineLog 返回一条 line 的祖先历史。
 func (r *Repo) LineLog(name string, limit int, beforeTS int64, beforeID string) ([]VersionSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
 	l, err := r.Line(name)
 	if err != nil {
 		return nil, err
@@ -362,6 +369,8 @@ type MergeOptions struct {
 
 // MergeLines 把 source 的变更并入 target。preview=true 时不推进 target。
 func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult, error) {
+	source = strings.TrimPrefix(source, "line:")
+	target = strings.TrimPrefix(target, "line:")
 	release, err := r.enterLand()
 	if err != nil {
 		return nil, err
@@ -657,6 +666,7 @@ func (r *Repo) resolveRef(ref string, allowEmpty bool) (hash.ID, error) {
 }
 
 func (r *Repo) resolveVersionRef(ref string) (hash.ID, error) {
+	ref = strings.TrimPrefix(ref, "version:")
 	if ref == "" {
 		return hash.ID{}, ErrVersionNotFound
 	}
