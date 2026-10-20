@@ -16,8 +16,10 @@ import (
 func TestStabilizeSkipsBusyFile(t *testing.T) {
 	e := newEnv(t)
 	e.write("stable.txt", "I am fine\n")
-	e.opt.StableDelay = 6 * time.Millisecond
-	e.opt.StableRetries = 2
+	// CI 的共享 runner 上 goroutine 调度可能抖动；给繁忙文件更长的观察窗口，
+	// 避免把「调度延迟」误判成「文件已稳定」。
+	e.opt.StableDelay = 50 * time.Millisecond
+	e.opt.StableRetries = 3
 	var skipped []string
 	e.opt.OnUnstable = func(p string) { skipped = append(skipped, p) }
 
