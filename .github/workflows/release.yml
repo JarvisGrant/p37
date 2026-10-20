@@ -175,18 +175,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
-            gh release edit "$TAG" --title "p37 $VERSION" --notes-file dist/RELEASE_NOTES.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --title "p37 $VERSION" --notes-file dist/RELEASE_NOTES.md --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
               --title "p37 $VERSION" \
-              --notes-file dist/RELEASE_NOTES.md
+              --notes-file dist/RELEASE_NOTES.md \
+              --repo "$GITHUB_REPOSITORY"
           fi
           rm -rf verify && mkdir verify
-          gh release download "$TAG" --pattern 'p37-linux-amd64-*.tar.gz*' --dir verify
+          gh release download "$TAG" --pattern 'p37-linux-amd64-*.tar.gz*' --dir verify --repo "$GITHUB_REPOSITORY"
           (cd verify && if command -v sha256sum >/dev/null 2>&1; then sha256sum -c *.sha256; else shasum -a 256 -c *.sha256; fi)
-          echo "release_url=$(gh release view "$TAG" --json url -q .url)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "release_url=$(gh release view "$TAG" --json url -q .url --repo "$GITHUB_REPOSITORY")" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: print release URL
         run: |
-          echo "release: $(gh release view "${{ needs.build.outputs.tag }}" --json url -q .url)"
+          echo "release: $(gh release view "${{ needs.build.outputs.tag }}" --json url -q .url --repo "$GITHUB_REPOSITORY")"
