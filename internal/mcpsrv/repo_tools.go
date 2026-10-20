@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/config"
@@ -660,7 +661,11 @@ func dirSize(root string) (int64, error) {
 			return nil
 		}
 		if !info.IsDir() {
-			total += info.Size()
+			if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Blocks > 0 {
+				total += st.Blocks * 512
+			} else {
+				total += info.Size()
+			}
 		}
 		return nil
 	})

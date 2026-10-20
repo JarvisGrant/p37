@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
@@ -652,7 +653,11 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 	if dir := m.mm.WorkspaceDir(wsID); dirExists(dir) {
 		_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
 			if err == nil && info != nil && !info.IsDir() {
-				st.DiskBytes += info.Size()
+				if sys, ok := info.Sys().(*syscall.Stat_t); ok && sys.Blocks > 0 {
+					st.DiskBytes += sys.Blocks * 512
+				} else {
+					st.DiskBytes += info.Size()
+				}
 			}
 			return nil
 		})
