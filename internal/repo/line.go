@@ -32,8 +32,8 @@ var (
 
 // CreateLine 从 version/line/mainline 创建命名 line。
 func (r *Repo) CreateLine(name string, from string, protected bool) (*meta.Line, error) {
-	if name == "" {
-		return nil, errors.New("repo: line 名不能为空")
+	if !validLineName(name) {
+		return nil, fmt.Errorf("repo: 非法 line 名 %q", name)
 	}
 	head, err := r.resolveRef(from, true)
 	if err != nil {
@@ -772,4 +772,22 @@ func (r *Repo) RevertTo(versionID string, targetLine string, expectedHead string
 		return hash.ID{}, err
 	}
 	return v.ID(), nil
+}
+
+func validLineName(name string) bool {
+	if name == "" || len(name) > 128 || name[0] == '/' || name[len(name)-1] == '/' {
+		return false
+	}
+	if strings.Contains(name, "//") || strings.Contains(name, "..") {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == '-' || c == '/' {
+			continue
+		}
+		return false
+	}
+	return true
 }

@@ -373,7 +373,11 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if preview {
 		return res, nil
 	}
-	// 提交：把结果树写回父工作区目录并重新采集父 ops。
+	// 提交：先写 journal，再把结果树写回父工作区目录并重新采集父 ops。
+	if err := r.DB.InsertLandIntoJournal(wsID, parentWsID, parentTree.String(),
+		replayed.Tree.ID().String()); err != nil {
+		return nil, err
+	}
 	if err := r.WS.ApplyTree(parentWsID, replayed.Tree); err != nil {
 		return nil, err
 	}
@@ -383,6 +387,13 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 		return nil, err
 	}
 	_, _, _ = r.WS.Drop(wsID, true, false)
+	if js, err := r.DB.ListLandIntoJournal(); err == nil {
+		for _, j := range js {
+			if j.WsID == wsID && j.ParentWsID == parentWsID {
+				_ = r.DB.DeleteLandIntoJournal(j.ID)
+			}
+		}
+	}
 	if previewID != "" {
 		_ = r.DB.ClearConflicts(previewID)
 		_, _, _ = r.WS.Drop(previewID, true, true)
@@ -391,4 +402,34 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 		r.putIdem("ws_land_into", idemKey, res)
 	}
 	return res, nil
+}
+
+// reconcileLandInto 在启动时补做未完成的 ws_land_into。
+//
+// 提交协议：journal(before_tree,result_tree) → 写父目录并重算 ops → 删 journal。
+// 崩溃后如果 result_tree 对象仍在，重放 ApplyTree 是幂等的；失败则保留 journal。
+func (r *Repo) reconcileLandInto() error {
+	rows, err := r.DB.ListLandIntoJournal()
+	if err != nil {
+		return err
+	}
+	for _, j := range rows {
+		if _, err := r.DB.GetWorkspace(j.ParentWsID); err != nil {
+			_ = r.DB.DeleteLandIntoJournal(j.ID)
+			continue
+		}
+		tid, err := hash.Parse(j.ResultTree)
+		if err != nil {
+			continue
+		}
+		target, err := r.Store.GetTree(tid)
+		if err != nil {
+			continue
+		}
+		if err := r.WS.ApplyTree(j.ParentWsID, target); err != nil {
+			continue
+		}
+		_ = r.DB.DeleteLandIntoJournal(j.ID)
+	}
+	return nil
 }

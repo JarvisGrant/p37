@@ -208,15 +208,6 @@ func Open(root string, opt Options) (*Repo, error) {
 		return nil, err
 	}
 
-	// 步骤 3：恢复活跃工作区的挂载。**必须在 land 修复之后**，因为修复可能
-	// 焚毁/恢复工作区。只重建挂载，upper 层原样保留。
-	if opt.RemountWorkspaces {
-		if _, err := ws.RemountAll(); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	}
-
 	qmax := opt.LandQueueMax
 	if qmax <= 0 {
 		qmax = DefaultLandQueueMax
@@ -238,10 +229,23 @@ func Open(root string, opt Options) (*Repo, error) {
 	// 读时校验策略（§8.3、附录 B 的 gc.verify_on_read）。
 	store.SetVerifyOnRead(cas.ParseVerifyMode(gc.VerifyOnRead))
 
-	return &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
+	r := &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
 		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
 		redactTaskDesc: opt.RedactTaskDesc,
-		landSem:        make(chan struct{}, qmax)}, nil
+		landSem:        make(chan struct{}, qmax)}
+	// 步骤 3：恢复活跃工作区的挂载。**必须在 land 修复之后**，因为修复可能
+	// 焚毁/恢复工作区。只重建挂载，upper 层原样保留。
+	if opt.RemountWorkspaces {
+		if _, err := ws.RemountAll(); err != nil {
+			_ = r.Close()
+			return nil, err
+		}
+	}
+	if err := r.reconcileLandInto(); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
 }
 
 // journalTask 按 journal.redact_task_desc 决定写入血缘的任务描述。

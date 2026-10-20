@@ -255,6 +255,11 @@ func ensureColumnsTx(tx *sql.Tx) error {
 	}
 	if versionExists > 0 {
 		if _, err := tx.Exec(
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_version_idem ON version(idempotency_tool, idempotency_key)
+			   WHERE idempotency_key IS NOT NULL`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
 			`INSERT OR IGNORE INTO version_parent(version_id, parent_id, ordinal)
 			 SELECT id, parent, 0 FROM version
 			  WHERE parent IS NOT NULL AND parent != '' AND parent != ?`, zero); err != nil {
@@ -346,6 +351,8 @@ var ddl = []string{
 	`CREATE INDEX IF NOT EXISTS idx_version_parent ON version(parent)`,
 	`CREATE INDEX IF NOT EXISTS idx_version_epoch  ON version(epoch)`,
 	`CREATE INDEX IF NOT EXISTS idx_version_ts     ON version(ts)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_version_idem ON version(idempotency_tool, idempotency_key)
+	   WHERE idempotency_key IS NOT NULL`,
 
 	`CREATE TABLE IF NOT EXISTS workspace (
 	  id           TEXT PRIMARY KEY,

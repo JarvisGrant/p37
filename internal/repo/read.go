@@ -157,9 +157,11 @@ func (r *Repo) entryView(p string, e *tree.Entry) (TreeEntry, error) {
 	switch e.Kind {
 	case codec.EntryTree:
 		v.Type = "dir"
+		v.Mode = "040000"
 		v.Hash = e.ID.String()
 	case codec.EntrySymlink:
 		v.Type = "symlink"
+		v.Mode = "120000"
 		b, err := r.Store.ReadBlob(e.ID)
 		if err != nil {
 			return v, err
@@ -212,6 +214,7 @@ func (r *Repo) VersionFile(ref, p string, maxBytes int64) (*FileView, error) {
 	}
 	v := &FileView{Path: strings.Trim(p, "/"), Mode: modeString(ent.Mode), Hash: ent.ID.String()}
 	if ent.Kind == codec.EntrySymlink {
+		v.Mode = "120000"
 		b, err := r.Store.ReadBlob(ent.ID)
 		if err != nil {
 			return nil, err

@@ -256,3 +256,53 @@ func (d *DB) RecentResetHeads(since int64) ([]hash.ID, error) {
 	}
 	return out, rows.Err()
 }
+
+// LandIntoJournal 是 ws_land_into 的恢复记录。
+type LandIntoJournal struct {
+	ID         int64
+	WsID       string
+	ParentWsID string
+	BeforeTree string
+	ResultTree string
+	State      string
+	CreatedTS  int64
+}
+
+// InsertLandIntoJournal 写入一条 land_into 恢复记录。
+func (d *DB) InsertLandIntoJournal(wsID, parentWsID, beforeTree, resultTree string) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO land_into_journal(ws_id,parent_ws_id,before_tree,result_tree,state,created_ts)
+			 VALUES(?,?,?,?,?,?)`, wsID, parentWsID, beforeTree, resultTree, "applying", time.Now().UnixMilli())
+		return err
+	})
+}
+
+// ListLandIntoJournal 返回待恢复的 land_into 记录。
+func (d *DB) ListLandIntoJournal() ([]LandIntoJournal, error) {
+	rows, err := d.sql.Query(
+		`SELECT id,ws_id,parent_ws_id,before_tree,result_tree,state,created_ts
+		   FROM land_into_journal ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []LandIntoJournal
+	for rows.Next() {
+		var j LandIntoJournal
+		if err := rows.Scan(&j.ID, &j.WsID, &j.ParentWsID, &j.BeforeTree,
+			&j.ResultTree, &j.State, &j.CreatedTS); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// DeleteLandIntoJournal 删除一条恢复记录。
+func (d *DB) DeleteLandIntoJournal(id int64) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM land_into_journal WHERE id=?`, id)
+		return err
+	})
+}
