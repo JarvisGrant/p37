@@ -131,6 +131,11 @@ func Open(root string, opt Options) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// v1 -> v2 自动迁移（升级前备份）。显式 p37 migrate 也会走同一路径。
+	if _, err := db.MigrateIfNeeded(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := db.CheckFormat(); err != nil {
 		_ = db.Close()
 		return nil, err

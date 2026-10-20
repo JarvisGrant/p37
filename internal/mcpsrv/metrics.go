@@ -12,6 +12,18 @@ import (
 // 只暴露**只读**的规模信息，不暴露路径、任务描述等敏感内容。格式遵循
 // Prometheus 的文本暴露协议（text/plain; version=0.0.4）。
 func (s *Server) Metrics() (string, error) {
+	if s.R == nil {
+		if s.Hub == nil {
+			return "# p37 multi-repo: no default repo\n", nil
+		}
+		es, err := s.Hub.List()
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "# HELP p37_repos_total 仓库总数。\n# TYPE p37_repos_total gauge\np37_repos_total %d\n", len(es))
+		return b.String(), nil
+	}
 	st, err := s.R.Status()
 	if err != nil {
 		return "", err

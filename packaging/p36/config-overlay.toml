@@ -10,7 +10,7 @@
 #   systemctl enable --now p37d-root-overlay.service
 
 [repo]
-format_ver = 1
+format_ver = 2
 
 [workspace]
 materialize = "overlay"

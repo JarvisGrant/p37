@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -66,6 +67,8 @@ type Options struct {
 	// MaxMatches 是 place 的匹配上限（附录 B 的 merge.max_matches）。
 	// 0 表示 op.DefaultMaxMatches。
 	MaxMatches int
+	// MaxHidden 是隐藏 merge/preview 工作区上限（不占用户 max_active）。
+	MaxHidden int
 }
 
 // maxMatches 返回生效的 place 匹配上限。
@@ -143,16 +146,27 @@ type OpenRequest struct {
 
 // Open 打开一个工作区并物化（§4.1、§4.6、§11.4）。
 func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
-	// 上限检查。
-	n, err := m.db.CountWorkspaces()
+	// 上限检查：用户工作区与隐藏工作区分开计数。
+	n, err := m.db.CountVisibleWorkspaces()
 	if err != nil {
 		return nil, err
 	}
 	if limit, _, _ := m.limits(); n >= limit {
 		return nil, fmt.Errorf("%w: 活跃工作区已达 %d", ErrLimitExceeded, limit)
 	}
+	hn, err := m.db.CountHiddenWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	hlimit := m.opt.MaxHidden
+	if hlimit <= 0 {
+		hlimit = 32
+	}
+	if hn >= hlimit {
+		return nil, fmt.Errorf("%w: 隐藏工作区已达 %d", ErrLimitExceeded, hlimit)
+	}
 
-	parentKind, parentID, baseTree, baseVersion, err := m.resolveParent(req.Parent)
+	parentKind, parentID, baseTree, baseVersion, baseLine, err := m.resolveParent(req.Parent)
 	if err != nil {
 		return nil, err
 	}
@@ -170,9 +184,11 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 		ParentID:    parentID,
 		BaseTree:    baseTree,
 		BaseVersion: baseVersion,
+		BaseLine:    baseLine,
 		TaskDesc:    req.TaskDesc,
 		State:       meta.StateActive,
 		Materialize: meta.MaterializeCopy,
+		Kind:        "user",
 		CreatedTS:   now,
 		UpdatedTS:   now,
 	}
@@ -213,33 +229,62 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 // resolveParent 把 parent 参数解析为 (kind, id, baseTree, baseVersion)。
 //
 // parent 为工作区时，先强制采集父（B9），再用其有效树作为基准（D23）。
-func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID, error) {
-	if parent == "" {
-		head, ok, err := m.db.Head()
+func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID, string, error) {
+	// 显式 ref 语法。
+	if len(parent) > 5 && parent[:5] == "line:" {
+		name := parent[5:]
+		h, err := m.db.LineHead(name)
 		if err != nil {
-			return "", "", hash.ID{}, hash.ID{}, err
+			return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: line %s", ErrNotFound, name)
 		}
-		if !ok {
-			return "", "", hash.ID{}, hash.ID{}, errors.New("workspace: 主干尚未初始化")
+		v, err := m.db.GetVersion(h)
+		if err != nil {
+			return "", "", hash.ID{}, hash.ID{}, "", err
+		}
+		return meta.ParentVersion, h.String(), v.Tree, h, name, nil
+	}
+	if len(parent) > 10 && parent[:10] == "workspace:" {
+		parent = parent[10:]
+	} else if len(parent) > 8 && parent[:8] == "version:" {
+		parent = parent[8:]
+	}
+	if parent == "mainline" {
+		parent = ""
+	}
+	if parent == "" {
+		def, err := m.db.DefaultLine()
+		if err != nil {
+			return "", "", hash.ID{}, hash.ID{}, "", err
+		}
+		head, err := m.db.LineHead(def)
+		if err != nil {
+			return "", "", hash.ID{}, hash.ID{}, "", errors.New("workspace: 默认 line 尚未初始化")
 		}
 		v, err := m.db.GetVersion(head)
 		if err != nil {
-			return "", "", hash.ID{}, hash.ID{}, err
+			return "", "", hash.ID{}, hash.ID{}, "", err
 		}
-		return meta.ParentVersion, head.String(), v.Tree, head, nil
+		return meta.ParentVersion, head.String(), v.Tree, head, def, nil
 	}
 
 	// 先当作版本。
 	if h, err := hash.Parse(parent); err == nil {
 		if v, err := m.db.GetVersion(h); err == nil {
-			return meta.ParentVersion, parent, v.Tree, h, nil
+			return meta.ParentVersion, parent, v.Tree, h, "", nil
 		}
 	} else if isHexPrefix(parent) {
 		// 也接受版本 id 的唯一前缀（与 p37 log 的短 id 对齐）。
 		if h, err := m.db.FindVersionByPrefix(parent); err == nil {
 			if v, err := m.db.GetVersion(h); err == nil {
-				return meta.ParentVersion, h.String(), v.Tree, h, nil
+				return meta.ParentVersion, h.String(), v.Tree, h, "", nil
 			}
+		}
+	}
+	// 再当作裸 line 名。
+	if h, err := m.db.LineHead(parent); err == nil {
+		v, err := m.db.GetVersion(h)
+		if err == nil {
+			return meta.ParentVersion, h.String(), v.Tree, h, parent, nil
 		}
 	}
 
@@ -247,43 +292,44 @@ func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID
 	pw, err := m.db.GetWorkspace(parent)
 	if err != nil {
 		if errors.Is(err, meta.ErrNotExist) {
-			return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: parent %s", ErrNotFound, parent)
+			return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: parent %s", ErrNotFound, parent)
 		}
-		return "", "", hash.ID{}, hash.ID{}, err
+		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
-	if pw.State == meta.StateBroken {
-		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 父工作区处于 broken", ErrWrongState)
+	if pw.State != meta.StateActive {
+		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 父工作区状态为 %s", ErrWrongState, pw.State)
 	}
-	if _, landed, err := m.db.GetLandedWS(pw.ID); err != nil {
-		return "", "", hash.ID{}, hash.ID{}, err
-	} else if landed {
-		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 父工作区已落地", ErrWrongState)
+	if pw.LandedTS != 0 {
+		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 父工作区已落地", ErrWrongState)
+	}
+	if pw.Hidden || pw.Kind == "merge" {
+		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 不能以隐藏工作区为父", ErrWrongState)
 	}
 
 	// B9：父必须先采集，否则子的基准不含父的最新改动。
 	if err := m.Sync(pw.ID); err != nil {
-		return "", "", hash.ID{}, hash.ID{}, err
+		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
 	et, err := m.EffectiveTree(pw.ID)
 	if err != nil {
-		return "", "", hash.ID{}, hash.ID{}, err
+		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
 	// 栈深检查。
 	depth, err := m.depthOf(pw.ID)
 	if err != nil {
-		return "", "", hash.ID{}, hash.ID{}, err
+		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
 	if _, maxDepth, _ := m.limits(); depth+1 >= maxDepth {
-		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 栈深将达 %d", ErrLimitExceeded, depth+1)
+		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 栈深将达 %d", ErrLimitExceeded, depth+1)
 	}
 	kids, err := m.db.Children(pw.ID)
 	if err != nil {
-		return "", "", hash.ID{}, hash.ID{}, err
+		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
 	if _, _, maxFanout := m.limits(); len(kids) >= maxFanout {
-		return "", "", hash.ID{}, hash.ID{}, fmt.Errorf("%w: 子工作区已达 %d", ErrLimitExceeded, maxFanout)
+		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 子工作区已达 %d", ErrLimitExceeded, maxFanout)
 	}
-	return meta.ParentWorkspace, pw.ID, et, pw.BaseVersion, nil
+	return meta.ParentWorkspace, pw.ID, et, pw.BaseVersion, "", nil
 }
 
 // depthOf 返回工作区在栈中的深度（直接挂在 version 上为 0）。
@@ -370,6 +416,12 @@ func (m *Manager) Sync(wsID string) error {
 	}
 	if w.State == meta.StateRebasing || w.State == meta.StateIntegrating {
 		return fmt.Errorf("%w: 状态 %s 期间拒绝采集", ErrWrongState, w.State)
+	}
+	if w.LandedTS != 0 {
+		return fmt.Errorf("%w: 工作区已落地（只读）", ErrWrongState)
+	}
+	if w.Hidden || w.Kind == "merge" {
+		return fmt.Errorf("%w: 隐藏 merge 工作区没有可采集目录", ErrWrongState)
 	}
 	if !dirExists(m.mm.WorkspaceDir(wsID)) {
 		if w.State != meta.StateBroken {
@@ -545,12 +597,18 @@ type Status struct {
 	ParentKind    string  `json:"parent_kind"`
 	ParentID      string  `json:"parent_id"`
 	BaseVersion   hash.ID `json:"base_version"`
+	BaseLine      string  `json:"base_line,omitempty"`
 	Dir           string  `json:"dir"`
 	Dirty         bool    `json:"dirty"`
 	CapturedOps   int64   `json:"captured_ops"`
 	ConflictCount int64   `json:"conflict_count"`
 	State         string  `json:"state"`
 	Materialize   string  `json:"materialize"`
+	Hidden        bool    `json:"hidden,omitempty"`
+	Kind          string  `json:"kind,omitempty"`
+	LandedTS      int64   `json:"landed_ts,omitempty"`
+	BaseStale     bool    `json:"base_stale,omitempty"`
+	DiskBytes     int64   `json:"disk_bytes"`
 }
 
 // Info 返回工作区状态。
@@ -567,18 +625,44 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Status{
+	state := w.State
+	if w.LandedTS != 0 {
+		state = "landed"
+	}
+	st := &Status{
 		ID:            w.ID,
 		ParentKind:    w.ParentKind,
 		ParentID:      w.ParentID,
 		BaseVersion:   w.BaseVersion,
+		BaseLine:      w.BaseLine,
 		Dir:           m.mm.WorkspaceDir(wsID),
 		Dirty:         ops > 0,
 		CapturedOps:   ops,
 		ConflictCount: conf,
-		State:         w.State,
+		State:         state,
 		Materialize:   w.Materialize,
-	}, nil
+		Hidden:        w.Hidden,
+		Kind:          w.Kind,
+		LandedTS:      w.LandedTS,
+	}
+	if dir := m.mm.WorkspaceDir(wsID); dirExists(dir) {
+		_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && info != nil && !info.IsDir() {
+				st.DiskBytes += info.Size()
+			}
+			return nil
+		})
+	}
+	if w.BaseLine != "" {
+		if h, err := m.db.LineHead(w.BaseLine); err == nil && h != w.BaseVersion {
+			st.BaseStale = true
+		}
+	} else if w.ParentKind == meta.ParentVersion {
+		if h, ok, _ := m.db.Head(); ok && h != w.BaseVersion {
+			st.BaseStale = true
+		}
+	}
+	return st, nil
 }
 
 // Drop 放弃工作区（§11.4）。
@@ -1092,4 +1176,178 @@ func isHexPrefix(s string) bool {
 		}
 	}
 	return true
+}
+
+// RebaseTo 把工作区对齐到显式目标（version / line / workspace）。
+// ref 为空时退化为 Rebase 的默认行为。
+func (m *Manager) RebaseTo(wsID, ref string) (*RebaseResult, error) {
+	if ref == "" {
+		return m.Rebase(wsID)
+	}
+	w, err := m.Get(wsID)
+	if err != nil {
+		return nil, err
+	}
+	if w.LandedTS != 0 || w.Hidden {
+		return nil, fmt.Errorf("%w: 工作区已落地/隐藏", ErrWrongState)
+	}
+	if w.State != meta.StateActive && w.State != meta.StateConflicted {
+		return nil, fmt.Errorf("%w: 状态 %s", ErrWrongState, w.State)
+	}
+	if err := m.Sync(wsID); err != nil {
+		return nil, err
+	}
+	kind, id, baseLine, newBase, err := m.resolveRebaseTarget(w, ref)
+	if err != nil {
+		return nil, err
+	}
+	if newBase == w.BaseTree {
+		return &RebaseResult{Rebased: false}, nil
+	}
+	ops, err := m.db.ListOps(wsID)
+	if err != nil {
+		return nil, err
+	}
+	newTree, err := m.store.GetTree(newBase)
+	if err != nil {
+		return nil, err
+	}
+	var follow map[string]string
+	if !w.BaseTree.IsZero() && w.BaseTree != newBase {
+		baseTree, err := m.store.GetTree(w.BaseTree)
+		if err != nil {
+			return nil, err
+		}
+		if follow, err = op.RenameFollows(m.store, baseTree, newTree); err != nil {
+			return nil, err
+		}
+	}
+	res, err := op.Replay(newTree, ops, m.store, op.Options{
+		WsID: wsID, MaxMatches: m.maxMatches(), Resolver: m.db.Resolver(), Follow: follow,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(res.Conflicts) > 0 {
+		keys := make([]string, 0, len(res.Conflicts))
+		for i := range res.Conflicts {
+			keys = append(keys, res.Conflicts[i].Key.String())
+		}
+		_ = m.db.UpdateWorkspaceState(wsID, meta.StateConflicted, m.now())
+		return &RebaseResult{Rebased: false, Conflicts: keys}, nil
+	}
+	if err := m.rebaseWorkspace(wsID, newBase, res.Tree); err != nil {
+		return nil, err
+	}
+	if _, err := m.db.StatCache().Clear(wsID); err != nil {
+		return nil, err
+	}
+	bv, _ := hash.Parse(id)
+	if err := m.db.UpdateWorkspaceBaseLine(wsID, newBase, bv, baseLine, m.now()); err != nil {
+		return nil, err
+	}
+	if err := m.db.UpdateWorkspaceParent(wsID, kind, id, m.now()); err != nil {
+		return nil, err
+	}
+	matTS := int64(0)
+	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, m.now(), matTS); err != nil {
+		return nil, err
+	}
+	if err := m.Sync(wsID); err != nil {
+		return nil, err
+	}
+	_ = m.db.UpdateWorkspaceState(wsID, meta.StateActive, m.now())
+	return &RebaseResult{Rebased: true}, nil
+}
+
+func (m *Manager) resolveRebaseTarget(w *meta.Workspace, ref string) (string, string, string, hash.ID, error) {
+	resolveVersion := func(h hash.ID) (hash.ID, error) {
+		v, err := m.db.GetVersion(h)
+		if err != nil {
+			return hash.ID{}, err
+		}
+		return v.Tree, nil
+	}
+	if len(ref) > 5 && ref[:5] == "line:" {
+		name := ref[5:]
+		h, err := m.db.LineHead(name)
+		if err != nil {
+			return "", "", "", hash.ID{}, err
+		}
+		t, err := resolveVersion(h)
+		return meta.ParentVersion, h.String(), name, t, err
+	}
+	if ref == "mainline" {
+		def, _ := m.db.DefaultLine()
+		h, err := m.db.LineHead(def)
+		if err != nil {
+			return "", "", "", hash.ID{}, err
+		}
+		t, err := resolveVersion(h)
+		return meta.ParentVersion, h.String(), def, t, err
+	}
+	if len(ref) > 10 && ref[:10] == "workspace:" {
+		ref = ref[10:]
+		if _, err := m.Get(ref); err == nil {
+			t, err := m.EffectiveTree(ref)
+			return meta.ParentWorkspace, ref, "", t, err
+		}
+	}
+	if len(ref) > 8 && ref[:8] == "version:" {
+		id, err := hash.Parse(ref[8:])
+		if err != nil {
+			return "", "", "", hash.ID{}, err
+		}
+		t, err := resolveVersion(id)
+		return meta.ParentVersion, id.String(), "", t, err
+	}
+	if id, err := hash.Parse(ref); err == nil {
+		if t, err := resolveVersion(id); err == nil {
+			return meta.ParentVersion, id.String(), "", t, nil
+		}
+	}
+	if h, err := m.db.FindVersionByPrefix(ref); err == nil {
+		t, err := resolveVersion(h)
+		return meta.ParentVersion, h.String(), "", t, err
+	}
+	if h, err := m.db.LineHead(ref); err == nil {
+		t, err := resolveVersion(h)
+		return meta.ParentVersion, h.String(), ref, t, err
+	}
+	return "", "", "", hash.ID{}, fmt.Errorf("%w: 无法解析 rebase 目标 %q", ErrNotFound, ref)
+}
+
+// ApplyTree 把工作区目录与 op-log 更新为目标树（供 ws_land_into 使用）。
+func (m *Manager) ApplyTree(wsID string, target *tree.Tree) error {
+	w, err := m.Get(wsID)
+	if err != nil {
+		return err
+	}
+	if w.Hidden || w.LandedTS != 0 {
+		return fmt.Errorf("%w: 工作区不可写", ErrWrongState)
+	}
+	if w.Materialize == meta.MaterializeOverlay && !m.mm.IsMounted(wsID) {
+		return fmt.Errorf("%w: %s", ErrNotMounted, wsID)
+	}
+	if err := m.overwriteWorkspace(wsID, target); err != nil {
+		return err
+	}
+	if _, err := m.db.StatCache().Clear(wsID); err != nil {
+		return err
+	}
+	// 让下一次采集走全量读取：磁盘刚被改写，惰性 stat 判定不再成立。
+	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, m.now(), 0); err != nil {
+		return err
+	}
+	return m.Sync(wsID)
+}
+
+// MarkLanded 标记工作区已落地但保留目录与元数据（drop_workspace=false）。
+func (m *Manager) MarkLanded(wsID string) error {
+	return m.db.SetWorkspaceLanded(wsID, m.now())
+}
+
+// SetHidden 仅供内部 merge/preview 工作区使用。
+func (m *Manager) SetHidden(wsID string, hidden bool, kind string) error {
+	return m.db.SetWorkspaceHidden(wsID, hidden, kind)
 }

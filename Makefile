@@ -96,8 +96,8 @@ p36-bootstrap: release-check
 	mkdir -p $(OUT)/p36-bootstrap
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(OUT)/p37-mount-linux-amd64 ./cmd/p37-mount
 	cp $(OUT)/p37-mount-linux-amd64 $(OUT)/p36-bootstrap/p37-mount
-	cp packaging/p36/p37-run packaging/p36/p37-mcp packaging/p36/config.toml packaging/p36/p37d.service packaging/p36/90-p37.conf packaging/p36/tmpfiles-p37.conf packaging/p36/config-overlay.toml packaging/p36/p37d-root-overlay.service $(OUT)/p36-bootstrap/
-	chmod 0755 $(OUT)/p36-bootstrap/p37-run $(OUT)/p36-bootstrap/p37-mcp $(OUT)/p36-bootstrap/p37-mount
+	cp packaging/p36/p37-run packaging/p36/p37-mcp packaging/p36/p37 packaging/p36/config.toml packaging/p36/p37d.service packaging/p36/90-p37.conf packaging/p36/tmpfiles-p37.conf packaging/p36/config-overlay.toml packaging/p36/p37d-root-overlay.service $(OUT)/p36-bootstrap/
+	chmod 0755 $(OUT)/p36-bootstrap/p37-run $(OUT)/p36-bootstrap/p37-mcp $(OUT)/p36-bootstrap/p37 $(OUT)/p36-bootstrap/p37-mount
 	@echo "p36-bootstrap: $(OUT)/p36-bootstrap"
 
 clean:

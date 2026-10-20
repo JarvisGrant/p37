@@ -135,27 +135,37 @@ func (d *DB) RollbackLand(versionID string) error {
 //   - 若 head 已指向其 landed 版本 → 补做 FinishLand
 //   - 否则 → 回滚（恢复 active 并清掉 landed_ws/version/journal）
 func (d *DB) ReconcileLand() (int, error) {
-	head, ok, err := d.Head()
+	mainHead, ok, err := d.Head()
 	if err != nil {
 		return 0, err
 	}
-	headStr := ""
+	mainStr := ""
 	if ok {
-		headStr = head.String()
+		mainStr = mainHead.String()
+	}
+	lineHeads := map[string]string{}
+	if rows, err := d.sql.Query(`SELECT name, head FROM line WHERE deleted_ts=0`); err == nil {
+		for rows.Next() {
+			var n, h string
+			if err := rows.Scan(&n, &h); err == nil {
+				lineHeads[n] = h
+			}
+		}
+		_ = rows.Close()
 	}
 
 	rows, err := d.sql.Query(
-		`SELECT l.ws_id, l.version_id FROM landed_ws l
+		`SELECT l.ws_id, l.version_id, l.target_kind, l.target_id FROM landed_ws l
 		   JOIN workspace w ON w.id = l.ws_id
 		  WHERE w.state = ?`, StateIntegrating)
 	if err != nil {
 		return 0, err
 	}
-	type pair struct{ wsID, verID string }
+	type pair struct{ wsID, verID, kind, target string }
 	var pairs []pair
 	for rows.Next() {
 		var p pair
-		if err := rows.Scan(&p.wsID, &p.verID); err != nil {
+		if err := rows.Scan(&p.wsID, &p.verID, &p.kind, &p.target); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
@@ -165,10 +175,14 @@ func (d *DB) ReconcileLand() (int, error) {
 		return 0, err
 	}
 
-	done := map[string][]string{} // versionID -> wsIDs
+	done := map[string][]string{}
 	rollback := map[string][]string{}
 	for _, p := range pairs {
-		if p.verID == headStr {
+		head := mainStr
+		if p.kind == "line" {
+			head = lineHeads[p.target]
+		}
+		if p.verID == head {
 			done[p.verID] = append(done[p.verID], p.wsID)
 		} else {
 			rollback[p.verID] = append(rollback[p.verID], p.wsID)

@@ -17,15 +17,16 @@ import (
 
 // VersionDetail 是 version_show 的返回（附录 K）。
 type VersionDetail struct {
-	ID     hash.ID    `json:"id"`
-	Parent hash.ID    `json:"parent"`
-	TS     int64      `json:"ts"`
-	Agent  string     `json:"agent"`
-	Task   string     `json:"task"`
-	Msg    string     `json:"msg"`
-	Epoch  uint64     `json:"epoch"`
-	First  bool       `json:"first"`
-	Files  []FileStat `json:"files"`
+	ID      hash.ID    `json:"id"`
+	Parent  hash.ID    `json:"parent"`
+	Parents []hash.ID  `json:"parents"`
+	TS      int64      `json:"ts"`
+	Agent   string     `json:"agent"`
+	Task    string     `json:"task"`
+	Msg     string     `json:"msg"`
+	Epoch   uint64     `json:"epoch"`
+	First   bool       `json:"first"`
+	Files   []FileStat `json:"files"`
 }
 
 // VersionShow 返回版本详情（含相对父版本的文件级统计）。
@@ -38,7 +39,7 @@ func (r *Repo) VersionShow(id hash.ID) (*VersionDetail, error) {
 		return nil, err
 	}
 	d := &VersionDetail{
-		ID: v.ID(), Parent: v.Parent, TS: v.TS, Agent: v.Agent,
+		ID: v.ID(), Parent: v.Parent, Parents: v.Parents, TS: v.TS, Agent: v.Agent,
 		Task: v.TaskDesc, Msg: v.Msg, Epoch: v.Epoch, First: v.IsFirst(),
 	}
 	if !v.IsFirst() {

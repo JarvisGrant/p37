@@ -20,17 +20,18 @@ const MetaFormat = 1
 
 // MetaVersion 是 version 表的一行（可审查的 snake_case 视图）。
 type MetaVersion struct {
-	ID        string `json:"id"`
-	Parent    string `json:"parent"`
-	Tree      string `json:"tree"`
-	Epoch     uint64 `json:"epoch"`
-	Agent     string `json:"agent"`
-	TaskHash  string `json:"task_hash"`
-	TaskDesc  string `json:"task_desc"`
-	TS        int64  `json:"ts"`
-	Msg       string `json:"msg"`
-	WSID      string `json:"ws_id"`
-	JournalID int64  `json:"journal_id"`
+	ID        string   `json:"id"`
+	Parent    string   `json:"parent"`
+	Parents   []string `json:"parents,omitempty"`
+	Tree      string   `json:"tree"`
+	Epoch     uint64   `json:"epoch"`
+	Agent     string   `json:"agent"`
+	TaskHash  string   `json:"task_hash"`
+	TaskDesc  string   `json:"task_desc"`
+	TS        int64    `json:"ts"`
+	Msg       string   `json:"msg"`
+	WSID      string   `json:"ws_id"`
+	JournalID int64    `json:"journal_id"`
 }
 
 // MetaJournal 是 journal 表的一行（血缘/任务描述）。
@@ -61,8 +62,16 @@ func collectMeta(r *repo.Repo, versionIDs []hash.ID) (*PackageMeta, error) {
 		if err != nil {
 			return nil, fmt.Errorf("remotesync: 读取版本 %s: %w", id, err)
 		}
+		parents := v.Parents
+		if len(parents) == 0 && !v.Parent.IsZero() {
+			parents = []hash.ID{v.Parent}
+		}
+		pstrs := make([]string, 0, len(parents))
+		for _, p := range parents {
+			pstrs = append(pstrs, p.String())
+		}
 		mv := MetaVersion{
-			ID: id.String(), Parent: v.Parent.String(), Tree: v.Tree.String(),
+			ID: id.String(), Parent: v.Parent.String(), Parents: pstrs, Tree: v.Tree.String(),
 			Epoch: v.Epoch, Agent: v.Agent, TaskHash: v.TaskHash.String(),
 			TaskDesc: v.TaskDesc, TS: v.TS, Msg: v.Msg, WSID: v.WsID,
 		}
@@ -114,8 +123,16 @@ func (mv MetaVersion) toVersion() (*version.Version, error) {
 	if err != nil {
 		return nil, err
 	}
+	var parents []hash.ID
+	for _, ps := range mv.Parents {
+		p, err := hash.Parse(ps)
+		if err != nil {
+			return nil, err
+		}
+		parents = append(parents, p)
+	}
 	v := &version.Version{Meta: version.Meta{
-		Parent: parent, Tree: tree, Epoch: mv.Epoch, Agent: mv.Agent,
+		Parent: parent, Parents: parents, Tree: tree, Epoch: mv.Epoch, Agent: mv.Agent,
 		TaskHash: taskHash, TaskDesc: mv.TaskDesc, TS: mv.TS, Msg: mv.Msg,
 	}, WsID: mv.WSID, JournalID: mv.JournalID}
 	if v.ID().String() != mv.ID {

@@ -29,7 +29,8 @@ import (
 
 func main() {
 	var (
-		repoRoot       = flag.String("repo", "", "仓库容器目录（daemon/check/stdio 必填）")
+		repoRoot       = flag.String("repo", "", "单仓库容器目录（与 --root 互斥）")
+		rootDir        = flag.String("root", "", "多仓库根目录（单 daemon 多 repo）")
 		serveHTTP      = flag.Bool("http", false, "额外监听 HTTP（需配置 auth_token）")
 		version        = flag.Bool("version", false, "打印版本")
 		stdio          = flag.Bool("stdio", false, "作为 stdio MCP 代理连接现有 daemon（不取仓库锁）")
@@ -55,24 +56,45 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *repoRoot == "" {
+	if *repoRoot != "" && *rootDir != "" {
+		fmt.Fprintln(os.Stderr, "--repo 与 --root 不能同时使用")
+		os.Exit(2)
+	}
+	if *repoRoot == "" && *rootDir == "" {
 		fmt.Fprintln(os.Stderr,
 			"用法: p37d --repo <root> [--http]\n"+
-				"      p37d --check --repo <root> [--json] [--strict]\n"+
-				"      p37d --stdio --repo <root> [--connect-timeout 15s]")
+				"      p37d --root <dir> [--http]\n"+
+				"      p37d --check (--repo <root> | --root <dir>) [--json] [--strict]\n"+
+				"      p37d --stdio (--repo <root> | --root <dir>) [--connect-timeout 15s]")
 		os.Exit(2)
+	}
+	target := *repoRoot
+	if target == "" {
+		target = *rootDir
 	}
 
 	switch {
 	case *check:
-		os.Exit(runCheck(*repoRoot, *jsonOut, *strict, os.Stdout, os.Stderr))
+		code := 0
+		if *rootDir != "" {
+			code = runRootCheck(*rootDir, *jsonOut, *strict, os.Stdout, os.Stderr)
+		} else {
+			code = runCheck(*repoRoot, *jsonOut, *strict, os.Stdout, os.Stderr)
+		}
+		os.Exit(code)
 	case *stdio:
-		if err := runStdio(*repoRoot, *connectTimeout, os.Stdin, os.Stdout, os.Stderr); err != nil {
+		if err := runStdio(target, *connectTimeout, os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintf(os.Stderr, "p37d: %v\n", err)
 			os.Exit(1)
 		}
 	default:
-		if err := runDaemon(*repoRoot, *serveHTTP); err != nil {
+		var err error
+		if *rootDir != "" {
+			err = runRootDaemon(*rootDir, *serveHTTP)
+		} else {
+			err = runDaemon(*repoRoot, *serveHTTP)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "p37d: %v\n", err)
 			os.Exit(1)
 		}

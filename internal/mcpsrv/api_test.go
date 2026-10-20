@@ -50,11 +50,11 @@ func TestWSInfoUsesSnakeCase(t *testing.T) {
 func TestErrorCodesCoverNewStates(t *testing.T) {
 	// 通过 classify 走一遍
 	code, _, _ := classify(workspace.ErrNotMounted)
-	if code != "WS_NOT_MOUNTED" {
+	if code != "ws_not_mounted" {
 		t.Fatalf("ErrNotMounted -> %q，期望 WS_NOT_MOUNTED", code)
 	}
 	code, _, _ = classify(workspace.ErrDirMissing)
-	if code != "WS_DIR_MISSING" {
+	if code != "ws_broken" {
 		t.Fatalf("ErrDirMissing -> %q", code)
 	}
 }

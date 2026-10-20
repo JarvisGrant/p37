@@ -2,7 +2,7 @@
 Description=p37 version control daemon (optional root + OverlayFS)
 Documentation=https://github.com/JarvisGrant/p37
 After=local-fs.target
-ConditionPathIsDirectory=/srv/repo
+ConditionPathIsDirectory=/srv/repos
 # 与默认的 User=p36 + auto 单元互斥，避免两个 daemon 抢同一把仓库锁。
 Conflicts=p37d.service
 
@@ -14,11 +14,12 @@ User=root
 Group=root
 SupplementaryGroups=disk
 
+Environment=P37_ROOT=/srv/repos
 Environment=P37_REPO=/srv/repo
 Environment=P37_PAYLOAD_LABEL=P37PAYLOAD
 Environment=P37_PAYLOAD_MOUNT=/run/p37-payload
 Environment=P37_CONFIG=/usr/local/share/p37/config-overlay.toml
-Environment=TMPDIR=/srv/repo/.p37/tmp
+Environment=TMPDIR=/srv/repos/.p37/tmp
 
 ExecStart=/usr/local/bin/p37-run
 Restart=on-failure

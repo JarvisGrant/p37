@@ -21,6 +21,9 @@ const (
 	TypeFileContent uint8 = 0x02
 	TypeTree        uint8 = 0x03
 	TypeVersion     uint8 = 0x04
+	// TypeVersionMerge 是多父（merge）版本对象。线性版本仍使用 TypeVersion，
+	// 保证老仓库的 version id 不变。
+	TypeVersionMerge uint8 = 0x05
 )
 
 // EOL 取值（附录 A.3）。

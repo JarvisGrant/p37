@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
@@ -54,28 +55,43 @@ func Fetch(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetc
 
 	// 从远端 head 往回走，收集本地还缺的包（老的在前）。
 	var need []*Manifest
-	cur := ref.Head
-	visited := map[string]bool{}
-	for cur != "" && !isZeroVersion(cur) {
-		if visited[cur] {
-			return nil, fmt.Errorf("%w: 包链存在环", ErrCorruptPackage)
+	if len(ref.Lines) > 0 {
+		// 多 line：ref.Head 只是 default line，其他 line 的版本不在 head 链上。
+		// 本轮同步包是全量 checkpoint，因此直接按创建时间应用全部远端包。
+		need = make([]*Manifest, 0, len(byResult))
+		for _, m := range byResult {
+			need = append(need, m)
 		}
-		visited[cur] = true
-		if _, err := r.DB.GetVersion(mustParse(cur)); err == nil {
-			break // 本地已有这个版本（及其全部历史）
+		sort.Slice(need, func(i, j int) bool {
+			if need[i].CreatedTS != need[j].CreatedTS {
+				return need[i].CreatedTS < need[j].CreatedTS
+			}
+			return need[i].ID < need[j].ID
+		})
+	} else {
+		cur := ref.Head
+		visited := map[string]bool{}
+		for cur != "" && !isZeroVersion(cur) {
+			if visited[cur] {
+				return nil, fmt.Errorf("%w: 包链存在环", ErrCorruptPackage)
+			}
+			visited[cur] = true
+			if _, err := r.DB.GetVersion(mustParse(cur)); err == nil {
+				break // 本地已有这个版本（及其全部历史）
+			}
+			m, ok := byResult[cur]
+			if !ok {
+				return nil, fmt.Errorf("remotesync: 远端缺少版本 %s 对应的包", cur)
+			}
+			need = append([]*Manifest{m}, need...)
+			cur = m.BaseVersion
 		}
-		m, ok := byResult[cur]
-		if !ok {
-			return nil, fmt.Errorf("remotesync: 远端缺少版本 %s 对应的包", cur)
-		}
-		need = append([]*Manifest{m}, need...)
-		cur = m.BaseVersion
-	}
-	if len(need) > 0 {
-		first := need[0]
-		if !isZeroVersion(first.BaseVersion) {
-			if _, err := r.DB.GetVersion(mustParse(first.BaseVersion)); err != nil {
-				return nil, fmt.Errorf("remotesync: 缺少 base 版本 %s（需要 checkpoint 包）", first.BaseVersion)
+		if len(need) > 0 {
+			first := need[0]
+			if !isZeroVersion(first.BaseVersion) {
+				if _, err := r.DB.GetVersion(mustParse(first.BaseVersion)); err != nil {
+					return nil, fmt.Errorf("remotesync: 缺少 base 版本 %s（需要 checkpoint 包）", first.BaseVersion)
+				}
 			}
 		}
 	}
@@ -132,6 +148,11 @@ func Pull(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetch
 	if err := r.AdvanceHead(target, epochOf(r, target)); err != nil {
 		return nil, err
 	}
+	if ref, err := remote.GetRef(ctx); err == nil {
+		if _, err := ApplyLineRefs(r, ref); err != nil {
+			return nil, err
+		}
+	}
 	res.LocalHead = target.String()
 	res.FastForward = true
 	res.Ahead = 0
@@ -187,4 +208,64 @@ func isInitOnlyHead(r *repo.Repo) (bool, error) {
 		return false, err
 	}
 	return v.Parent.IsZero() && v.Agent == "p37-init", nil
+}
+
+// ApplyLineRefs 把远端 ref 里的 line 列表应用到本地。
+//
+// 只做快进/创建：本地 line 领先或分叉时保持本地不动，并在结果里报告。
+func ApplyLineRefs(r *repo.Repo, ref Ref) (map[string]string, error) {
+	result := map[string]string{}
+	if len(ref.Lines) == 0 {
+		return result, nil
+	}
+	def := ref.DefaultLine
+	if def == "" {
+		def, _ = r.DB.DefaultLine()
+	}
+	for name, lr := range ref.Lines {
+		if lr.DeletedTS != 0 {
+			_ = r.DB.DeleteLine(name, lr.DeletedTS)
+			continue
+		}
+		head, err := hash.Parse(lr.Head)
+		if err != nil {
+			return result, err
+		}
+		cur, err := r.DB.GetLine(name)
+		if err != nil {
+			from, _ := hash.Parse(lr.CreatedFrom)
+			if from.IsZero() {
+				from = head
+			}
+			if err := r.DB.CreateLine(name, head, from, lr.Protected, meta.NowMS()); err != nil {
+				return result, err
+			}
+			result[name] = "created"
+			continue
+		}
+		if cur.Head == head {
+			if cur.Protected != lr.Protected {
+				_ = r.DB.SetLineProtected(name, lr.Protected, meta.NowMS())
+			}
+			result[name] = "up_to_date"
+			continue
+		}
+		localAhead, _ := r.DB.IsAncestor(head, cur.Head)
+		remoteAhead, _ := r.DB.IsAncestor(cur.Head, head)
+		switch {
+		case remoteAhead:
+			if err := r.DB.SetLineHead(name, head, meta.NowMS()); err != nil {
+				return result, err
+			}
+			result[name] = "fast_forward"
+		case localAhead:
+			result[name] = "local_ahead"
+		default:
+			result[name] = "diverged"
+		}
+	}
+	if def != "" {
+		_ = r.DB.SetDefaultLine(def)
+	}
+	return result, nil
 }

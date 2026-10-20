@@ -151,7 +151,7 @@ func decodeStored(b []byte) (uint8, []byte, error) {
 		return 0, nil, fmt.Errorf("cas: 未知存储格式标记 0x%02x", b[0])
 	}
 	typ := b[1]
-	if typ < codec.TypeBlob || typ > codec.TypeVersion {
+	if typ < codec.TypeBlob || typ > codec.TypeVersionMerge {
 		return 0, nil, fmt.Errorf("cas: 未知对象类型 0x%02x", typ)
 	}
 	raw, err := zstdDec.DecodeAll(b[2:], make([]byte, 0, 4096))
@@ -210,7 +210,11 @@ func (s *Store) PutTree(t *tree.Tree) (hash.ID, error) {
 // PutVersion 写入 Version 对象。
 func (s *Store) PutVersion(v *version.Version) (hash.ID, error) {
 	enc := v.Encode()
-	return s.put(codec.TypeVersion, enc)
+	typ := uint8(codec.TypeVersion)
+	if len(v.Parents) > 1 {
+		typ = codec.TypeVersionMerge
+	}
+	return s.put(typ, enc)
 }
 
 // Has 报告对象是否已在本地。
@@ -291,7 +295,7 @@ func (s *Store) GetVersion(id hash.ID) (*version.Version, error) {
 	if err != nil {
 		return nil, err
 	}
-	if typ != codec.TypeVersion {
+	if typ != codec.TypeVersion && typ != codec.TypeVersionMerge {
 		return nil, fmt.Errorf("cas: 对象 %s 是类型 %d，不是 Version", id, typ)
 	}
 	return version.Decode(raw)
@@ -409,7 +413,7 @@ func (s *Store) Head(id hash.ID) (uint8, int64, error) {
 		return 0, 0, errors.Join(ErrCorrupt,
 			fmt.Errorf("cas: %s 未知存储格式标记 0x%02x", id, hdr[0]))
 	}
-	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersion {
+	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersionMerge {
 		return 0, 0, errors.Join(ErrCorrupt,
 			fmt.Errorf("cas: %s 未知对象类型 0x%02x", id, hdr[1]))
 	}

@@ -31,6 +31,9 @@ func Prepare(r *repo.Repo, opt Options, force, full bool) (*Manifest, error) {
 }
 
 func prepareLocked(r *repo.Repo, opt Options, force, full bool) (*Manifest, error) {
+	if m, err := prepareMultiCheckpoint(r, opt, force); err != nil || m != nil {
+		return m, err
+	}
 	head, ok, err := r.Head()
 	if err != nil {
 		return nil, err

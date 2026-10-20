@@ -110,7 +110,7 @@ func Run(ctx context.Context, socket string, in io.Reader, out io.Writer, errw i
 	}
 
 	transport := &mcp.IOTransport{
-		Reader: io.NopCloser(in),
+		Reader: io.NopCloser(&eofDelayReader{r: in, d: 100 * time.Millisecond}),
 		Writer: nopWriteCloser{out},
 	}
 	ss, err := srv.Connect(ctx, transport, nil)
@@ -177,3 +177,22 @@ func listTools(ctx context.Context, cs *mcp.ClientSession) ([]*mcp.Tool, error) 
 type nopWriteCloser struct{ io.Writer }
 
 func (nopWriteCloser) Close() error { return nil }
+
+// eofDelayReader 在 stdin 立即 EOF 时稍等再返回 EOF。
+//
+// 某些 MCP 客户端会「写完 initialize 就关闭 stdin」。如果代理立刻把 EOF
+// 传给服务端，服务端可能在响应写出前结束会话；延迟 100ms 让已入队的请求
+// 先被处理并 flush。
+type eofDelayReader struct {
+	r io.Reader
+	d time.Duration
+}
+
+func (e *eofDelayReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF && e.d > 0 {
+		time.Sleep(e.d)
+		e.d = 0
+	}
+	return n, err
+}

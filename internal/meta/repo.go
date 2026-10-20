@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/version"
@@ -18,6 +19,7 @@ type Repo struct {
 	Root         string
 	CreatedTS    int64
 	FormatVer    int
+	DefaultLine  string
 	MainlineHead hash.ID // 无效时 IsZero()
 	VersionCount int64
 	Epoch        uint64
@@ -30,9 +32,9 @@ func (d *DB) GetRepo() (Repo, error) {
 		head sql.NullString
 	)
 	err := d.sql.QueryRow(
-		`SELECT root, created_ts, format_ver, mainline_head, version_count, epoch
+		`SELECT root, created_ts, format_ver, mainline_head, default_line, version_count, epoch
 		   FROM repo WHERE id = 1`).
-		Scan(&r.Root, &r.CreatedTS, &r.FormatVer, &head, &r.VersionCount, &r.Epoch)
+		Scan(&r.Root, &r.CreatedTS, &r.FormatVer, &head, &r.DefaultLine, &r.VersionCount, &r.Epoch)
 	if err != nil {
 		return Repo{}, err
 	}
@@ -43,15 +45,37 @@ func (d *DB) GetRepo() (Repo, error) {
 		}
 		r.MainlineHead = id
 	}
+	if r.DefaultLine == "" {
+		r.DefaultLine = "main"
+	}
 	return r, nil
 }
 
 // SetMainlineHead 更新主干 head 与版本计数。
 func (d *DB) SetMainlineHead(head hash.ID, versionCount int64, epoch uint64) error {
 	return d.withWrite(func(tx *sql.Tx) error {
+		var def string
+		if err := tx.QueryRow(`SELECT default_line FROM repo WHERE id = 1`).Scan(&def); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			return err
+		}
+		if def == "" {
+			def = "main"
+		}
 		_, err := tx.Exec(
 			`UPDATE repo SET mainline_head = ?, version_count = ?, epoch = ? WHERE id = 1`,
 			head.String(), versionCount, epoch)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UnixMilli()
+		_, err = tx.Exec(
+			`INSERT INTO line(name, head, protected, created_ts, updated_ts)
+			 VALUES(?,?,1,?,?)
+			 ON CONFLICT(name) DO UPDATE SET head=excluded.head, updated_ts=excluded.updated_ts`,
+			def, head.String(), now, now)
 		return err
 	})
 }
@@ -71,14 +95,41 @@ func (d *DB) InsertVersion(v *version.Version) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
 			`INSERT INTO version(id, parent, tree, epoch, agent, task_hash, task_desc,
-			                     ts, msg, ws_id, journal_id)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?)
+			                     ts, msg, ws_id, journal_id,
+			                     idempotency_key, idempotency_tool, idempotency_ts)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			 ON CONFLICT(id) DO NOTHING`,
 			id.String(), v.Parent.String(), v.Tree.String(), int64(v.Epoch),
 			v.Agent, v.TaskHash.String(), v.TaskDesc, v.TS, v.Msg,
-			nullableString(v.WsID), nullableInt(v.JournalID))
-		return err
+			nullableString(v.WsID), nullableInt(v.JournalID),
+			nil, nil, nil)
+		if err != nil {
+			return err
+		}
+		return insertVersionParentsTx(tx, id, v)
 	})
+}
+
+// insertVersionParentsTx 写入 version_parent。线性版本也写一条，便于统一查询。
+func insertVersionParentsTx(tx *sql.Tx, id hash.ID, v *version.Version) error {
+	parents := v.Parents
+	if len(parents) == 0 {
+		if !v.Parent.IsZero() {
+			parents = []hash.ID{v.Parent}
+		}
+	}
+	for i, p := range parents {
+		if p.IsZero() {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO version_parent(version_id, parent_id, ordinal)
+			 VALUES(?,?,?) ON CONFLICT(version_id, ordinal) DO UPDATE SET parent_id=excluded.parent_id`,
+			id.String(), p.String(), i); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetVersion 按 id 读取 version 记录。不存在返回 ErrNotExist。
@@ -130,6 +181,31 @@ func (d *DB) GetVersion(id hash.ID) (*version.Version, error) {
 	}
 	if journalID.Valid {
 		v.JournalID = journalID.Int64
+	}
+	// 多父：优先读 version_parent；老仓库退回 parent 列。
+	prows, err := d.sql.Query(
+		`SELECT parent_id FROM version_parent WHERE version_id = ? ORDER BY ordinal`, id.String())
+	if err != nil {
+		return nil, err
+	}
+	for prows.Next() {
+		var ps string
+		if err := prows.Scan(&ps); err != nil {
+			_ = prows.Close()
+			return nil, err
+		}
+		pid, err := hash.Parse(ps)
+		if err != nil {
+			_ = prows.Close()
+			return nil, err
+		}
+		v.Parents = append(v.Parents, pid)
+	}
+	if err := prows.Close(); err != nil {
+		return nil, err
+	}
+	if len(v.Parents) > 0 {
+		v.Parent = v.Parents[0]
 	}
 	// 校验存储的 id 与重算一致（防止元数据被篡改）。
 	if v.ID() != id {
@@ -252,6 +328,9 @@ func nullableInt(v int64) any {
 // DeleteVersion 删除一条版本记录（仅用于覆盖初始 v0）。
 func (d *DB) DeleteVersion(id hash.ID) error {
 	return d.withWrite(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM version_parent WHERE version_id = ?`, id.String()); err != nil {
+			return err
+		}
 		_, err := tx.Exec(`DELETE FROM version WHERE id = ?`, id.String())
 		return err
 	})

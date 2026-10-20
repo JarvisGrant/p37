@@ -1,14 +1,12 @@
 # P36 实例（20 GiB L2）的 p37 配置模板。
 #
-# 首次启动时由 p37-run 传给：
-#   p37 init --if-missing --config /usr/local/share/p37/config.toml /srv/repo
-# 已存在的仓库不会被覆盖。
+# 首次启动时由 p37-run 复制到 /srv/repos/.p37/config.toml，作为多 repo 默认。
 #
 # 注意：这里不要写 auth_token、S3 密钥或任何凭据。HTTP 模式默认关闭；
 # 如确实要开，token 应由实例侧注入，而不是随 L1/发布物分发。
 
 [repo]
-format_ver = 1
+format_ver = 2
 
 [workspace]
 # Ubuntu 26.04 非 root 下 OverlayFS 可能 EPERM（即使有 CAP_SYS_ADMIN）。
@@ -25,7 +23,7 @@ scan_interval = "30s"
 debounce = "500ms"
 
 [daemon]
-# socket 默认 <root>/.p37/p37d.sock；P36 的 root 是 /srv/repo。
+# socket 默认 <root>/.p37/p37d.sock；P36 的 root 是 /srv/repos。
 # 要改路径时再显式写 socket = "..."
 # HTTP 默认关闭：MCP 客户端与 daemon 同实例，优先 unix socket。
 listen_http = false

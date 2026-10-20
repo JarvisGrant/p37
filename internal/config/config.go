@@ -112,7 +112,9 @@ type RemoteConfig struct {
 	Region    string `toml:"region"`
 	Bucket    string `toml:"bucket"`
 	Prefix    string `toml:"prefix"`
+	RemoteKey string `toml:"remote_key"`
 	PathStyle bool   `toml:"path_style"`
+	AutoPush  bool   `toml:"auto_push"`
 	// Dir 仅用于 backend=dir（本地目录演练/测试）。
 	Dir string `toml:"dir"`
 
@@ -130,7 +132,7 @@ type RemoteConfig struct {
 // Default 返回附录 B 的默认配置。
 func Default() Config {
 	return Config{
-		Repo: RepoConfig{FormatVer: 1},
+		Repo: RepoConfig{FormatVer: 2},
 		Files: FilesConfig{
 			MaxFileSize:      2 << 30,
 			MaxTextSize:      4 << 20,

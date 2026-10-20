@@ -161,7 +161,7 @@ func parsePack(b []byte) ([]packEntry, error) {
 		if en.off != expect || en.length < 0 || en.off+en.length > int64(footerStart) {
 			return nil, fmt.Errorf("%w: pack 条目 %d 偏移/长度非法", ErrCorrupt, i)
 		}
-		if en.typ < codec.TypeBlob || en.typ > codec.TypeVersion {
+		if en.typ < codec.TypeBlob || en.typ > codec.TypeVersionMerge {
 			return nil, fmt.Errorf("%w: pack 条目类型非法 0x%02x", ErrCorrupt, en.typ)
 		}
 		if i > 0 && bytes.Compare(entries[i-1].id[:], en.id[:]) >= 0 {
@@ -734,7 +734,7 @@ func (ps *PackStore) baseHeadType(key string) (uint8, error) {
 	if len(hdr) != 2 || hdr[0] != storedFormat {
 		return 0, fmt.Errorf("%w: %s 头部非法", ErrCorrupt, key)
 	}
-	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersion {
+	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersionMerge {
 		return 0, fmt.Errorf("%w: %s 类型非法 0x%02x", ErrCorrupt, key, hdr[1])
 	}
 	return hdr[1], nil

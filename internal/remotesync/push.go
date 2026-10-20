@@ -21,6 +21,11 @@ type PushResult struct {
 //
 // 只有 ref 更新成功后才把包标记为已上传；中途失败可安全重试（Put 幂等）。
 func Push(ctx context.Context, r *repo.Repo, remote Remote, ids []string) (*PushResult, error) {
+	return PushRef(ctx, r, remote, ids, Ref{})
+}
+
+// PushRef 与 Push 相同，但允许调用方注入 remote_key / repo_name 等元数据。
+func PushRef(ctx context.Context, r *repo.Repo, remote Remote, ids []string, metaRef Ref) (*PushResult, error) {
 	rows, err := r.DB.ListPackages()
 	if err != nil {
 		return nil, err
@@ -77,7 +82,32 @@ func Push(ctx context.Context, r *repo.Repo, remote Remote, ids []string) (*Push
 		lastID = row.ID
 	}
 
-	next := Ref{Head: cur, Package: lastID, TS: meta.NowMS()}
+	next := metaRef
+	next.Head = cur
+	next.Package = lastID
+	next.TS = meta.NowMS()
+	next.Generation = ref.Generation + 1
+	if next.RemoteKey == "" {
+		next.RemoteKey = ref.RemoteKey
+	}
+	if next.RemotePrefix == "" {
+		next.RemotePrefix = ref.RemotePrefix
+	}
+	if next.RepoName == "" {
+		next.RepoName = ref.RepoName
+	}
+	if def, err := r.DB.DefaultLine(); err == nil {
+		next.DefaultLine = def
+	}
+	if ls, err := r.Lines(); err == nil {
+		next.Lines = make(map[string]LineRef, len(ls))
+		for i := range ls {
+			next.Lines[ls[i].Name] = LineRef{
+				Head: ls[i].Head.String(), Protected: ls[i].Protected,
+				CreatedFrom: ls[i].CreatedFrom.String(),
+			}
+		}
+	}
 	if err := remote.UpdateRef(ctx, ref, next); err != nil {
 		return nil, err
 	}

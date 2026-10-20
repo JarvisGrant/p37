@@ -76,6 +76,10 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	var err error
 	rep := &GCReport{DryRun: dryRun}
 
+	lines, err := r.DB.ListLines()
+	if err != nil {
+		return nil, err
+	}
 	head, ok, err := r.DB.Head()
 	if err != nil {
 		return nil, err
@@ -83,23 +87,84 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	if !ok {
 		return nil, ErrNotInitialized
 	}
-
-	// -- 1. 版本链（head → 最老）与保留集合 ---------------------------------
-	chain, err := r.DB.VersionChain(head)
+	roots := make([]hash.ID, 0, len(lines))
+	for i := range lines {
+		roots = append(roots, lines[i].Head)
+	}
+	if len(roots) == 0 {
+		roots = append(roots, head)
+	}
+	// 保留策略：每条 line 各自保留最近 KeepVersions 个祖先。这样一条繁忙的
+	// session line 不会把另一条线的全部历史钉住。
+	keepN := r.gc.KeepVersions
+	if keepN <= 0 {
+		keepN = DefaultGCOptions().KeepVersions
+	}
+	reachable := map[hash.ID]bool{}
+	for _, l := range lines {
+		depths, err := r.DB.AncestorDepths(l.Head)
+		if err != nil {
+			return nil, err
+		}
+		type di struct {
+			id    hash.ID
+			depth int
+		}
+		ds := make([]di, 0, len(depths))
+		for id, d := range depths {
+			ds = append(ds, di{id, d})
+		}
+		sort.Slice(ds, func(i, j int) bool {
+			if ds[i].depth != ds[j].depth {
+				return ds[i].depth < ds[j].depth
+			}
+			return ds[i].id.String() < ds[j].id.String()
+		})
+		for i := 0; i < len(ds) && i < keepN; i++ {
+			reachable[ds[i].id] = true
+		}
+	}
+	if len(lines) == 0 {
+		chain, err := r.DB.VersionChain(head)
+		if err != nil {
+			return nil, err
+		}
+		for i := 0; i < len(chain) && i < keepN; i++ {
+			reachable[chain[i]] = true
+		}
+	}
+	// 额外保留：工作区基准、幂等结果引用的版本（7 天内）。
+	allWs, err := r.DB.ListWorkspaces()
 	if err != nil {
 		return nil, err
 	}
-	rep.VersionTotal = len(chain)
-
-	keepCount, err := r.retentionCount(chain)
+	for i := range allWs {
+		w := &allWs[i]
+		for _, ref := range []string{w.BaseVersion.String(), w.ParentID} {
+			if id, err := hash.Parse(ref); err == nil && !id.IsZero() {
+				reachable[id] = true
+			}
+		}
+	}
+	if ids, err := r.DB.IdempotentVersionIDs(meta.NowMS() - int64(7*24*60*60*1000)); err == nil {
+		for _, id := range ids {
+			reachable[id] = true
+		}
+	}
+	rows, err := r.DB.ListVersions(1_000_000, 0)
 	if err != nil {
 		return nil, err
 	}
-	if keepCount > len(chain) {
-		keepCount = len(chain)
+	rep.VersionTotal = len(rows)
+	keepSet := reachable
+	var keepVersions, dropVersions []hash.ID
+	for _, row := range rows {
+		if keepSet[row.ID] {
+			keepVersions = append(keepVersions, row.ID)
+		} else {
+			dropVersions = append(dropVersions, row.ID)
+		}
 	}
-	keepVersions := chain[:keepCount]
-	dropVersions := chain[keepCount:]
 	rep.VersionKeep, rep.VersionDrop = len(keepVersions), len(dropVersions)
 
 	// -- 2. 对象清单（只读头部，不解压） ------------------------------------
@@ -130,17 +195,7 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		return nil
 	}
 
-	hv, err := r.DB.GetVersion(head)
-	if err != nil {
-		return nil, err
-	}
-	if err := mark("head", head.String()[:16], hv.Tree); err != nil {
-		return nil, err
-	}
 	for _, vid := range keepVersions {
-		if vid == head {
-			continue
-		}
 		v, err := r.DB.GetVersion(vid)
 		if err != nil {
 			return nil, err
@@ -150,10 +205,7 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		}
 	}
 
-	all, err := r.DB.ListWorkspaces()
-	if err != nil {
-		return nil, err
-	}
+	all := allWs
 	for i := range all {
 		w := &all[i]
 		if err := mark("workspace_tree", w.ID, w.BaseTree); err != nil {

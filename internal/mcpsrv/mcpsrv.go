@@ -17,6 +17,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/buildinfo"
 	"github.com/chenyiwen/p37/internal/hash"
+	"github.com/chenyiwen/p37/internal/hub"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/op"
@@ -66,8 +67,14 @@ func coded(code, format string, args ...any) *CodedError {
 
 // Server 包装 MCP server 与仓库。
 type Server struct {
+	// R 是单仓库模式下的默认仓库；多仓库模式下由 Resolve 按 repo 参数路由。
 	R   *repo.Repo
 	Srv *mcp.Server
+
+	// Resolve 按 repo id/name 返回仓库；为 nil 时只能使用 R。
+	Resolve func(string) (*repo.Repo, error)
+	// Hub 是多仓库控制面；单仓库模式为 nil。
+	Hub *hub.Hub
 
 	// syncOpt / remoteConfigured 供 sync_* 工具使用（由 daemon 注入）。
 	syncOpt          remotesync.Options
@@ -78,6 +85,15 @@ type Server struct {
 func (s *Server) SetSyncOptions(opt remotesync.Options, configured bool) {
 	s.syncOpt = opt
 	s.remoteConfigured = configured
+}
+
+// New 构造并注册全部工具。
+// NewWithResolver 构造多仓库 MCP server。defaultRepo 可为 nil；此时所有业务
+// 工具都必须带 repo 参数。
+func NewWithResolver(defaultRepo *repo.Repo, resolve func(string) (*repo.Repo, error)) *Server {
+	s := New(defaultRepo)
+	s.Resolve = resolve
+	return s
 }
 
 // New 构造并注册全部工具。
@@ -94,6 +110,63 @@ func New(r *repo.Repo) *Server {
 	return s
 }
 
+// withRepoParam 给所有工具 schema 注入可选的 repo 参数。
+func withRepoParam(raw json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	if m["type"] == nil {
+		m["type"] = "object"
+	}
+	props, _ := m["properties"].(map[string]any)
+	if props == nil {
+		props = map[string]any{}
+		m["properties"] = props
+	}
+	if _, ok := props["repo"]; !ok {
+		props["repo"] = map[string]any{
+			"type":        "string",
+			"description": "仓库 id 或 name；单仓库模式可省略",
+		}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+// repoArg 只从原始参数里提取 repo 字段，避免每个 handler 重复解析。
+func repoArg(raw json.RawMessage) string {
+	var a struct {
+		Repo string `json:"repo"`
+	}
+	_ = json.Unmarshal(raw, &a)
+	return a.Repo
+}
+
+// repoFor 解析工具调用里的 repo 参数。单仓库模式可省略。
+func (s *Server) repoFor(ref string) (*repo.Repo, error) {
+	if ref == "" {
+		if s.R != nil {
+			return s.R, nil
+		}
+		return nil, coded("repo_required", "多仓库模式必须提供 repo（id 或 name）")
+	}
+	if s.Resolve == nil {
+		if s.R != nil {
+			return s.R, nil
+		}
+		return nil, coded("repo_not_found", "仓库 %q 不存在", ref)
+	}
+	r, err := s.Resolve(ref)
+	if err != nil {
+		return nil, coded("repo_not_found", "仓库 %q 不存在: %v", ref, err)
+	}
+	return r, nil
+}
+
 // Handler 返回可直接挂到 HTTP/unix socket 上的 Streamable HTTP handler。
 func (s *Server) Handler() *mcp.StreamableHTTPHandler {
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.Srv }, nil)
@@ -107,7 +180,7 @@ func (s *Server) register(name, desc, schema string, fn toolFunc) {
 	t := &mcp.Tool{
 		Name:        name,
 		Description: desc,
-		InputSchema: json.RawMessage(schema),
+		InputSchema: withRepoParam(json.RawMessage(schema)),
 	}
 	s.Srv.AddTool(t, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// CallToolRequest.Params.Arguments 已经是 json.RawMessage。
@@ -143,52 +216,70 @@ func classify(err error) (code, msg string, detail any) {
 	}
 
 	switch {
+	case errors.Is(err, repo.ErrLineNotFound):
+		return "line_not_found", err.Error(), nil
+	case errors.Is(err, repo.ErrLineExists):
+		return "line_exists", err.Error(), nil
+	case errors.Is(err, repo.ErrLineProtected):
+		return "line_protected", err.Error(), nil
+	case errors.Is(err, repo.ErrTargetNotAncestor):
+		return "target_not_ancestor", err.Error(), nil
+	case errors.Is(err, repo.ErrTargetMoved):
+		return "target_moved", err.Error(), nil
+	case errors.Is(err, repo.ErrSourceMoved):
+		return "source_moved", err.Error(), nil
+	case errors.Is(err, repo.ErrMergeBaseAmbiguous), errors.Is(err, meta.ErrMergeBaseAmbiguous):
+		return "merge_base_ambiguous", err.Error(), nil
+	case errors.Is(err, repo.ErrMergeExpired):
+		return "merge_expired", err.Error(), nil
+	case errors.Is(err, repo.ErrHasActiveChildren):
+		return "ws_has_active_children", err.Error(), nil
 	case errors.Is(err, workspace.ErrNotFound):
-		return "WS_NOT_FOUND", err.Error(), nil
+		return "ws_not_found", err.Error(), nil
 	case errors.Is(err, workspace.ErrLimitExceeded):
-		return "WS_LIMIT_EXCEEDED", err.Error(), nil
+		return "quota_exceeded", err.Error(), nil
 	case errors.Is(err, workspace.ErrHasChildren):
-		return "WS_HAS_CHILDREN", err.Error(), nil
+		return "ws_has_active_children", err.Error(), nil
 	case errors.Is(err, workspace.ErrDirMissing):
-		return "WS_DIR_MISSING", err.Error(), nil
+		return "ws_broken", err.Error(), nil
 	case errors.Is(err, workspace.ErrNotMounted):
-		return "WS_NOT_MOUNTED", err.Error(), nil
+		return "ws_not_mounted", err.Error(), nil
 	case errors.Is(err, workspace.ErrWrongState):
-		return "WS_NOT_ACTIVE", err.Error(), nil
+		return "ws_busy", err.Error(), nil
 	case errors.Is(err, mountmgr.ErrUnavailable):
-		return "OVERLAY_UNAVAILABLE", err.Error(), nil
+		return "overlay_unavailable", err.Error(), nil
 	case errors.Is(err, mountmgr.ErrCaseConflict):
-		return "PATH_CASE_CONFLICT", err.Error(), nil
+		return "path_case_conflict", err.Error(), nil
 	case errors.Is(err, mountmgr.ErrDirExists):
-		return "WS_DIR_EXISTS", err.Error(), nil
+		return "ws_exists", err.Error(), nil
 	case errors.Is(err, repo.ErrVersionNotFound):
-		return "VERSION_NOT_FOUND", err.Error(), nil
+		return "version_not_found", err.Error(), nil
 	case errors.Is(err, repo.ErrLandConflict):
-		return "LAND_CONFLICT", err.Error(), nil
+		return "conflict", err.Error(), nil
 	case errors.Is(err, repo.ErrNotDirty):
-		return "NOT_DIRTY", err.Error(), nil
+		return "not_dirty", err.Error(), nil
 	case errors.Is(err, repo.ErrLandQueueFull):
-		return "LAND_QUEUE_FULL", err.Error(), nil
+		return "land_queue_full", err.Error(), nil
 	case errors.Is(err, repo.ErrPathNotFound):
-		return "PATH_NOT_FOUND", err.Error(), nil
+		return "path_not_found", err.Error(), nil
 	case errors.Is(err, repo.ErrNotInitialized):
-		return "INIT_NOT_DONE", err.Error(), nil
+		return "repo_not_initialized", err.Error(), nil
 	case errors.Is(err, meta.ErrNotExist):
-		return "WS_NOT_FOUND", err.Error(), nil
+		return "ws_not_found", err.Error(), nil
 	case errors.Is(err, op.ErrNoContent):
-		return "CORRUPT_OBJECT", err.Error(), nil
+		return "corrupt_object", err.Error(), nil
 	case strings.Contains(err.Error(), "对象损坏"):
-		return "CORRUPT_OBJECT", err.Error(), nil
+		return "corrupt_object", err.Error(), nil
 	case strings.Contains(err.Error(), "超过上限"):
-		return "FILE_TOO_LARGE", err.Error(), nil
+		return "file_too_large", err.Error(), nil
 	}
-	return "INTERNAL", err.Error(), nil
+	return "internal", err.Error(), nil
 }
 
 func jsonResult(v any, isErr bool) *mcp.CallToolResult {
 	b, err := json.Marshal(v)
 	if err != nil {
-		b = []byte(`{"ok":false,"data":null,"error":{"code":"INTERNAL","message":"结果序列化失败"}}`)
+		b = []byte(`{"ok":false,"data":null,"error":{"code":"internal","message":"结果序列化失败"}}`)
 		isErr = true
 	}
 	return &mcp.CallToolResult{
@@ -206,7 +297,7 @@ func decode[T any](raw json.RawMessage) (T, error) {
 		return v, nil
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return v, coded("INTERNAL", "参数解析失败: %v", err)
+		return v, coded("internal", "参数解析失败: %v", err)
 	}
 	return v, nil
 }
@@ -216,11 +307,11 @@ func nowMS() int64 { return time.Now().UnixMilli() }
 // parseKey 解析冲突 key。
 func parseKey(s string) (hash.ID, error) {
 	if s == "" {
-		return hash.ID{}, coded("INTERNAL", "缺少 key")
+		return hash.ID{}, coded("internal", "缺少 key")
 	}
 	id, err := hash.Parse(s)
 	if err != nil {
-		return hash.ID{}, coded("INTERNAL", "非法 key %q", s)
+		return hash.ID{}, coded("internal", "非法 key %q", s)
 	}
 	return id, nil
 }

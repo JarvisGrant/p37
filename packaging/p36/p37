@@ -1,0 +1,6 @@
+#!/bin/sh
+# p37 CLI 稳定入口；由 L1 安装到 /usr/local/bin/p37。
+if [ -x /usr/local/lib/p37/p37 ]; then
+    exec /usr/local/lib/p37/p37 "$@"
+fi
+exec /run/p37-payload/p37 "$@"

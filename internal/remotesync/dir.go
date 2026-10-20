@@ -30,7 +30,7 @@ func (d *DirRemote) pkgDir(id string) string {
 }
 
 func (d *DirRemote) refPath() string {
-	return filepath.Join(d.root, "refs", "mainline.json")
+	return filepath.Join(d.root, "refs", "lines.json")
 }
 
 // PutPackage 实现 Remote。
@@ -115,6 +115,10 @@ func (d *DirRemote) ListPackages(ctx context.Context) ([]string, error) {
 // GetRef 实现 Remote。
 func (d *DirRemote) GetRef(ctx context.Context) (Ref, error) {
 	b, err := os.ReadFile(d.refPath())
+	if errors.Is(err, os.ErrNotExist) {
+		// 兼容旧远端。
+		b, err = os.ReadFile(filepath.Join(d.root, "refs", "mainline.json"))
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Ref{}, ErrNoRef

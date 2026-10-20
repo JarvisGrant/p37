@@ -140,7 +140,7 @@ func decodePayload(b []byte) ([]payloadObject, error) {
 		if off != expect || length < 0 || off+length > indexStart {
 			return nil, fmt.Errorf("%w: payload 条目偏移非法", ErrCorruptPackage)
 		}
-		if typ < codec.TypeBlob || typ > codec.TypeVersion {
+		if typ < codec.TypeBlob || typ > codec.TypeVersionMerge {
 			return nil, fmt.Errorf("%w: payload 条目类型非法", ErrCorruptPackage)
 		}
 		raw := bodies[off : off+length]

@@ -1,24 +1,30 @@
 #!/bin/sh
-# p37-run —— P36 实例内的稳定引导脚本。
+# p37-run —— P36 实例内的稳定引导脚本（单 daemon 多 repo）。
 #
 # 契约：
 #   1. 按 ext4 label 等宿主投递的只读小盘；
-#   2. 只读挂载到 /run/p37-payload（由 L1 的 /etc/tmpfiles.d/p37.conf 创建）；
+#   2. 挂载到 P37_PAYLOAD_MOUNT（默认 /usr/local/lib/p37，兼容 /run/p37-payload）；
 #   3. 校验 p37/p37d/manifest；
-#   4. 首次启动幂等 init；
-#   5. exec p37d。
-#
-# 改动此脚本意味着要重建 L1；日常升级 p37 只换 P37PAYLOAD 盘并重启实例。
+#   4. 创建 /srv/repos 与控制面，迁移旧 /srv/repo 注册；
+#   5. exec p37d --root。
 set -eu
 
-REPO=${P37_REPO:-/srv/repo}
-MNT=${P37_PAYLOAD_MOUNT:-/run/p37-payload}
+ROOT=${P37_ROOT:-/srv/repos}
+LEGACY=${P37_REPO:-/srv/repo}
+MNT=${P37_PAYLOAD_MOUNT:-/usr/local/lib/p37}
 LABEL=${P37_PAYLOAD_LABEL:-P37PAYLOAD}
 CONFIG=${P37_CONFIG:-/usr/local/share/p37/config.toml}
 MOUNTER=${P37_MOUNTER:-/usr/local/bin/p37-mount}
 
-mkdir -p "$MNT"
-"$MOUNTER" --label "$LABEL" --target "$MNT" --timeout 20s
+# 兼容旧镜像：/usr/local/lib/p37 没有二进制时，尝试挂载 payload 到
+# /run/p37-payload，并使用那里的二进制。
+if [ ! -x "$MNT/p37d" ] && [ -x /run/p37-payload/p37d ]; then
+    MNT=/run/p37-payload
+fi
+if [ ! -x "$MNT/p37d" ]; then
+    mkdir -p "$MNT"
+    "$MOUNTER" --label "$LABEL" --target "$MNT" --timeout 20s
+fi
 
 for f in p37 p37d manifest.json; do
     if [ ! -e "$MNT/$f" ]; then
@@ -31,7 +37,6 @@ if [ ! -x "$MNT/p37" ] || [ ! -x "$MNT/p37d" ]; then
     exit 1
 fi
 
-# manifest 的 version 必须与二进制自报一致，避免宿主换盘/缓存串版本。
 want=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MNT/manifest.json" | head -n 1)
 if [ -z "$want" ]; then
     echo "p37-run: manifest.json 缺少 version" >&2
@@ -46,17 +51,23 @@ case "$got" in
         ;;
 esac
 
-mkdir -p "$REPO/.p37/tmp"
-export TMPDIR="$REPO/.p37/tmp"
+mkdir -p "$ROOT/.p37/tmp" "$ROOT/.p37/trash"
+chmod 0750 "$ROOT" 2>/dev/null || true
+chmod 0700 "$ROOT/.p37" 2>/dev/null || true
+export TMPDIR="$ROOT/.p37/tmp"
 
-if [ -r "$CONFIG" ]; then
-    "$MNT/p37" init --if-missing --config "$CONFIG" "$REPO"
-else
-    "$MNT/p37" init --if-missing "$REPO"
+# 旧单仓库：不移动目录，由 p37d 在 registry 中原地注册为 default。
+# 这里只做一次格式迁移（幂等）；失败会让 systemd 记录清晰原因。
+if [ -d "$LEGACY/.p37" ]; then
+    "$MNT/p37" migrate "$LEGACY" >&2 || true
 fi
 
-# 在 fork 出 daemon 之前先做部署检查；失败时 systemd 会记录清晰原因，
-# 而不是让 daemon 在启动自检里才炸。
-"$MNT/p37d" --check --strict --repo "$REPO" >&2
+if [ -r "$CONFIG" ]; then
+    # 根配置：多 repo 的 daemon/workspace 默认值。
+    if [ ! -e "$ROOT/.p37/config.toml" ]; then
+        cp "$CONFIG" "$ROOT/.p37/config.toml"
+    fi
+fi
 
-exec "$MNT/p37d" --repo "$REPO"
+"$MNT/p37d" --check --root "$ROOT" >&2
+exec "$MNT/p37d" --root "$ROOT"

@@ -10,16 +10,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go 驱动，无需 cgo
+
+	"github.com/chenyiwen/p37/internal/hash"
 )
 
 // FormatVer 是当前的元数据库格式版本（§2.2）。
 //
 // 任何改变 DDL 或对象编码的行为都必须升此值，并提供迁移函数与迁移测试。
-const FormatVer = 1
+const FormatVer = 2
 
 // DB 是元数据库句柄。
 //
@@ -142,44 +145,146 @@ func (d *DB) EnsureSchema() error {
 	return d.withWrite(ensureColumnsTx)
 }
 
-// ensureColumnsTx 幂等地补齐后续版本新增的列。
+// ensureColumnsTx 幂等地补齐后续版本新增的列与表。
 func ensureColumnsTx(tx *sql.Tx) error {
-	// workspace.materialized_ts（S15 重启重挂）。
-	var hasCol int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM pragma_table_info('workspace') WHERE name='materialized_ts'`).
-		Scan(&hasCol); err != nil {
-		return err
-	}
-	if hasCol == 0 {
-		if _, err := tx.Exec(
-			`ALTER TABLE workspace ADD COLUMN materialized_ts INTEGER NOT NULL DEFAULT 0`); err != nil {
+	add := func(table, col, decl string) error {
+		var exists int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).
+			Scan(&exists); err != nil {
 			return err
 		}
-	}
-	// op.mode_before / mode_after（可执行位）。
-	for _, col := range []string{"mode_before", "mode_after"} {
+		if exists == 0 {
+			return nil // 老库/裁剪库可能没有这张表；对应表由 Init/ddl 负责。
+		}
 		var has int
 		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM pragma_table_info('op') WHERE name = ?`, col).
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, col).
 			Scan(&has); err != nil {
 			return err
 		}
 		if has == 0 {
-			if _, err := tx.Exec(fmt.Sprintf(
-				`ALTER TABLE op ADD COLUMN %s INTEGER CHECK (%s IN (0,1))`, col, col)); err != nil {
-				return err
-			}
+			_, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, col, decl))
+			return err
+		}
+		return nil
+	}
+	// v1 -> v2 列。
+	for _, c := range []struct{ table, col, decl string }{
+		{"repo", "default_line", "TEXT NOT NULL DEFAULT 'main'"},
+		{"version", "idempotency_key", "TEXT"},
+		{"version", "idempotency_tool", "TEXT"},
+		{"version", "idempotency_ts", "INTEGER"},
+		{"workspace", "materialized_ts", "INTEGER NOT NULL DEFAULT 0"},
+		{"workspace", "base_line", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace", "hidden", "INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0,1))"},
+		{"workspace", "kind", "TEXT NOT NULL DEFAULT 'user'"},
+		{"workspace", "landed_ts", "INTEGER NOT NULL DEFAULT 0"},
+		{"landed_ws", "target_kind", "TEXT NOT NULL DEFAULT ''"},
+		{"landed_ws", "target_id", "TEXT NOT NULL DEFAULT ''"},
+		{"op", "mode_before", "INTEGER CHECK (mode_before IN (0,1))"},
+		{"op", "mode_after", "INTEGER CHECK (mode_after IN (0,1))"},
+	} {
+		if err := add(c.table, c.col, c.decl); err != nil {
+			return err
 		}
 	}
-	// 远端同步状态（P3）。老仓库没有这张表，打开时补建。
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS sync_state (
-	  id              INTEGER PRIMARY KEY CHECK (id = 1),
-	  remote_head     TEXT,
-	  last_package_id TEXT,
-	  last_sync_ts    INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
+	// v2 新表。使用与 ddl 相同的定义（IF NOT EXISTS）。
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS line (
+		  name          TEXT PRIMARY KEY,
+		  head          TEXT NOT NULL,
+		  protected     INTEGER NOT NULL DEFAULT 0 CHECK (protected IN (0,1)),
+		  created_from  TEXT,
+		  created_ts    INTEGER NOT NULL,
+		  updated_ts    INTEGER NOT NULL,
+		  deleted_ts    INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_line_head ON line(head)`,
+		`CREATE TABLE IF NOT EXISTS version_parent (
+		  version_id TEXT NOT NULL,
+		  parent_id  TEXT NOT NULL,
+		  ordinal    INTEGER NOT NULL,
+		  PRIMARY KEY (version_id, ordinal)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_version_parent_parent ON version_parent(parent_id)`,
+		`CREATE TABLE IF NOT EXISTS idempotency_result (
+		  tool        TEXT NOT NULL,
+		  key         TEXT NOT NULL,
+		  result_json TEXT NOT NULL,
+		  created_ts  INTEGER NOT NULL,
+		  expires_ts  INTEGER NOT NULL DEFAULT 0,
+		  PRIMARY KEY (tool, key)
+		)`,
+		`CREATE TABLE IF NOT EXISTS line_reset_log (
+		  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+		  line      TEXT NOT NULL,
+		  from_head TEXT NOT NULL,
+		  to_head   TEXT NOT NULL,
+		  reason    TEXT NOT NULL DEFAULT '',
+		  forced    INTEGER NOT NULL DEFAULT 0 CHECK (forced IN (0,1)),
+		  ts        INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS land_into_journal (
+		  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		  ws_id          TEXT NOT NULL,
+		  parent_ws_id   TEXT NOT NULL,
+		  before_tree    TEXT NOT NULL,
+		  result_tree    TEXT NOT NULL,
+		  state          TEXT NOT NULL,
+		  created_ts     INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS sync_state (
+		  id              INTEGER PRIMARY KEY CHECK (id = 1),
+		  remote_head     TEXT,
+		  last_package_id TEXT,
+		  last_sync_ts    INTEGER NOT NULL DEFAULT 0
+		)`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return err
+		}
+	}
+	// 回填 version_parent（老仓库只有单父）。
+	zero := strings.Repeat("0", hash.HexLen)
+	var versionExists int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='version'`).Scan(&versionExists); err != nil {
 		return err
+	}
+	if versionExists > 0 {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO version_parent(version_id, parent_id, ordinal)
+			 SELECT id, parent, 0 FROM version
+			  WHERE parent IS NOT NULL AND parent != '' AND parent != ?`, zero); err != nil {
+			return err
+		}
+	}
+	// 回填 main line：以 mainline_head 为 head。没有 head 的仓库等 Init/首次 land。
+	var repoExists int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='repo'`).Scan(&repoExists); err != nil {
+		return err
+	}
+	if repoExists == 0 {
+		return nil
+	}
+	var head sql.NullString
+	if err := tx.QueryRow(`SELECT mainline_head FROM repo WHERE id = 1`).Scan(&head); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if head.Valid && head.String != "" && head.String != zero {
+		if _, err := tx.Exec(
+			`INSERT INTO line(name, head, protected, created_ts, updated_ts)
+			 VALUES('main', ?, 1, ?, ?)
+			 ON CONFLICT(name) DO NOTHING`,
+			head.String, time.Now().UnixMilli(), time.Now().UnixMilli()); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -217,6 +322,7 @@ var ddl = []string{
 	  created_ts    INTEGER NOT NULL,
 	  format_ver    INTEGER NOT NULL,
 	  mainline_head TEXT,
+	  default_line  TEXT    NOT NULL DEFAULT 'main',
 	  version_count INTEGER NOT NULL DEFAULT 0,
 	  epoch         INTEGER NOT NULL DEFAULT 0
 	)`,
@@ -232,7 +338,10 @@ var ddl = []string{
 	  ts         INTEGER NOT NULL,
 	  msg        TEXT NOT NULL DEFAULT '',
 	  ws_id      TEXT,
-	  journal_id INTEGER
+	  journal_id INTEGER,
+	  idempotency_key  TEXT,
+	  idempotency_tool TEXT,
+	  idempotency_ts   INTEGER
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_version_parent ON version(parent)`,
 	`CREATE INDEX IF NOT EXISTS idx_version_epoch  ON version(epoch)`,
@@ -264,9 +373,11 @@ var ddl = []string{
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS landed_ws (
-	  ws_id      TEXT PRIMARY KEY,
-	  version_id TEXT NOT NULL,
-	  ts         INTEGER NOT NULL
+	  ws_id       TEXT PRIMARY KEY,
+	  version_id  TEXT NOT NULL,
+	  target_kind TEXT NOT NULL DEFAULT '',
+	  target_id   TEXT NOT NULL DEFAULT '',
+	  ts          INTEGER NOT NULL
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS lease (
@@ -385,6 +496,54 @@ var ddl = []string{
 	  remote_head     TEXT,
 	  last_package_id TEXT,
 	  last_sync_ts    INTEGER NOT NULL DEFAULT 0
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS line (
+	  name          TEXT PRIMARY KEY,
+	  head          TEXT NOT NULL,
+	  protected     INTEGER NOT NULL DEFAULT 0 CHECK (protected IN (0,1)),
+	  created_from  TEXT,
+	  created_ts    INTEGER NOT NULL,
+	  updated_ts    INTEGER NOT NULL,
+	  deleted_ts    INTEGER NOT NULL DEFAULT 0
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_line_head ON line(head)`,
+
+	`CREATE TABLE IF NOT EXISTS version_parent (
+	  version_id TEXT NOT NULL,
+	  parent_id  TEXT NOT NULL,
+	  ordinal    INTEGER NOT NULL,
+	  PRIMARY KEY (version_id, ordinal)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_version_parent_parent ON version_parent(parent_id)`,
+
+	`CREATE TABLE IF NOT EXISTS idempotency_result (
+	  tool        TEXT NOT NULL,
+	  key         TEXT NOT NULL,
+	  result_json TEXT NOT NULL,
+	  created_ts  INTEGER NOT NULL,
+	  expires_ts  INTEGER NOT NULL DEFAULT 0,
+	  PRIMARY KEY (tool, key)
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS line_reset_log (
+	  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+	  line      TEXT NOT NULL,
+	  from_head TEXT NOT NULL,
+	  to_head   TEXT NOT NULL,
+	  reason    TEXT NOT NULL DEFAULT '',
+	  forced    INTEGER NOT NULL DEFAULT 0 CHECK (forced IN (0,1)),
+	  ts        INTEGER NOT NULL
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS land_into_journal (
+	  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	  ws_id          TEXT NOT NULL,
+	  parent_ws_id   TEXT NOT NULL,
+	  before_tree    TEXT NOT NULL,
+	  result_tree    TEXT NOT NULL,
+	  state          TEXT NOT NULL,
+	  created_ts     INTEGER NOT NULL
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS object_index (

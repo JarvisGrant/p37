@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
@@ -22,6 +23,11 @@ func (s *Server) registerAll() {
 	s.registerConflict()
 	s.registerLand()
 	s.registerSync()
+	s.registerRepoLineRead()
+	s.registerVersionGraph()
+	s.registerSyncV2()
+	s.registerRepoExport()
+	s.registerWSDiskUsage()
 }
 
 // --- 只读 ---------------------------------------------------------------
@@ -31,17 +37,21 @@ func (s *Server) registerRead() {
 		"返回仓库与（可选）工作区的当前状态，含租约列表。",
 		`{"type":"object","properties":{"ws":{"type":"string","description":"工作区 id"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				Ws string `json:"ws"`
 			}](raw)
 			if err != nil {
 				return nil, err
 			}
-			st, err := s.R.Status()
+			st, err := rr.Status()
 			if err != nil {
 				return nil, err
 			}
-			leases, err := s.R.Leases()
+			leases, err := rr.Leases()
 			if err != nil {
 				return nil, err
 			}
@@ -58,11 +68,11 @@ func (s *Server) registerRead() {
 				"leases": leases,
 			}
 			if a.Ws != "" {
-				info, err := s.R.WS.Info(a.Ws)
+				info, err := rr.WS.Info(a.Ws)
 				if err != nil {
 					return nil, err
 				}
-				violations, _ := s.R.LeaseViolations(a.Ws)
+				violations, _ := rr.LeaseViolations(a.Ws)
 				out["ws"] = map[string]any{
 					"id": info.ID, "parent_kind": info.ParentKind, "parent_id": info.ParentID,
 					"base_version": info.BaseVersion.String(), "dir": info.Dir,
@@ -78,15 +88,21 @@ func (s *Server) registerRead() {
 		})
 
 	s.register("version_log",
-		"按时间倒序返回主干版本列表。",
-		`{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":500},"before_ts":{"type":"integer"}},"additionalProperties":false}`,
+		"按 ref（line/mainline/version）返回版本列表；默认 default line。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500},"before_ts":{"type":"integer"},"before_id":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			a, err := decode[struct {
-				Limit    int   `json:"limit"`
-				BeforeTS int64 `json:"before_ts"`
-			}](raw)
+			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
+			}
+			var a struct {
+				Ref      string `json:"ref"`
+				Limit    int    `json:"limit"`
+				BeforeTS int64  `json:"before_ts"`
+				BeforeID string `json:"before_id"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
 			if a.Limit <= 0 {
 				a.Limit = 50
@@ -94,72 +110,99 @@ func (s *Server) registerRead() {
 			if a.Limit > 500 {
 				a.Limit = 500
 			}
-			vs, err := s.R.Log(a.Limit, a.BeforeTS)
+			if a.Ref == "" {
+				a.Ref = "mainline"
+			}
+			line := strings.TrimPrefix(a.Ref, "line:")
+			if a.Ref == "mainline" {
+				line, _ = rr.DB.DefaultLine()
+			}
+			vs, err := rr.LineLog(line, a.Limit, a.BeforeTS, a.BeforeID)
 			if err != nil {
 				return nil, err
 			}
-			out := make([]map[string]any, 0, len(vs))
-			for _, v := range vs {
-				out = append(out, map[string]any{
-					"id": v.ID.String(), "parent": v.Parent.String(),
-					"ts": v.TS, "agent": v.Agent, "task": v.Task, "epoch": v.Epoch,
-				})
-			}
-			return out, nil
+			return versionSummaries(vs), nil
 		})
 
 	s.register("version_show",
 		"返回单个版本的详情（含相对父版本的文件级统计）。",
 		`{"type":"object","properties":{"version_id":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				VersionID string `json:"version_id"`
 			}](raw)
 			if err != nil {
 				return nil, err
 			}
-			id, err := s.resolveVersion(a.VersionID)
+			id, err := s.resolveVersion(rr, a.VersionID)
 			if err != nil {
 				return nil, err
 			}
-			return s.R.VersionShow(id)
+			return rr.VersionShow(id)
 		})
 
 	s.register("version_diff",
-		"返回两个版本之间的差异。",
-		`{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"},"path":{"type":"string"},"stat_only":{"type":"boolean"}},"additionalProperties":false}`,
+		"返回两个版本之间的差异；B 省略时相对指定 parent_index。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"},"parent_index":{"type":"integer","minimum":0},"path":{"type":"string"},"stat_only":{"type":"boolean"}},"required":["repo","a"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
-				A        string `json:"a"`
-				B        string `json:"b"`
-				Path     string `json:"path"`
-				StatOnly bool   `json:"stat_only"`
+				A           string `json:"a"`
+				B           string `json:"b"`
+				ParentIndex int    `json:"parent_index"`
+				Path        string `json:"path"`
+				StatOnly    bool   `json:"stat_only"`
 			}](raw)
 			if err != nil {
 				return nil, err
 			}
-			aid, err := s.resolveVersion(a.A)
+			aid, err := s.resolveVersion(rr, a.A)
 			if err != nil {
 				return nil, err
 			}
-			bid, err := s.resolveVersion(a.B)
+			if a.B != "" {
+				bid, err := s.resolveVersion(rr, a.B)
+				if err != nil {
+					return nil, err
+				}
+				return rr.VersionDiff(aid, bid, a.Path, a.StatOnly)
+			}
+			v, err := rr.DB.GetVersion(aid)
 			if err != nil {
 				return nil, err
 			}
-			return s.R.VersionDiff(aid, bid, a.Path, a.StatOnly)
+			ps := v.Parents
+			if len(ps) == 0 && !v.Parent.IsZero() {
+				ps = []hash.ID{v.Parent}
+			}
+			if a.ParentIndex < 0 || a.ParentIndex >= len(ps) {
+				return nil, coded("invalid_argument", "parent_index 越界")
+			}
+			return rr.VersionDiff(ps[a.ParentIndex], aid, a.Path, a.StatOnly)
 		})
 
 	s.register("lease_query",
 		"查询若干路径上的租约（改动前自查，§4.5）。",
 		`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				Paths []string `json:"paths"`
 			}](raw)
 			if err != nil {
 				return nil, err
 			}
-			leases, err := s.R.Leases()
+			leases, err := rr.Leases()
 			if err != nil {
 				return nil, err
 			}
@@ -181,6 +224,10 @@ func (s *Server) registerRead() {
 		"行/hunk 级归因：返回每一行由哪个版本、哪个 agent、哪次任务引入（§12.2）。",
 		`{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"array","items":{"type":"integer"}},"version_id":{"type":"string"},"granularity":{"type":"string","enum":["line","hunk"]}},"required":["path"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				Path        string `json:"path"`
 				Range       []int  `json:"range"`
@@ -191,9 +238,9 @@ func (s *Server) registerRead() {
 				return nil, err
 			}
 			if a.Path == "" {
-				return nil, coded("INVALID_ARGUMENT", "path 不能为空")
+				return nil, coded("invalid_argument", "path 不能为空")
 			}
-			vid, err := s.resolveVersion(a.VersionID)
+			vid, err := s.resolveVersion(rr, a.VersionID)
 			if err != nil {
 				return nil, err
 			}
@@ -201,9 +248,9 @@ func (s *Server) registerRead() {
 			if len(a.Range) == 2 {
 				opt.From, opt.To = a.Range[0], a.Range[1]
 			} else if len(a.Range) != 0 {
-				return nil, coded("INVALID_ARGUMENT", "range 必须是 [from, to]")
+				return nil, coded("invalid_argument", "range 必须是 [from, to]")
 			}
-			recs, err := s.R.Blame(a.Path, opt)
+			recs, err := rr.Blame(a.Path, opt)
 			if err != nil {
 				return nil, err
 			}
@@ -217,20 +264,20 @@ func (s *Server) registerRead() {
 }
 
 // resolveVersion 解析版本 id；空串表示 head。
-func (s *Server) resolveVersion(id string) (hash.ID, error) {
+func (s *Server) resolveVersion(r *repo.Repo, id string) (hash.ID, error) {
 	if id == "" || id == "head" {
-		head, ok, err := s.R.Head()
+		head, ok, err := r.Head()
 		if err != nil {
 			return hash.ID{}, err
 		}
 		if !ok {
-			return hash.ID{}, coded("VERSION_NOT_FOUND", "主干尚未初始化")
+			return hash.ID{}, coded("version_not_found", "主干尚未初始化")
 		}
 		return head, nil
 	}
 	h, err := hash.Parse(id)
 	if err != nil {
-		return hash.ID{}, coded("VERSION_NOT_FOUND", "非法版本 id %q", id)
+		return hash.ID{}, coded("version_not_found", "非法版本 id %q", id)
 	}
 	return h, nil
 }
@@ -241,59 +288,90 @@ func (s *Server) registerWorkspace() {
 	s.register("ws_open",
 		"打开一个工作区并物化出可直接编辑的目录（§4.1、§4.6）。",
 		`{"type":"object","properties":{
-		   "parent":{"type":"string","description":"版本 id 或工作区 id；省略表示主干 head"},
+		   "repo":{"type":"string"},
+		   "parent":{"type":["object","string"],"description":"{kind:version|line|workspace,id} 或旧字符串；省略表示默认 line"},
 		   "name":{"type":"string"},
+		   "task":{"type":"string"},
 		   "task_desc":{"type":"string"},
 		   "leases":{"type":"array","items":{"type":"string"}},
 		   "materialize":{"type":"string","enum":["auto","overlay","copy"]}
-		 },"required":["task_desc"],"additionalProperties":false}`,
+		 },"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			a, err := decode[struct {
-				Parent      string   `json:"parent"`
-				Name        string   `json:"name"`
-				TaskDesc    string   `json:"task_desc"`
-				Leases      []string `json:"leases"`
-				Materialize string   `json:"materialize"`
-			}](raw)
+			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
-			w, err := s.R.WS.Open(workspace.OpenRequest{
-				Parent:   a.Parent,
-				Name:     a.Name,
-				TaskDesc: a.TaskDesc,
-				Leases:   a.Leases,
-				Mode:     mountmgr.Mode(a.Materialize),
+			var a struct {
+				Parent      json.RawMessage `json:"parent"`
+				Name        string          `json:"name"`
+				Task        string          `json:"task"`
+				TaskDesc    string          `json:"task_desc"`
+				Leases      []string        `json:"leases"`
+				Materialize string          `json:"materialize"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			parent, err := parseParentArg(a.Parent)
+			if err != nil {
+				return nil, err
+			}
+			task := a.TaskDesc
+			if task == "" {
+				task = a.Task
+			}
+			w, err := rr.WS.Open(workspace.OpenRequest{
+				Parent: parent, Name: a.Name, TaskDesc: task,
+				Leases: a.Leases, Mode: mountmgr.Mode(a.Materialize),
 			})
 			if err != nil {
 				return nil, err
 			}
+			pk := w.ParentKind
+			if w.BaseLine != "" {
+				pk = "line"
+			}
 			return map[string]any{
-				"ws_id": w.ID, "dir": s.R.WS.Dir(w.ID),
-				"parent_kind": w.ParentKind, "parent_id": w.ParentID,
-				"base_version": w.BaseVersion.String(),
-				"materialize":  w.Materialize,
+				"ws_id": w.ID, "dir": rr.WS.Dir(w.ID),
+				"parent_kind": pk, "parent_id": w.ParentID,
+				"base_line": w.BaseLine, "base_version": w.BaseVersion.String(),
+				"materialize": w.Materialize, "state": w.State,
 			}, nil
 		})
 
 	s.register("ws_list",
-		"列出全部工作区。",
-		`{"type":"object","additionalProperties":false}`,
+		"列出全部工作区（默认不含隐藏 merge/preview 工作区）。",
+		`{"type":"object","properties":{"include_hidden":{"type":"boolean"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			all, err := s.R.WS.List()
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
+			var a struct {
+				IncludeHidden bool `json:"include_hidden"`
+			}
+			_ = json.Unmarshal(raw, &a)
+			all, err := rr.WS.List()
 			if err != nil {
 				return nil, err
 			}
 			out := make([]map[string]any, 0, len(all))
 			for _, w := range all {
-				n, _ := s.R.DB.CountOps(w.ID)
-				c, _ := s.R.DB.CountOpenConflicts(w.ID)
+				if w.Hidden && !a.IncludeHidden {
+					continue
+				}
+				n, _ := rr.DB.CountOps(w.ID)
+				c, _ := rr.DB.CountOpenConflicts(w.ID)
+				state := w.State
+				if w.LandedTS != 0 {
+					state = "landed"
+				}
 				out = append(out, map[string]any{
-					"ws_id": w.ID, "name": w.Name, "state": w.State,
+					"ws_id": w.ID, "name": w.Name, "state": state,
 					"parent_kind": w.ParentKind, "parent_id": w.ParentID,
-					"base_version": w.BaseVersion.String(),
+					"base_version": w.BaseVersion.String(), "base_line": w.BaseLine,
 					"captured_ops": n, "conflict_count": c,
-					"materialize": w.Materialize, "dir": s.R.WS.Dir(w.ID),
+					"materialize": w.Materialize, "dir": rr.WS.Dir(w.ID),
 				})
 			}
 			return out, nil
@@ -303,19 +381,27 @@ func (s *Server) registerWorkspace() {
 		"返回单个工作区的状态。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				WsID string `json:"ws_id"`
 			}](raw)
 			if err != nil {
 				return nil, err
 			}
-			return s.R.WS.Info(a.WsID)
+			return rr.WS.Info(a.WsID)
 		})
 
 	s.register("ws_lease",
 		"登记或解除路径租约（建议性，§4.5）。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"add":{"type":"array","items":{"type":"string"}},"release":{"type":"array","items":{"type":"string"}},"mode":{"type":"string","enum":["shared","exclusive"]}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				WsID    string   `json:"ws_id"`
 				Add     []string `json:"add"`
@@ -328,20 +414,20 @@ func (s *Server) registerWorkspace() {
 			if a.Mode == "" {
 				a.Mode = "shared"
 			}
-			if _, err := s.R.WS.Get(a.WsID); err != nil {
+			if _, err := rr.WS.Get(a.WsID); err != nil {
 				return nil, err
 			}
 			for _, p := range a.Add {
-				if err := s.R.DB.AddLease(a.WsID, p, a.Mode, nowMS()); err != nil {
+				if err := rr.DB.AddLease(a.WsID, p, a.Mode, nowMS()); err != nil {
 					return nil, err
 				}
 			}
 			for _, p := range a.Release {
-				if err := s.R.DB.ReleaseLease(a.WsID, p); err != nil {
+				if err := rr.DB.ReleaseLease(a.WsID, p); err != nil {
 					return nil, err
 				}
 			}
-			leases, err := s.R.DB.ListLeases()
+			leases, err := rr.DB.ListLeases()
 			if err != nil {
 				return nil, err
 			}
@@ -358,31 +444,37 @@ func (s *Server) registerWorkspace() {
 		"强制采集：把磁盘变更结算为 op（§5.2）。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				WsID string `json:"ws_id"`
 			}](raw)
 			if err != nil {
 				return nil, err
 			}
-			before, _ := s.R.DB.CountOps(a.WsID)
-			if err := s.R.WS.Sync(a.WsID); err != nil {
+			before, _ := rr.DB.CountOps(a.WsID)
+			if err := rr.WS.Sync(a.WsID); err != nil {
 				return nil, err
 			}
-			after, _ := s.R.DB.CountOps(a.WsID)
-			ops, _ := s.R.DB.ListOps(a.WsID)
+			after, _ := rr.DB.CountOps(a.WsID)
+			ops, _ := rr.DB.ListOps(a.WsID)
 			files := map[string]bool{}
 			for _, o := range ops {
 				files[o.Path] = true
 			}
 			// §5.2：连续多轮不稳定的文件本轮被跳过，必须让调用方看见 ——
 			// 否则「采集了 0 个改动」和「有文件正在被写所以没采到」无法区分。
-			skipped := s.R.WS.LastUnstable(a.WsID)
+			skipped := rr.WS.LastUnstable(a.WsID)
 			if skipped == nil {
 				skipped = []string{}
 			}
+			conf, _ := rr.DB.CountOpenConflicts(a.WsID)
 			return map[string]any{
 				"captured_ops": after, "new_ops": after - before,
-				"files_touched":    len(files),
+				"ops_count": after, "files_touched": len(files),
+				"conflicts": conf, "dirty": after > 0,
 				"skipped_unstable": skipped,
 			}, nil
 		})
@@ -391,6 +483,10 @@ func (s *Server) registerWorkspace() {
 		"放弃工作区；cascade 决定是否连子工作区一起处理（§11.4）。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"cascade":{"type":"boolean"},"keep_dir":{"type":"boolean"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				WsID    string `json:"ws_id"`
 				Cascade *bool  `json:"cascade"`
@@ -399,13 +495,17 @@ func (s *Server) registerWorkspace() {
 			if err != nil {
 				return nil, err
 			}
-			cascade := true
+			cascade := false
 			if a.Cascade != nil {
 				cascade = *a.Cascade
 			}
-			n, _ := s.R.DB.CountOps(a.WsID)
-			dropped, reparented, err := s.R.WS.Drop(a.WsID, cascade, a.KeepDir)
+			n, _ := rr.DB.CountOps(a.WsID)
+			dropped, reparented, err := rr.WS.Drop(a.WsID, cascade, a.KeepDir)
 			if err != nil {
+				if errors.Is(err, workspace.ErrNotFound) {
+					return map[string]any{"dropped": []string{a.WsID}, "already_dropped": true,
+						"reparented": []string{}, "conflicts": []any{}, "dirty_ops_discarded": 0}, nil
+				}
 				return nil, err
 			}
 			return map[string]any{
@@ -415,16 +515,39 @@ func (s *Server) registerWorkspace() {
 		})
 
 	s.register("ws_rebase",
-		"把工作区对齐到父/主干的最新基准（§4.9.2）。",
-		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
+		"把工作区对齐到父/line/version 的最新基准（§4.9.2）。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"to":{"type":["object","string"]}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			a, err := decode[struct {
-				WsID string `json:"ws_id"`
-			}](raw)
-			if err != nil {
-				return nil, err
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
 			}
-			return s.R.WS.Rebase(a.WsID)
+			var a struct {
+				WsID string          `json:"ws_id"`
+				To   json.RawMessage `json:"to"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			ref := ""
+			if len(a.To) > 0 && string(a.To) != "null" {
+				k, id, err := parseTargetArg(a.To)
+				if err != nil {
+					return nil, err
+				}
+				switch k {
+				case "line", "mainline":
+					ref = "line:" + id
+					if k == "mainline" {
+						ref = "mainline"
+					}
+				case "version":
+					ref = "version:" + id
+				case "workspace":
+					ref = "workspace:" + id
+				}
+			}
+			return rr.WS.RebaseTo(a.WsID, ref)
 		})
 }
 
@@ -435,6 +558,10 @@ func (s *Server) registerConflict() {
 		"列出某工作区的冲突。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"include_resolved":{"type":"boolean"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				WsID            string `json:"ws_id"`
 				IncludeResolved bool   `json:"include_resolved"`
@@ -442,13 +569,17 @@ func (s *Server) registerConflict() {
 			if err != nil {
 				return nil, err
 			}
-			return s.R.Conflicts(a.WsID, !a.IncludeResolved)
+			return rr.Conflicts(a.WsID, !a.IncludeResolved)
 		})
 
 	s.register("conflict_show",
 		"按 key 返回冲突详情（含两侧任务描述与候选解）。",
 		`{"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				Key string `json:"key"`
 			}](raw)
@@ -459,7 +590,7 @@ func (s *Server) registerConflict() {
 			if err != nil {
 				return nil, err
 			}
-			v, err := s.R.ConflictByKey(key)
+			v, err := rr.ConflictByKey(key)
 			if err != nil {
 				return nil, err
 			}
@@ -470,6 +601,10 @@ func (s *Server) registerConflict() {
 		"记录一条冲突解决；同 key 重复写入视为成功（§6.4）。",
 		`{"type":"object","properties":{"key":{"type":"string"},"resolution":{"type":"object","properties":{"kind":{"type":"string","enum":["take_lower","take_upper","both","custom"]},"content":{"type":"array","items":{"type":"string"}}},"required":["kind"]}},"required":["key","resolution"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				Key        string `json:"key"`
 				Resolution struct {
@@ -486,21 +621,21 @@ func (s *Server) registerConflict() {
 			}
 			kind := op.ResolutionKind(a.Resolution.Kind)
 			if !kind.Valid() {
-				return nil, coded("INTERNAL", "非法解决方式 %q", a.Resolution.Kind)
+				return nil, coded("internal", "非法解决方式 %q", a.Resolution.Kind)
 			}
 			var content [][]byte
 			for _, l := range a.Resolution.Content {
 				content = append(content, []byte(l))
 			}
 			if kind == op.ResolveCustom && len(content) == 0 {
-				return nil, coded("INTERNAL", "custom 解决必须提供 content")
+				return nil, coded("internal", "custom 解决必须提供 content")
 			}
-			created, err := s.R.Resolve(key, kind, content, "mcp")
+			created, err := rr.Resolve(key, kind, content, "mcp")
 			if err != nil {
 				return nil, err
 			}
 			if created {
-				_ = s.R.ReopenIfNoConflicts(wsIDOfConflict(s.R, key))
+				_ = rr.ReopenIfNoConflicts(wsIDOfConflict(rr, key))
 			}
 			return map[string]any{"key": key.String(), "kind": kind, "created": created}, nil
 		})
@@ -509,6 +644,10 @@ func (s *Server) registerConflict() {
 		"按策略一次性解决某工作区的全部未决冲突。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"policy":{"type":"string","enum":["prefer_lower","prefer_upper","abort"]}},"required":["ws_id","policy"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				WsID   string `json:"ws_id"`
 				Policy string `json:"policy"`
@@ -523,13 +662,13 @@ func (s *Server) registerConflict() {
 			if a.Policy == "prefer_upper" {
 				kind = op.ResolveTakeUpper
 			}
-			rows, err := s.R.DB.ListConflicts(a.WsID, true)
+			rows, err := rr.DB.ListConflicts(a.WsID, true)
 			if err != nil {
 				return nil, err
 			}
 			n := 0
 			for i := range rows {
-				created, err := s.R.Resolve(rows[i].Key, kind, nil, "mcp")
+				created, err := rr.Resolve(rows[i].Key, kind, nil, "mcp")
 				if err != nil {
 					return nil, err
 				}
@@ -537,7 +676,7 @@ func (s *Server) registerConflict() {
 					n++
 				}
 			}
-			_ = s.R.ReopenIfNoConflicts(a.WsID)
+			_ = rr.ReopenIfNoConflicts(a.WsID)
 			return map[string]any{"resolved": n, "aborted": false}, nil
 		})
 }
@@ -546,57 +685,151 @@ func (s *Server) registerConflict() {
 
 func (s *Server) registerLand() {
 	s.register("land_preview",
-		"纯只读预演：返回若此刻落地会产生的冲突与文件统计（§7.5、D22）。",
-		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
+		"预演 land：target.kind=line|workspace；只读，冲突会持久化供 conflict_resolve。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			a, err := decode[struct {
-				WsID string `json:"ws_id"`
-			}](raw)
+			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
-			res, err := s.R.Preview(a.WsID)
+			var a struct {
+				WsID           string          `json:"ws_id"`
+				Target         json.RawMessage `json:"target"`
+				Fold           string          `json:"fold"`
+				ExpectedHead   string          `json:"expected_head"`
+				ExpectedWSTree string          `json:"expected_ws_tree"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			kind, id, err := parseTargetArg(a.Target)
 			if err != nil {
 				return nil, err
 			}
-			return landView(res), nil
+			if kind == "workspace" {
+				res, err := rr.PreviewInto(a.WsID, id)
+				if err != nil {
+					return nil, err
+				}
+				return landView2(res), nil
+			}
+			line := id
+			if kind == "mainline" || line == "" {
+				line = ""
+			}
+			res, err := rr.PreviewTo(a.WsID, repo.LandOptions{
+				Line: line, Fold: a.Fold, ExpectedHead: a.ExpectedHead,
+				ExpectedWSTree: a.ExpectedWSTree,
+			})
+			if err != nil && res == nil {
+				return nil, err
+			}
+			return landView2(res), nil
 		})
 
 	s.register("ws_land",
-		"把工作区所在的折叠集合折叠为恰好一个版本（§7.2）。",
-		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
+		"把工作区落地到命名 line 或直接父工作区。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"drop_workspace":{"type":"boolean"},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"},"expected_ws_ops_epoch":{"type":"integer"},"idempotency_key":{"type":"string"},"task":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			a, err := decode[struct {
-				WsID string `json:"ws_id"`
-			}](raw)
+			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
-			res, err := s.R.Land(a.WsID)
+			var a struct {
+				WsID               string          `json:"ws_id"`
+				Target             json.RawMessage `json:"target"`
+				Fold               string          `json:"fold"`
+				DropWorkspace      *bool           `json:"drop_workspace"`
+				ExpectedHead       string          `json:"expected_head"`
+				ExpectedParentTree string          `json:"expected_parent_tree"`
+				ExpectedWSTree     string          `json:"expected_ws_tree"`
+				ExpectedWSOpsEpoch int64           `json:"expected_ws_ops_epoch"`
+				IdempotencyKey     string          `json:"idempotency_key"`
+				Task               string          `json:"task"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			kind, id, err := parseTargetArg(a.Target)
+			if err != nil {
+				return nil, err
+			}
+			drop := true
+			if a.DropWorkspace != nil {
+				drop = *a.DropWorkspace
+			}
+			if kind == "workspace" {
+				exp := a.ExpectedParentTree
+				if exp == "" {
+					exp = a.ExpectedHead
+				}
+				res, err := rr.LandInto(a.WsID, id, exp, "", a.IdempotencyKey)
+				if err != nil {
+					return nil, err
+				}
+				return landView2(res), nil
+			}
+			line := id
+			if kind == "mainline" || line == "" {
+				line = ""
+			}
+			res, err := rr.LandTo(a.WsID, repo.LandOptions{
+				Line: line, Fold: a.Fold, DropWorkspace: drop,
+				ExpectedHead: a.ExpectedHead, ExpectedWSTree: a.ExpectedWSTree,
+				IdempotencyKey: a.IdempotencyKey, TaskDesc: a.Task,
+			})
 			if err != nil {
 				if errorsIsLandConflict(err) && res != nil {
-					return landView(res), nil
+					return landView2(res), nil
 				}
 				return nil, err
 			}
-			return landView(res), nil
+			return landView2(res), nil
 		})
 
-	s.register("version_revert",
-		"以新版本承载对某个版本的逆变更（§7.6）。",
-		`{"type":"object","properties":{"version_id":{"type":"string"}},"required":["version_id"],"additionalProperties":false}`,
+	s.register("ws_land_into",
+		"ws_land(target=workspace) 的显式别名。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"parent_ws_id":{"type":"string"},"expected_parent_tree":{"type":"string"},"preview_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","ws_id","parent_ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			a, err := decode[struct {
-				VersionID string `json:"version_id"`
-			}](raw)
+			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
-			id, err := hash.Parse(a.VersionID)
-			if err != nil {
-				return nil, coded("VERSION_NOT_FOUND", "非法版本 id %q", a.VersionID)
+			var a struct {
+				WsID               string `json:"ws_id"`
+				ParentWsID         string `json:"parent_ws_id"`
+				ExpectedParentTree string `json:"expected_parent_tree"`
+				PreviewID          string `json:"preview_id"`
+				IdempotencyKey     string `json:"idempotency_key"`
 			}
-			rv, err := s.R.Revert(id)
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			res, err := rr.LandInto(a.WsID, a.ParentWsID, a.ExpectedParentTree, a.PreviewID, a.IdempotencyKey)
+			if err != nil {
+				return nil, err
+			}
+			return landView2(res), nil
+		})
+
+	s.register("version_revert",
+		"以新版本承载对某个版本的逆变更（可指定目标 line）。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"version_id":{"type":"string"},"target_line":{"type":"string"},"expected_head":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","version_id"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, err := s.repoFor(repoArg(raw))
+			if err != nil {
+				return nil, err
+			}
+			var a struct {
+				VersionID      string `json:"version_id"`
+				TargetLine     string `json:"target_line"`
+				ExpectedHead   string `json:"expected_head"`
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			rv, err := rr.RevertTo(a.VersionID, a.TargetLine, a.ExpectedHead, a.IdempotencyKey)
 			if err != nil {
 				return nil, err
 			}
@@ -652,17 +885,39 @@ func (s *Server) registerSync() {
 		"返回本地与远端同步状态：local_head / remote_head / 待上传包 / ahead-behind。远端 push/fetch 只通过 CLI 执行。",
 		`{"type":"object","additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			st, err := remotesync.GetStatus(s.R, "", s.remoteConfigured)
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
+			remote, cfg, _ := remoteFor(rr)
+			configured := remote != nil
+			remoteHead := ""
+			if remote != nil {
+				if ref, err := remote.GetRef(ctx); err == nil {
+					remoteHead = ref.Head
+				}
+			}
+			st, err := remotesync.GetStatus(rr, remoteHead, configured)
 			if err != nil {
 				return nil, err
 			}
-			return st, nil
+			return map[string]any{
+				"local_head": st.LocalHead, "remote_head": st.RemoteHead,
+				"remote_configured": st.RemoteConfigured,
+				"pending_packages":  st.PendingPackages, "last_sync_ts": st.LastSyncTS,
+				"ahead": st.Ahead, "behind": st.Behind, "diverged": st.Diverged,
+				"remote_key": cfg.Remote.RemoteKey, "remote_prefix": cfg.Remote.Prefix,
+			}, nil
 		})
 
 	s.register("sync_prepare",
 		"生成一个增量包到本地 outbox（只暂存、不上传）。force 忽略阈值，full 强制 checkpoint。",
 		`{"type":"object","properties":{"force":{"type":"boolean"},"full":{"type":"boolean"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				Force bool `json:"force"`
 				Full  bool `json:"full"`
@@ -670,7 +925,8 @@ func (s *Server) registerSync() {
 			if err != nil {
 				return nil, err
 			}
-			m, err := remotesync.Prepare(s.R, s.syncOpt, a.Force, a.Full)
+			cfg, _ := config.Load(rr.Root)
+			m, err := remotesync.Prepare(rr, cfg.RemoteOptions(), a.Force, a.Full)
 			if err != nil {
 				if errors.Is(err, remotesync.ErrUpToDate) || errors.Is(err, remotesync.ErrNothingToPackage) {
 					return map[string]any{"created": false, "reason": err.Error()}, nil
@@ -684,7 +940,11 @@ func (s *Server) registerSync() {
 		"列出本地暂存的同步包（等待上传）。",
 		`{"type":"object","additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rows, err := s.R.DB.ListPackages()
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
+			rows, err := rr.DB.ListPackages()
 			if err != nil {
 				return nil, err
 			}
@@ -699,6 +959,10 @@ func (s *Server) registerSync() {
 		"查看一个暂存包的清单；verify 为真时全量校验分片与对象。",
 		`{"type":"object","properties":{"id":{"type":"string"},"verify":{"type":"boolean"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, rerr := s.repoFor(repoArg(raw))
+			if rerr != nil {
+				return nil, rerr
+			}
 			a, err := decode[struct {
 				ID     string `json:"id"`
 				Verify bool   `json:"verify"`
@@ -706,7 +970,7 @@ func (s *Server) registerSync() {
 			if err != nil {
 				return nil, err
 			}
-			row, err := s.findPackage(a.ID)
+			row, err := s.findPackage(rr, a.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -741,15 +1005,15 @@ func packageView(r meta.PackageRow, note string) map[string]any {
 }
 
 // findPackage 按 id / 唯一前缀 / last 找包记录。
-func (s *Server) findPackage(id string) (*meta.PackageRow, error) {
+func (s *Server) findPackage(r *repo.Repo, id string) (*meta.PackageRow, error) {
 	if id == "" || id == "last" {
-		row, err := s.R.DB.LastPackage()
+		row, err := r.DB.LastPackage()
 		if err != nil {
-			return nil, coded("NOT_FOUND", "没有本地暂存包")
+			return nil, coded("not_found", "没有本地暂存包")
 		}
 		return row, nil
 	}
-	rows, err := s.R.DB.ListPackages()
+	rows, err := r.DB.ListPackages()
 	if err != nil {
 		return nil, err
 	}
@@ -757,14 +1021,14 @@ func (s *Server) findPackage(id string) (*meta.PackageRow, error) {
 	for i := range rows {
 		if rows[i].ID == id || (len(id) >= 4 && strings.HasPrefix(rows[i].ID, id)) {
 			if hit != nil {
-				return nil, coded("INVALID_ARGUMENT", "包 id 前缀 %q 匹配到多个", id)
+				return nil, coded("invalid_argument", "包 id 前缀 %q 匹配到多个", id)
 			}
-			rr := rows[i]
-			hit = &rr
+			row := rows[i]
+			hit = &row
 		}
 	}
 	if hit == nil {
-		return nil, coded("NOT_FOUND", "找不到包 %q", id)
+		return nil, coded("not_found", "找不到包 %q", id)
 	}
 	return hit, nil
 }

@@ -33,6 +33,13 @@ type LandResult struct {
 	// 用于让调用方知道「本来会冲突的地方被确定性规则消化掉了多少」。
 	AutoMerged int     `json:"auto_merged"`
 	VersionID  hash.ID `json:"-"`
+
+	TargetHead    hash.ID `json:"-"`
+	WSTree        hash.ID `json:"-"`
+	WSOpsEpoch    int64   `json:"-"`
+	PreviewID     string  `json:"-"`
+	AlreadyLanded bool    `json:"-"`
+	State         string  `json:"-"`
 }
 
 // ConflictsJSON 返回面向 MCP 的冲突列表（带 key）。

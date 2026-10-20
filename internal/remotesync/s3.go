@@ -205,7 +205,7 @@ func (s *S3Remote) ListPackages(ctx context.Context) ([]string, error) {
 
 // GetRef 实现 Remote。
 func (s *S3Remote) GetRef(ctx context.Context) (Ref, error) {
-	key := s.key("refs", "mainline.json")
+	key := s.key("refs", "lines.json")
 	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket), Key: aws.String(key),
 	})
@@ -232,7 +232,7 @@ func (s *S3Remote) GetRef(ctx context.Context) (Ref, error) {
 
 // UpdateRef 实现 Remote：S3 条件写（If-Match / If-None-Match）。
 func (s *S3Remote) UpdateRef(ctx context.Context, expected, next Ref) error {
-	key := s.key("refs", "mainline.json")
+	key := s.key("refs", "lines.json")
 	body := next.Encode()
 	in := &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),

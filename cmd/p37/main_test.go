@@ -142,7 +142,7 @@ func TestGCForceBypassesDaemonLock(t *testing.T) {
 	}
 }
 
-func TestRepoFormatStillV1(t *testing.T) {
+func TestRepoFormatV2(t *testing.T) {
 	root := t.TempDir()
 	if code, _, errs := runCLI("init", root); code != 0 {
 		t.Fatalf("init 失败: %s", errs)
@@ -156,8 +156,8 @@ func TestRepoFormatStillV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != 1 {
-		t.Fatalf("仓库格式版本 = %d，本轮不应改变（期望 1）", v)
+	if v != 2 {
+		t.Fatalf("仓库格式版本 = %d，期望 2", v)
 	}
 	if code, _, errs := runCLI("fsck", root); code != 0 {
 		t.Fatalf("fsck 失败: %d %s", code, errs)

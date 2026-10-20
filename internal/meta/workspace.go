@@ -38,10 +38,14 @@ type Workspace struct {
 	ParentID    string
 	BaseTree    hash.ID
 	BaseVersion hash.ID
+	BaseLine    string
 	TaskDesc    string
 	State       string
 	Materialize string
 	Mounted     bool
+	Hidden      bool
+	Kind        string
+	LandedTS    int64
 	CreatedTS   int64
 	UpdatedTS   int64
 	// MaterializedTS 是工作区最近一次物化（挂载/复制）完成时刻，Unix 纳秒。
@@ -56,11 +60,13 @@ func (d *DB) InsertWorkspace(w Workspace) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
 			`INSERT INTO workspace(id, name, parent_kind, parent_id, base_tree,
-			                       base_version, task_desc, state, materialize, mounted,
+			                       base_version, base_line, task_desc, state, materialize, mounted,
+			                       hidden, kind, landed_ts,
 			                       created_ts, updated_ts, materialized_ts)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			w.ID, w.Name, w.ParentKind, w.ParentID, w.BaseTree.String(),
-			w.BaseVersion.String(), w.TaskDesc, w.State, w.Materialize, boolToInt(w.Mounted),
+			w.BaseVersion.String(), w.BaseLine, w.TaskDesc, w.State, w.Materialize, boolToInt(w.Mounted),
+			boolToInt(w.Hidden), w.Kind, w.LandedTS,
 			w.CreatedTS, w.UpdatedTS, w.MaterializedTS)
 		return err
 	})
@@ -74,14 +80,21 @@ func (d *DB) GetWorkspace(id string) (*Workspace, error) {
 		baseVerStr  string
 		mounted     int
 	)
+	var hidden, landed int64
+	var kind string
+	var baseLine string
 	err := d.sql.QueryRow(
-		`SELECT id, name, parent_kind, parent_id, base_tree, base_version,
-		        task_desc, state, materialize, mounted, created_ts, updated_ts,
-		        materialized_ts
+		`SELECT id, name, parent_kind, parent_id, base_tree, base_version, base_line,
+		        task_desc, state, materialize, mounted, hidden, kind, landed_ts,
+		        created_ts, updated_ts, materialized_ts
 		   FROM workspace WHERE id = ?`, id).
-		Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &baseTreeStr, &baseVerStr,
-			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &w.CreatedTS, &w.UpdatedTS,
-			&w.MaterializedTS)
+		Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &baseTreeStr, &baseVerStr, &baseLine,
+			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &hidden, &kind, &landed,
+			&w.CreatedTS, &w.UpdatedTS, &w.MaterializedTS)
+	w.BaseLine = baseLine
+	w.Hidden = hidden != 0
+	w.Kind = kind
+	w.LandedTS = landed
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotExist
 	}
@@ -101,8 +114,9 @@ func (d *DB) GetWorkspace(id string) (*Workspace, error) {
 // ListWorkspaces 返回全部工作区（按创建时间升序）。
 func (d *DB) ListWorkspaces() ([]Workspace, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, name, parent_kind, parent_id, base_tree, base_version,
-		        task_desc, state, materialize, mounted, created_ts, updated_ts
+		`SELECT id, name, parent_kind, parent_id, base_tree, base_version, base_line,
+		        task_desc, state, materialize, mounted, hidden, kind, landed_ts,
+		        created_ts, updated_ts
 		   FROM workspace ORDER BY created_ts, id`)
 	if err != nil {
 		return nil, err
@@ -116,12 +130,18 @@ func (d *DB) ListWorkspaces() ([]Workspace, error) {
 			bt, bv  string
 			mounted int
 		)
-		if err := rows.Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &bt, &bv,
-			&w.TaskDesc, &w.State, &w.Materialize, &mounted,
+		var baseLine, kind string
+		var hidden, landed int64
+		if err := rows.Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &bt, &bv, &baseLine,
+			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &hidden, &kind, &landed,
 			&w.CreatedTS, &w.UpdatedTS); err != nil {
 			return nil, err
 		}
 		w.Mounted = mounted != 0
+		w.BaseLine = baseLine
+		w.Hidden = hidden != 0
+		w.Kind = kind
+		w.LandedTS = landed
 		if w.BaseTree, err = hash.Parse(bt); err != nil {
 			return nil, err
 		}
@@ -469,6 +489,48 @@ func boolToInt(b bool) int {
 func (d *DB) DeleteOpsUnderRoot(wsID string) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`DELETE FROM op WHERE ws_id = ?`, wsID)
+		return err
+	})
+}
+
+// SetWorkspaceLanded 标记工作区已落地（drop_workspace=false 时保留但只读）。
+func (d *DB) SetWorkspaceLanded(id string, ts int64) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE workspace SET landed_ts=?, state=?, updated_ts=? WHERE id=?`,
+			ts, StateActive, ts, id)
+		return err
+	})
+}
+
+// CountVisibleWorkspaces 返回非隐藏工作区数（max_active 只统计用户工作区）。
+func (d *DB) CountVisibleWorkspaces() (int, error) {
+	var n int
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM workspace WHERE hidden=0`).Scan(&n)
+	return n, err
+}
+
+// CountHiddenWorkspaces 返回隐藏工作区数。
+func (d *DB) CountHiddenWorkspaces() (int, error) {
+	var n int
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM workspace WHERE hidden=1`).Scan(&n)
+	return n, err
+}
+
+// UpdateWorkspaceBaseLine 更新基准树、line 名与 updated_ts（line 父 rebase）。
+func (d *DB) UpdateWorkspaceBaseLine(id string, baseTree, baseVersion hash.ID, baseLine string, ts int64) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE workspace SET base_tree=?, base_version=?, base_line=?, updated_ts=? WHERE id=?`,
+			baseTree.String(), baseVersion.String(), baseLine, ts, id)
+		return err
+	})
+}
+
+// SetWorkspaceHidden 设置隐藏标记与 kind。
+func (d *DB) SetWorkspaceHidden(id string, hidden bool, kind string) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE workspace SET hidden=?, kind=? WHERE id=?`,
+			boolToInt(hidden), kind, id)
 		return err
 	})
 }
