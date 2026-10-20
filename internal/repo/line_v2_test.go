@@ -254,3 +254,23 @@ func TestLandExpectedWorkspaceToken(t *testing.T) {
 		t.Fatalf("expected target_moved, got %v", err)
 	}
 }
+
+func TestExportTree(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "A\n")
+	e.seed("dir/b.txt", "B\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if err := os.RemoveAll(dest); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.Export("mainline", dest); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dest, "dir/b.txt"))
+	if err != nil || string(b) != "B\n" {
+		t.Fatalf("export content=%q err=%v", b, err)
+	}
+}
