@@ -50,6 +50,9 @@ jobs:
             --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py /tmp/repo-mnt || true
           sudo setpriv --reuid=p36 --regid=p36 --init-groups \
             --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py /tmp/repo-mnt userxattr || true
+          sudo python3 /tmp/probe.py /tmp/repo-mnt || true
+          sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+            --inh-caps=all --ambient-caps=all python3 /tmp/probe.py /tmp/repo-mnt || true
           sudo umount /tmp/repo-mnt
       - name: systemd NNP ambient probe
         run: |
