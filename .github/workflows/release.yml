@@ -29,11 +29,18 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
+    env:
+      # 与 ci.yml 同一原因：避免 /tmp 的粗粒度 mtime 让 stat 快路径测试误判。
+      TMPDIR: ${{ runner.temp }}/p37-test-tmp
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
+      - name: prepare TMPDIR
+        run: |
+          mkdir -p "$TMPDIR"
+          echo "TMPDIR=$TMPDIR fs=$(stat -f -c %T "$TMPDIR")"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
