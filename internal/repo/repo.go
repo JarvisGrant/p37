@@ -180,6 +180,11 @@ func Open(root string, opt Options) (*Repo, error) {
 	if copt.ProbeBytes == 0 {
 		copt = capture.DefaultOptions()
 	}
+	// 粗粒度 mtime 文件系统（部分 CI 的 /tmp、容器 overlay）上，快路径会把
+	// 同一时间刻度内的修改误判为未变。P36 的 ext4 不需要；CI/调试可显式关闭。
+	if os.Getenv("P37_FORCE_HASH") == "1" {
+		copt.ForceHash = true
+	}
 
 	ws := workspace.New(root, db, store, mm, workspace.Options{
 		Ignore:             ig,

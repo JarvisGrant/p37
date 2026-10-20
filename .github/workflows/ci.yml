@@ -31,6 +31,9 @@ jobs:
           export TMPDIR="${RUNNER_TEMP}/p37-test-tmp"
           mkdir -p "$TMPDIR"
           echo "TMPDIR=$TMPDIR fs=$(stat -f -c %T "$TMPDIR")"
+          # runner 的 mtime 粒度可能粗于纳秒；关闭 stat 快路径，保证测试
+          # 验证的是语义而不是宿主文件系统的时间戳精度。
+          export P37_FORCE_HASH=1
           go test ./... -count=1
       - name: cross-build
         run: make cross

@@ -58,11 +58,13 @@ jobs:
           export TMPDIR="${RUNNER_TEMP}/p37-test-tmp"
           mkdir -p "$TMPDIR"
           echo "TMPDIR=$TMPDIR fs=$(stat -f -c %T "$TMPDIR")"
+          export P37_FORCE_HASH=1
           make test
       - name: build release
         run: |
           export TMPDIR="${RUNNER_TEMP}/p37-test-tmp"
           mkdir -p "$TMPDIR"
+          export P37_FORCE_HASH=1
           make release VERSION=${{ steps.meta.outputs.version }}
       - name: build L1 bootstrap
         run: make p36-bootstrap VERSION=${{ steps.meta.outputs.version }}

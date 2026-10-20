@@ -54,6 +54,11 @@ type Options struct {
 	BaseEntries map[string]hash.ID
 	// MaterializedNS 是工作区的物化时刻（Unix 纳秒）。0 表示未启用惰性判定。
 	MaterializedNS int64
+	// ForceHash 为真时禁用 (mtime_ns, size, inode) 快路径，所有文件都读内容。
+	//
+	// 用于 mtime 粒度粗于纳秒的文件系统（部分 CI 的 /tmp、容器 overlay），
+	// 或者调试。生产 P36 ext4 不需要开；由环境变量 P37_FORCE_HASH=1 接线。
+	ForceHash bool
 }
 
 // DefaultOptions 返回 §3.5、附录 B 的默认取值。
@@ -325,6 +330,9 @@ func (b *builder) collectCandidates() ([]candidate, error) {
 
 // isFastPath 报告该文件是否会命中「不读取」的快路径。
 func (b *builder) isFastPath(repoPath string, info os.FileInfo) bool {
+	if b.opt.ForceHash {
+		return false
+	}
 	if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
 		b.sameStat(prev, info) && !prev.ObjectID.IsZero() {
 		return true
