@@ -339,7 +339,7 @@ fi
 
 WS1="$(head -n 1 acceptance-ws.txt)"
 say "服务外 findmnt：workspace $WS1（MATERIALIZE=$MAT）"
-findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace.txt
+as_app findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace.txt
 if [ "$MAT" = "overlay" ]; then
   grep -q overlay findmnt-workspace.txt
 else
@@ -354,7 +354,7 @@ else
   sudo systemctl restart p37d.service
   wait_socket || { echo "重启后 socket 未出现"; exit 1; }
 fi
-findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace-after-restart.txt
+as_app findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace-after-restart.txt
 if [ "$MAT" = "overlay" ]; then
   grep -q overlay findmnt-workspace-after-restart.txt
 else
