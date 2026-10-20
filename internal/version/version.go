@@ -39,6 +39,10 @@ type Version struct {
 	Meta
 	JournalID int64
 	WsID      string
+	// 幂等元数据不参与 id；随同步包恢复。
+	IdempotencyKey  string
+	IdempotencyTool string
+	IdempotencyTS   int64
 }
 
 // normalizeParents 返回用于编码的父列表。

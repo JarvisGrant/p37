@@ -604,7 +604,7 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 		AutoMerged: replayed.AutoMerged, CanMerge: len(replayed.Conflicts) == 0,
 	}
 	if opt.Preview {
-		if mergeID != "" {
+		if mergeID != "" && opt.MergeID == "" {
 			// 创建隐藏 merge workspace，承载冲突与后续 resolution。
 			w := meta.Workspace{
 				ID: mergeID, Name: source, ParentKind: meta.ParentVersion,

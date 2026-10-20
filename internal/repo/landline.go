@@ -294,12 +294,18 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if child.ParentKind != meta.ParentWorkspace || child.ParentID != parentWsID {
 		return nil, fmt.Errorf("%w: child 的直接父不是 %s", ErrTargetMoved, parentWsID)
 	}
+	if child.State != meta.StateActive {
+		return nil, fmt.Errorf("%w: child 状态为 %s", workspace.ErrWrongState, child.State)
+	}
 	parent, err := r.WS.Get(parentWsID)
 	if err != nil {
 		return nil, err
 	}
 	if parent.Hidden || parent.Kind == "merge" || parent.LandedTS != 0 {
 		return nil, fmt.Errorf("%w: 父工作区不可写", workspace.ErrWrongState)
+	}
+	if parent.State != meta.StateActive {
+		return nil, fmt.Errorf("%w: 父工作区状态为 %s", workspace.ErrWrongState, parent.State)
 	}
 	if err := r.WS.Sync(parentWsID); err != nil {
 		return nil, err

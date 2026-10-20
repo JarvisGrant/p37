@@ -20,18 +20,21 @@ const MetaFormat = 1
 
 // MetaVersion 是 version 表的一行（可审查的 snake_case 视图）。
 type MetaVersion struct {
-	ID        string   `json:"id"`
-	Parent    string   `json:"parent"`
-	Parents   []string `json:"parents,omitempty"`
-	Tree      string   `json:"tree"`
-	Epoch     uint64   `json:"epoch"`
-	Agent     string   `json:"agent"`
-	TaskHash  string   `json:"task_hash"`
-	TaskDesc  string   `json:"task_desc"`
-	TS        int64    `json:"ts"`
-	Msg       string   `json:"msg"`
-	WSID      string   `json:"ws_id"`
-	JournalID int64    `json:"journal_id"`
+	ID              string   `json:"id"`
+	Parent          string   `json:"parent"`
+	Parents         []string `json:"parents,omitempty"`
+	Tree            string   `json:"tree"`
+	Epoch           uint64   `json:"epoch"`
+	Agent           string   `json:"agent"`
+	TaskHash        string   `json:"task_hash"`
+	TaskDesc        string   `json:"task_desc"`
+	TS              int64    `json:"ts"`
+	Msg             string   `json:"msg"`
+	WSID            string   `json:"ws_id"`
+	JournalID       int64    `json:"journal_id"`
+	IdempotencyKey  string   `json:"idempotency_key,omitempty"`
+	IdempotencyTool string   `json:"idempotency_tool,omitempty"`
+	IdempotencyTS   int64    `json:"idempotency_ts,omitempty"`
 }
 
 // MetaJournal 是 journal 表的一行（血缘/任务描述）。
@@ -74,6 +77,8 @@ func collectMeta(r *repo.Repo, versionIDs []hash.ID) (*PackageMeta, error) {
 			ID: id.String(), Parent: v.Parent.String(), Parents: pstrs, Tree: v.Tree.String(),
 			Epoch: v.Epoch, Agent: v.Agent, TaskHash: v.TaskHash.String(),
 			TaskDesc: v.TaskDesc, TS: v.TS, Msg: v.Msg, WSID: v.WsID,
+			IdempotencyKey: v.IdempotencyKey, IdempotencyTool: v.IdempotencyTool,
+			IdempotencyTS: v.IdempotencyTS,
 		}
 		m.Versions = append(m.Versions, mv)
 		if j, err := r.DB.GetJournal(id.String()); err == nil {
@@ -134,7 +139,9 @@ func (mv MetaVersion) toVersion() (*version.Version, error) {
 	v := &version.Version{Meta: version.Meta{
 		Parent: parent, Parents: parents, Tree: tree, Epoch: mv.Epoch, Agent: mv.Agent,
 		TaskHash: taskHash, TaskDesc: mv.TaskDesc, TS: mv.TS, Msg: mv.Msg,
-	}, WsID: mv.WSID, JournalID: mv.JournalID}
+	}, WsID: mv.WSID, JournalID: mv.JournalID,
+		IdempotencyKey: mv.IdempotencyKey, IdempotencyTool: mv.IdempotencyTool,
+		IdempotencyTS: mv.IdempotencyTS}
 	if v.ID().String() != mv.ID {
 		return nil, fmt.Errorf("%w: 版本 %s 与内容不符（重算 %s）",
 			ErrCorruptPackage, mv.ID, v.ID())

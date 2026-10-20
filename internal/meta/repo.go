@@ -102,7 +102,8 @@ func (d *DB) InsertVersion(v *version.Version) error {
 			id.String(), v.Parent.String(), v.Tree.String(), int64(v.Epoch),
 			v.Agent, v.TaskHash.String(), v.TaskDesc, v.TS, v.Msg,
 			nullableString(v.WsID), nullableInt(v.JournalID),
-			nil, nil, nil)
+			nullableString(v.IdempotencyKey), nullableString(v.IdempotencyTool),
+			nullableInt(v.IdempotencyTS))
 		if err != nil {
 			return err
 		}
@@ -141,12 +142,15 @@ func (d *DB) GetVersion(id hash.ID) (*version.Version, error) {
 		ts                                  int64
 		wsID                                sql.NullString
 		journalID                           sql.NullInt64
+		idemKey, idemTool                   sql.NullString
+		idemTS                              sql.NullInt64
 	)
 	err := d.sql.QueryRow(
-		`SELECT id, parent, tree, epoch, agent, task_hash, task_desc, ts, msg, ws_id, journal_id
+		`SELECT id, parent, tree, epoch, agent, task_hash, task_desc, ts, msg, ws_id, journal_id,
+		        idempotency_key, idempotency_tool, idempotency_ts
 		   FROM version WHERE id = ?`, id.String()).
 		Scan(&idStr, &parentStr, &treeStr, &epoch, &agent, &taskHash, &taskDesc,
-			&ts, &msg, &wsID, &journalID)
+			&ts, &msg, &wsID, &journalID, &idemKey, &idemTool, &idemTS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotExist
 	}
@@ -181,6 +185,15 @@ func (d *DB) GetVersion(id hash.ID) (*version.Version, error) {
 	}
 	if journalID.Valid {
 		v.JournalID = journalID.Int64
+	}
+	if idemKey.Valid {
+		v.IdempotencyKey = idemKey.String
+	}
+	if idemTool.Valid {
+		v.IdempotencyTool = idemTool.String
+	}
+	if idemTS.Valid {
+		v.IdempotencyTS = idemTS.Int64
 	}
 	// 多父：优先读 version_parent；老仓库退回 parent 列。
 	prows, err := d.sql.Query(
