@@ -7,6 +7,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hub"
+	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/workspace"
 )
 
@@ -124,5 +125,54 @@ func TestMultiRepoRestart(t *testing.T) {
 	}
 	if len(ws) != 1 {
 		t.Fatalf("workspaces=%d", len(ws))
+	}
+}
+
+func TestMultiRepoLandParallel(t *testing.T) {
+	root := t.TempDir()
+	h, err := hub.New(root, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if _, err := h.Create("a", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Create("b", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 2)
+	for _, name := range []string{"a", "b"} {
+		go func(name string) {
+			r, err := h.Open(name)
+			if err != nil {
+				errs <- err
+				return
+			}
+			w, err := r.WS.Open(workspace.OpenRequest{TaskDesc: name})
+			if err != nil {
+				errs <- err
+				return
+			}
+			if err := os.WriteFile(filepath.Join(r.WS.Dir(w.ID), name+".txt"), []byte(name), 0o644); err != nil {
+				errs <- err
+				return
+			}
+			_, err = r.LandTo(w.ID, repo.LandOptions{Line: "main"})
+			errs <- err
+		}(name)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"a", "b"} {
+		r, _ := h.Open(name)
+		head, _, _ := r.Head()
+		v, err := r.DB.GetVersion(head)
+		if err != nil || len(v.Parents) != 1 {
+			t.Fatalf("%s head=%v err=%v", name, v, err)
+		}
 	}
 }

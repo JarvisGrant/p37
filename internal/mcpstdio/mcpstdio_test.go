@@ -259,3 +259,18 @@ func TestProxyDaemonAbsent(t *testing.T) {
 		t.Fatalf("重试耗时 %s，超过合理上限", took)
 	}
 }
+
+func TestProxyRespondsBeforeEOF(t *testing.T) {
+	_, sock := startDaemon(t)
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"eof-test","version":"0"}}}` + "\n"
+	var out strings.Builder
+	err := mcpstdio.Run(context.Background(), sock, strings.NewReader(req), &out, os.Stderr,
+		mcpstdio.Options{ConnectTimeout: 5 * time.Second, RetryInterval: 50 * time.Millisecond})
+	_ = err // EOF 后返回错误可以接受；关键是已经写出响应。
+	if !strings.Contains(out.String(), `"result"`) {
+		t.Fatalf("EOF 前没有写出 initialize 响应: %q", out.String())
+	}
+	if !strings.Contains(out.String(), `"serverInfo"`) {
+		t.Fatalf("响应缺少 serverInfo: %q", out.String())
+	}
+}
