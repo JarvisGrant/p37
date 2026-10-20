@@ -37,6 +37,8 @@ func repoRoot() string {
 	return "/srv/repo"
 }
 
+func repoName() string { return os.Getenv("P37_REPO_NAME") }
+
 func mcpPath() string {
 	if v := os.Getenv("P37_MCP"); v != "" {
 		return v
@@ -47,10 +49,14 @@ func mcpPath() string {
 func startClient(t *testing.T, ctx context.Context) *mcp.ClientSession {
 	t.Helper()
 	cmd := exec.Command(mcpPath())
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"P37_REPO="+repoRoot(),
 		"TMPDIR="+filepath.Join(repoRoot(), ".p37", "tmp"),
 	)
+	if v := os.Getenv("P37_ROOT"); v != "" {
+		env = append(env, "P37_ROOT="+v)
+	}
+	cmd.Env = env
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -82,6 +88,13 @@ func startClient(t *testing.T, ctx context.Context) *mcp.ClientSession {
 }
 
 func callTool(ctx context.Context, cs *mcp.ClientSession, name string, args any) (*toolEnvelope, error) {
+	if r := repoName(); r != "" {
+		if m, ok := args.(map[string]any); ok {
+			if _, exists := m["repo"]; !exists {
+				m["repo"] = r
+			}
+		}
+	}
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		return nil, err
@@ -160,7 +173,15 @@ func TestP36TwoAgents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	assertFindmnt(t, "/run/p37-payload", "ext4")
+	payload := os.Getenv("P37_PAYLOAD_MOUNT")
+	if payload == "" {
+		if _, err := os.Stat("/usr/local/lib/p37/p37d"); err == nil {
+			payload = "/usr/local/lib/p37"
+		} else {
+			payload = "/run/p37-payload"
+		}
+	}
+	assertFindmnt(t, payload, "ext4")
 
 	csA := startClient(t, ctx)
 	csB := startClient(t, ctx)
@@ -208,9 +229,13 @@ func TestP36TwoAgents(t *testing.T) {
 
 	// version_log 的 data 是数组，而 toolEnvelope.Data 只适合 object；
 	// 这里直接解析原始信封。
+	logArgs := map[string]any{"limit": 10}
+	if r := repoName(); r != "" {
+		logArgs["repo"] = r
+	}
 	res, err := csA.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "version_log",
-		Arguments: map[string]any{"limit": 10},
+		Arguments: logArgs,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,4 +280,57 @@ func TestP36TwoAgents(t *testing.T) {
 		t.Fatalf("写 ws 列表: %v", err)
 	}
 	t.Logf("acceptance: MATERIALIZE=%s keeper=%s agents=%v versions=%d", keeperMaterialize, keeperID, results, len(raw.Data))
+}
+
+// TestP36MultiRepoSession 在 P37_ROOT 模式下验证多仓库 + 会话 line 闭环。
+// 运行前设置 P37_ROOT=/srv/repos（或测试用临时 root）。
+func TestP36MultiRepoSession(t *testing.T) {
+	if os.Getenv("P37_ROOT") == "" {
+		t.Skip("P37_ROOT 未设置")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cs := startClient(t, ctx)
+	name := fmt.Sprintf("accept-%d", time.Now().UnixNano())
+	if _, err := callTool(ctx, cs, "repo_create", map[string]any{"name": name}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callTool(ctx, cs, "line_create", map[string]any{
+		"repo": name, "name": "p34/session/accept", "from": "mainline"}); err != nil {
+		t.Fatal(err)
+	}
+	env, err := callTool(ctx, cs, "ws_open", map[string]any{
+		"repo": name, "task": "accept",
+		"parent": map[string]any{"kind": "line", "id": "p34/session/accept"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsID, _ := env.Data["ws_id"].(string)
+	dir, _ := env.Data["dir"].(string)
+	if wsID == "" || dir == "" {
+		t.Fatalf("ws_open: %v", env.Data)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "accept.txt"), []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callTool(ctx, cs, "ws_sync", map[string]any{"repo": name, "ws_id": wsID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callTool(ctx, cs, "ws_land", map[string]any{
+		"repo": name, "ws_id": wsID,
+		"target": map[string]any{"kind": "line", "id": "p34/session/accept"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env, err = callTool(ctx, cs, "version_tree", map[string]any{
+		"repo": name, "ref": "line:p34/session/accept", "recursive": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, _ := env.Data["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("version_tree 为空: %v", env.Data)
+	}
 }
