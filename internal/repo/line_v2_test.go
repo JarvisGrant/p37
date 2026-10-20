@@ -202,3 +202,36 @@ func TestResetAndProtect(t *testing.T) {
 
 var _ = workspace.ErrNotFound
 var _ = filepath.Join
+
+func TestLineCompareAndGraph(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "A\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.CreateLine("release", "mainline", false); err != nil {
+		t.Fatal(err)
+	}
+	w := e.open("line:release", "r")
+	e.write(w.ID, "r.txt", "R\n")
+	if _, err := e.r.LandTo(w.ID, repo.LandOptions{Line: "release"}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.r.CompareLines("release", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Ahead != 1 || c.Behind != 0 {
+		t.Fatalf("compare=%+v", c)
+	}
+	if c.MergeBase.IsZero() {
+		t.Fatal("missing merge base")
+	}
+	g, err := e.r.LineGraph([]string{"release", "main"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g["nodes"] == nil {
+		t.Fatalf("graph=%v", g)
+	}
+}

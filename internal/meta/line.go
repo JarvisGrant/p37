@@ -585,3 +585,37 @@ func (d *DB) IdempotentVersionIDs(since int64) ([]hash.ID, error) {
 	}
 	return out, rows.Err()
 }
+
+// ListLinesIncludingDeleted 返回全部 line（含墓碑），供远端 refs 使用。
+func (d *DB) ListLinesIncludingDeleted() ([]Line, error) {
+	rows, err := d.sql.Query(
+		`SELECT name, head, protected, created_from, created_ts, updated_ts, deleted_ts
+		   FROM line ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Line
+	for rows.Next() {
+		var (
+			l         Line
+			head      string
+			from      sql.NullString
+			protected int
+		)
+		if err := rows.Scan(&l.Name, &head, &protected, &from, &l.CreatedTS, &l.UpdatedTS, &l.DeletedTS); err != nil {
+			return nil, err
+		}
+		if l.Head, err = hash.Parse(head); err != nil {
+			return nil, err
+		}
+		l.Protected = protected != 0
+		if from.Valid && from.String != "" {
+			if l.CreatedFrom, err = hash.Parse(from.String); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}

@@ -614,3 +614,52 @@ go test ./...                      # 全部测试
 go test ./internal/codec -update   # 重新冻结编码黄金向量（仅格式变更时）
 go test ./internal/cas -update     # 重新冻结 gear 表（仅格式变更时）
 ```
+
+## v0.2 · 目标形态改造（format_ver=2）
+
+本轮把 p37 从「单仓库 + 单父 mainline」扩到 P34 需要的目标形态。
+
+### 多仓库
+
+- 新增 `internal/hub`：`/srv/repos/.p37/registry.db`，单 daemon 懒加载多 repo。
+- `p37d --root /srv/repos`；保留 `p37d --repo /srv/repo` 单仓库兼容。
+- 旧 `/srv/repo` 原地注册为 `default`，不移动目录。
+- 所有 MCP 工具自动获得可选 `repo` 参数；多仓库模式省略返回 `repo_required`。
+- `repo_create/list/info/delete/disk_usage/import/export/set_remote`。
+
+### 命名线与 DAG
+
+- `line` 表 + `version_parent` 表；`mainline_head` 保留为 default line 的兼容镜像。
+- 线性版本继续使用 v1 编码/ID；merge 版本使用 `TypeVersionMerge`，ID 覆盖全部 parents。
+- `line_create/list/info/delete/protect/reset/log/compare/graph/merge`。
+- `line_merge` 默认 fast-forward，`no_ff=true` 产生双亲 merge；冲突使用隐藏 merge workspace + `merge_id`。
+- `line_reset` 默认只允许祖先，`force+reason` 才越过并写审计。
+- GC 保留集合按每条 line 的祖先深度分别计算，并保留 reset 7 天 grace 与未过期幂等引用。
+
+### 工作区
+
+- `ws_open(parent={kind:line|version|workspace})`；line parent 记录 `base_line`。
+- `ws_land(target=line|workspace)`、`land_preview(target=...)`、`ws_land_into`。
+- `ws_land` 支持 `expected_head`、`expected_ws_tree`、`expected_ws_ops_epoch`、`idempotency_key`。
+- `ws_land_into` 用 `preview_id` + `expected_parent_tree` 做乐观并发；父工作区保留，子默认销毁。
+- `ws_rebase(to=...)`、`ws_diff`、`ws_reap`、`ws_disk_usage`、隐藏 merge/preview 工作区。
+- `landed` 通过 `landed_ts` 表达，支持 `drop_workspace=false`。
+
+### 历史读取
+
+- `version_tree/file/archive/log/graph/compare`；路径严格校验，symlink/权限位/二进制/truncated 显式返回。
+- `version_archive` 支持 tar.gz/zip，VM 内临时文件 1h 过期。
+
+### 同步
+
+- `refs/lines.json`（旧 `mainline.json` 可读）+ 稳定 `remote_key`，本地 repo id 可变。
+- 多 line 仓库使用全量 checkpoint；`sync_push/fetch/pull/restore/prune` 可在线执行。
+- 显式 `sync_push` 同步 durable；`auto_push` 仍是异步便利功能。
+- 版本元数据包含 `parents[]`，restore 后 DAG 与 merge 关系保持。
+
+### 测试
+
+新增：多仓库生命周期/重启、line 会话循环、line_merge 冲突、land_into 冲突、line reset/protect、历史读取、rebase、幂等、目录同步 push/restore（含 merge parents）。`go test ./...` 全绿。
+
+契约文档：`docs/mcp-contract.md`、`docs/format-v2.md`、`docs/sync-contract.md`、
+`docs/concurrency.md`、`docs/p34-integration.md`。

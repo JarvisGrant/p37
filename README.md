@@ -11,8 +11,9 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**M1–M5 主体完成，已在真机（P36 实例 · Ubuntu 26.04 + ext4 + OverlayFS）上按
-> `VERIFY.md` 验证通过**（门禁、功能闭环、并发、崩溃恢复、重启重挂、CDC 去重等）。
+> 状态：**v0.2 / format_ver=2：多仓库、命名线、会话工作区、land_into、
+> line_merge、历史读取、多 line 同步与恢复已接入**；M1–M5 主体已在真机
+> （P36 实例 · Ubuntu 26.04 + ext4 + OverlayFS）上按 `VERIFY.md` 验证通过（门禁、功能闭环、并发、崩溃恢复、重启重挂、CDC 去重等）。
 > 真机第二遍修掉了权限位丢失、rename 跨落地不跟随、`.p37ignore` 未读取、CLI 短 id
 > 不可回喂、老仓库不自动补列等缺陷，并优化了采集路径。详见 [`PROGRESS.md`](PROGRESS.md)
 > 与 [`VERIFY.md`](VERIFY.md)。
@@ -50,15 +51,19 @@ p37 的三个核心取舍：
 ## 快速开始
 
 ```bash
+# 单仓库（兼容）
 p37 init /srv/repo
-p37 import /srv/repo ./my-project     # 作为 v0 导入
-p37 status /srv/repo
-p37 doctor /srv/repo                  # 部署自检
-p37 gc /srv/repo --prune --pack       # 保留策略 + 回收 + 小对象打包（§9 P2）
-
-# 起 daemon（常驻进程，持有仓库排他锁）
+p37 import /srv/repo ./my-project
 p37d --repo /srv/repo
+
+# 多仓库（P34 目标形态）
+mkdir -p /srv/repos
+p37d --root /srv/repos
+# 然后通过 MCP repo_create / line_create / ws_open / ws_land / line_merge 使用
 ```
+
+MCP 工具表与调用契约见 [`docs/mcp-contract.md`](docs/mcp-contract.md)；
+P34 接入示例见 [`docs/p34-integration.md`](docs/p34-integration.md)。
 
 agent 侧 MCP 配置（stdio 代理 → 同仓库 daemon 的 unix socket）：
 

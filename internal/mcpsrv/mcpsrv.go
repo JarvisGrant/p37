@@ -222,6 +222,8 @@ func classify(err error) (code, msg string, detail any) {
 		return "line_exists", err.Error(), nil
 	case errors.Is(err, repo.ErrLineProtected):
 		return "line_protected", err.Error(), nil
+	case errors.Is(err, repo.ErrTargetInvalid):
+		return "target_invalid", err.Error(), nil
 	case errors.Is(err, repo.ErrTargetNotAncestor):
 		return "target_not_ancestor", err.Error(), nil
 	case errors.Is(err, repo.ErrTargetMoved):

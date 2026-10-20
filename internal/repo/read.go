@@ -323,6 +323,7 @@ func (r *Repo) VersionArchive(ref, p, format string) (*ArchiveResult, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	cleanupArchives(dir, time.Now().Add(-time.Hour))
 	name := fmt.Sprintf("p37-%d.%s", time.Now().UnixNano(), format)
 	dst := filepath.Join(dir, name)
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
@@ -620,4 +621,17 @@ func writeTreeTo(dest, prefix string, t *tree.Tree, store interface {
 		}
 	}
 	return nil
+}
+
+func cleanupArchives(dir string, before time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err == nil && info.ModTime().Before(before) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }

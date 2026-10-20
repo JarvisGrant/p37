@@ -36,6 +36,10 @@ func TestSyncPushRestoreDir(t *testing.T) {
 	hh.mustOK("ws_land", map[string]any{"repo": "app", "ws_id": wsID,
 		"target": map[string]any{"kind": "line", "id": "p34/session/s1"}})
 
+	// 产生一个双亲 merge 版本，验证 restore 后 DAG 关系也恢复。
+	hh.mustOK("line_merge", map[string]any{"repo": "app", "source": "p34/session/s1",
+		"target": "main", "no_ff": true})
+
 	push := hh.mustOK("sync_push", map[string]any{"repo": "app", "full": true})
 	if push["durable"] != true {
 		t.Fatalf("push=%v", push)

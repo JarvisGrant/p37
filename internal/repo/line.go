@@ -95,9 +95,10 @@ func (r *Repo) lineWorkspaceCount(name string) (int, error) {
 	}
 	n := 0
 	for i := range all {
-		if all[i].BaseLine == name && all[i].LandedTS == 0 {
-			n++
+		if all[i].Hidden || all[i].BaseLine != name || all[i].LandedTS != 0 {
+			continue
 		}
+		n++
 	}
 	return n, nil
 }

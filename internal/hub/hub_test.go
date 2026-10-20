@@ -68,3 +68,61 @@ func TestMultiRepoLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMultiRepoRestart(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	h, err := hub.New(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a", "b", "c"} {
+		if _, err := h.Create(n, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ra, err := h.Open("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ra.CreateLine("s", "mainline", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ra.WS.Open(workspace.OpenRequest{Parent: "line:s", TaskDesc: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	h2, err := hub.New(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h2.Close()
+	es, err := h2.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 3 {
+		t.Fatalf("repos=%d", len(es))
+	}
+	ra2, err := h2.Open("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls, err := ra2.Lines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ls) != 2 {
+		t.Fatalf("lines=%d", len(ls))
+	}
+	ws, err := ra2.WS.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ws) != 1 {
+		t.Fatalf("workspaces=%d", len(ws))
+	}
+}

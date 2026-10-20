@@ -258,3 +258,21 @@ auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式�
 | 运行时环境 | `P37_REPO=/srv/repo`、`P37_PAYLOAD_LABEL=P37PAYLOAD`、`TMPDIR=/srv/repo/.p37/tmp` |
 | L1 必需文件 | `p37-run`、`p37-mcp`、`p37-mount`、`config.toml`、`p37d.service`、`90-p37.conf`、`tmpfiles-p37.conf` |
 | L1 可选文件 | `config-overlay.toml`、`p37d-root-overlay.service`（root+overlay 变体） |
+
+## v0.2 多仓库变更（format_ver=2）
+
+- 运行根目录改为 `/srv/repos`；`p37d --root /srv/repos`。
+- 控制面：`/srv/repos/.p37/{registry.db,p37d.sock,tmp,trash}`。
+- 每个 repo 目录：`/srv/repos/<repo_id>`；repo id 为 `repo_<32 hex>`。
+- 旧 `/srv/repo` 不移动，daemon 启动时原地注册为 `default`；单仓库
+  `p37d --repo /srv/repo` 仍可用。
+- L1 需要预创建 `/srv/repos`（`p36:p36 0750`），并安装：
+  - `/usr/local/bin/p37`（payload 内 CLI 的稳定入口）
+  - `/usr/local/bin/p37-run`、`/usr/local/bin/p37-mcp`
+- `p37-run` 默认从 `/usr/local/lib/p37` 找二进制；找不到时回退
+  `/run/p37-payload`。
+- `p37-mcp` 默认 `--stdio --root /srv/repos`；`/srv/repos/.p37` 不存在时
+  回退单仓库 `--repo /srv/repo`。
+- `p37d.service`：`ConditionPathIsDirectory=/srv/repos`，
+  `Environment=P37_ROOT=/srv/repos`，`TMPDIR=/srv/repos/.p37/tmp`。
+- 发布物 `dist/p36-bootstrap` 新增 `p37` wrapper。

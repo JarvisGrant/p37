@@ -99,12 +99,12 @@ func PushRef(ctx context.Context, r *repo.Repo, remote Remote, ids []string, met
 	if def, err := r.DB.DefaultLine(); err == nil {
 		next.DefaultLine = def
 	}
-	if ls, err := r.Lines(); err == nil {
+	if ls, err := r.DB.ListLinesIncludingDeleted(); err == nil {
 		next.Lines = make(map[string]LineRef, len(ls))
 		for i := range ls {
 			next.Lines[ls[i].Name] = LineRef{
 				Head: ls[i].Head.String(), Protected: ls[i].Protected,
-				CreatedFrom: ls[i].CreatedFrom.String(),
+				CreatedFrom: ls[i].CreatedFrom.String(), DeletedTS: ls[i].DeletedTS,
 			}
 		}
 	}

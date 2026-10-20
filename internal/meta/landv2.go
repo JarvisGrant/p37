@@ -233,3 +233,26 @@ func copyFile(src, dst string) error {
 	}
 	return os.WriteFile(dst, b, 0o600)
 }
+
+// RecentResetHeads 返回最近 reset 涉及的 from/to head（用于 GC grace）。
+func (d *DB) RecentResetHeads(since int64) ([]hash.ID, error) {
+	rows, err := d.sql.Query(
+		`SELECT from_head, to_head FROM line_reset_log WHERE ts >= ?`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []hash.ID
+	for rows.Next() {
+		var a, b string
+		if err := rows.Scan(&a, &b); err != nil {
+			return nil, err
+		}
+		for _, s := range []string{a, b} {
+			if id, err := hash.Parse(s); err == nil && !id.IsZero() {
+				out = append(out, id)
+			}
+		}
+	}
+	return out, rows.Err()
+}

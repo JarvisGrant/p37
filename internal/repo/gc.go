@@ -151,6 +151,11 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 			reachable[id] = true
 		}
 	}
+	if ids, err := r.DB.RecentResetHeads(meta.NowMS() - int64(7*24*60*60*1000)); err == nil {
+		for _, id := range ids {
+			reachable[id] = true
+		}
+	}
 	rows, err := r.DB.ListVersions(1_000_000, 0)
 	if err != nil {
 		return nil, err

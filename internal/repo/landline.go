@@ -15,6 +15,7 @@ import (
 
 // ErrHasActiveChildren 表示工作区仍有活跃子工作区，不能直接 land 到 line。
 var ErrHasActiveChildren = errors.New("repo: 工作区仍有活跃子工作区")
+var ErrTargetInvalid = errors.New("repo: 非法 land 目标")
 
 // LandOptions 控制 land 行为。
 type LandOptions struct {
@@ -86,6 +87,9 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 	}
 	if w.Hidden || w.Kind == "merge" {
 		return nil, fmt.Errorf("%w: 隐藏工作区不能直接 land", workspace.ErrWrongState)
+	}
+	if opt.Fold == "self" && w.ParentKind == meta.ParentWorkspace {
+		return nil, fmt.Errorf("%w: 子工作区必须用 ws_land_into 或 fold=stack", ErrTargetInvalid)
 	}
 
 	var fold []*meta.Workspace

@@ -155,6 +155,8 @@ func (h *Hub) CreateEx(name, defaultLine, remoteKey, remotePrefix string) (*Entr
 		}
 	}
 	_ = r.Close()
+	_ = os.Chmod(path, 0o750)
+	_ = os.Chmod(filepath.Join(path, ".p37"), 0o700)
 	// 把根配置作为该 repo 的默认配置落盘，后续 repo.Open 才能保持一致。
 	_ = config.Save(path, h.cfg)
 	return h.lookupLocked(id)
@@ -251,6 +253,8 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	}
 	h.mu.Unlock()
 
+	_ = os.Chmod(e.Path, 0o750)
+	_ = os.Chmod(filepath.Join(e.Path, ".p37"), 0o700)
 	cfg, err := config.Load(e.Path)
 	if err != nil {
 		return nil, err
@@ -319,6 +323,11 @@ func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 		leases, _ := r.DB.ListLeases()
 		if len(leases) > 0 && !force {
 			return nil, fmt.Errorf("%w: %d 个租约", ErrRepoBusy, len(leases))
+		}
+		for i := range all {
+			if all[i].Materialize == "overlay" && all[i].Mounted {
+				_ = r.MM.Unmount(all[i].ID)
+			}
 		}
 	}
 	// 先写 tombstone，再移目录，最后删 registry。
