@@ -219,6 +219,11 @@ stop_root_daemon() {
     sudo test ! -S "$REPO/.p37/p37d.sock" && break
     sleep 0.2
   done
+  # socket 先于进程退出删除；必须等进程真正退出，否则新实例会撞上 flock。
+  for _ in $(seq 1 100); do
+    sudo kill -0 "$P37D_PID" 2>/dev/null || break
+    sleep 0.2
+  done
   P37D_PID=""
   sudo rm -f /run/p37d-root.pid
 }
