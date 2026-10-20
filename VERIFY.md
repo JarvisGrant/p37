@@ -178,6 +178,11 @@ systemctl stop p37d
 /run/p37-payload/p37 gc /srv/repo --prune --pack     # 期望 0
 ```
 
+如果是在 GitHub-hosted runner 上跑，遇到 OverlayFS `permission denied` 时脚本会
+退化 `User=root` 并在日志里写 `ROOT_FALLBACK=1`；这只是 CI 环境限制，不能替代
+真实 P36 的 `User=p36` 验收。真实验收请用 P36 实例或 self-hosted runner
+（`vars.P37_RUNNER`）。
+
 验收记录请附：`p37d --check --json` 全文、`findmnt`、两个 stdio 客户端的
 `ws_id` 与 `version_log`、GC 拒绝的退出码与 stderr、`manifest.json` 与
 发布 tar 的 sha256，以及 `NNP_FAILED`（若 NNP 下 mount 失败，附去掉 NNP 的

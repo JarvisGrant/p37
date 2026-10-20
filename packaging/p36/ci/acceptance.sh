@@ -56,6 +56,7 @@ cleanup() {
   set +e
   sudo systemctl stop p37d.service >/dev/null 2>&1
   sudo rm -f /etc/systemd/system/p37d.service.d/98-no-nnp.conf
+  sudo rm -f /etc/systemd/system/p37d.service.d/99-root.conf
   sudo systemctl daemon-reload >/dev/null 2>&1
   sudo umount -l /run/p37-payload >/dev/null 2>&1
   if [ -n "$LOOP" ]; then sudo losetup -d "$LOOP" >/dev/null 2>&1; fi
@@ -142,6 +143,35 @@ sudo mkdir -p /dev/disk/by-label
 sudo ln -sfn "$LOOP" /dev/disk/by-label/P37PAYLOAD
 ls -l "$LOOP" /dev/disk/by-label/P37PAYLOAD
 
+# 显式检查需要 CAP_SYS_ADMIN 才能 probe overlay；用 setpriv 模拟 unit 的
+# p36 + ambient CAP_SYS_ADMIN（NNP 由 systemd 服务本身覆盖）。
+as_p36_caps() {
+  sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+    --inh-caps=+sys_admin --ambient-caps=+sys_admin \
+    env TMPDIR="$REPO/.p37/tmp" "$@"
+}
+
+ROOT_FALLBACK=0
+
+# GitHub-hosted runner 可能禁止非 root 进程挂载 overlay（即使有 ambient
+# CAP_SYS_ADMIN）。此时为了继续跑功能验收，退化为 root 服务并在日志里明确
+# 标出 P36_USER_FALLBACK=1；真实 P36 仍应用 User=p36。
+as_caps() {
+  if [ "$ROOT_FALLBACK" = 1 ]; then
+    sudo env TMPDIR="$REPO/.p37/tmp" "$@"
+  else
+    as_p36_caps "$@"
+  fi
+}
+
+as_app() {
+  if [ "$ROOT_FALLBACK" = 1 ]; then
+    sudo env HOME=/root TMPDIR="$REPO/.p37/tmp" "$@"
+  else
+    sudo -u p36 env HOME=/home/p36 TMPDIR="$REPO/.p37/tmp" "$@"
+  fi
+}
+
 say "启动 systemd 服务"
 [ -d /run/systemd/system ] || {
   echo "runner 没有 systemd；P36 验收要求真实 unit，请换 VM runner" >&2
@@ -173,13 +203,26 @@ if ! wait_socket; then
   sudo systemctl reset-failed p37d.service || true
   sudo systemctl start p37d.service || true
   if ! wait_socket; then
-    echo "去掉 NoNewPrivileges 后仍未启动，验收失败"
+    echo "去掉 NoNewPrivileges 后仍未启动；尝试 User=root（runner 可能禁止 p36 挂载 overlay）"
+    ROOT_FALLBACK=1
+    sudo systemctl stop p37d.service || true
+    sudo systemctl reset-failed p37d.service || true
     sudo systemctl status p37d.service --no-pager || true
     sudo journalctl -u p37d.service -n 160 --no-pager || true
-    exit 1
+    printf '[Service]\nUser=root\nGroup=root\nSupplementaryGroups=\n' \
+      | sudo tee /etc/systemd/system/p37d.service.d/99-root.conf >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed p37d.service || true
+    sudo systemctl start p37d.service || true
+    if ! wait_socket; then
+      echo "User=root 仍无法启动，验收失败"
+      sudo systemctl status p37d.service --no-pager || true
+      sudo journalctl -u p37d.service -n 160 --no-pager || true
+      exit 1
+    fi
   fi
 fi
-echo "NNP_FAILED=$NNP_FAILED"
+echo "NNP_FAILED=$NNP_FAILED ROOT_FALLBACK=$ROOT_FALLBACK"
 
 # --check / doctor 适合 daemon 启动前：先让 p37-run 完成挂载与 init，
 # 停服（tmpfiles 创建的目录不会随 unit 清理，payload 保留），在 daemon 停止状态下检查。
@@ -195,19 +238,11 @@ find /run/p37-payload -maxdepth 1 -mindepth 1 -printf '%f\n' | sort | tee payloa
 [ "$(wc -l < payload-root.txt | tr -d ' ')" = "3" ]
 for f in p37 p37d manifest.json; do grep -qx "$f" payload-root.txt; done
 
-# 显式检查需要 CAP_SYS_ADMIN 才能 probe overlay；用 setpriv 模拟 unit 的
-# p36 + ambient CAP_SYS_ADMIN（NNP 由 systemd 服务本身覆盖）。
-as_p36_caps() {
-  sudo setpriv --reuid=p36 --regid=p36 --init-groups \
-    --inh-caps=+sys_admin --ambient-caps=+sys_admin \
-    env TMPDIR="$REPO/.p37/tmp" "$@"
-}
-
 say "p37d --check --strict"
-as_p36_caps /run/p37-payload/p37d --check --strict --json --repo "$REPO" | tee check.json
+as_caps /run/p37-payload/p37d --check --strict --json --repo "$REPO" | tee check.json
 
 say "p37 doctor"
-as_p36_caps /run/p37-payload/p37 doctor "$REPO" | tee doctor.txt
+as_caps /run/p37-payload/p37 doctor "$REPO" | tee doctor.txt
 
 say "重新启动 p37d（NNP_FAILED=$NNP_FAILED）"
 sudo systemctl start p37d.service
@@ -223,16 +258,14 @@ cat > "$WORK/init.json" <<'EOF'
 EOF
 chmod 0755 "$WORK"
 chmod 0644 "$WORK/init.json"
-sudo -u p36 env TMPDIR="$REPO/.p37/tmp" \
-  sh -c "(cat '$WORK/init.json'; sleep 1) | /usr/local/bin/p37-mcp" > mcp-probe.json
+as_app sh -c "(cat '$WORK/init.json'; sleep 1) | /usr/local/bin/p37-mcp" > mcp-probe.json
 grep -q '"id":1' mcp-probe.json
 cat mcp-probe.json
 
 say "两个 agent：ws_open/ws_sync/ws_land"
 go test -c -tags p36acceptance -o "$WORK/p36-acceptance.test" ./packaging/p36/acceptance
 sudo install -m 0755 "$WORK/p36-acceptance.test" /usr/local/bin/p37-acceptance
-sudo -u p36 env HOME=/home/p36 TMPDIR="$REPO/.p37/tmp" \
-  P37_REPO="$REPO" P37_MCP=/usr/local/bin/p37-mcp \
+as_app env P37_REPO="$REPO" P37_MCP=/usr/local/bin/p37-mcp \
   P37_ACCEPTANCE_OUT="$REPO/.p37/acceptance.json" \
   P37_ACCEPTANCE_WS="$REPO/.p37/acceptance-ws.txt" \
   /usr/local/bin/p37-acceptance -test.v | tee acceptance-mcp.log
@@ -252,13 +285,11 @@ for _ in $(seq 1 100); do
 done
 [ -S "$REPO/.p37/p37d.sock" ] || { echo "重启后 socket 未出现"; exit 1; }
 findmnt -T "$REPO/workspaces/$WS1" | tee findmnt-workspace-after-restart.txt
-sudo -u p36 env TMPDIR="$REPO/.p37/tmp" \
-  /run/p37-payload/p37 ws-list "$REPO" | tee ws-list.txt
+as_app /run/p37-payload/p37 ws-list "$REPO" | tee ws-list.txt
 
 say "GC 拒绝（daemon 运行中）"
 set +e
-sudo -u p36 env TMPDIR="$REPO/.p37/tmp" \
-  /run/p37-payload/p37 gc "$REPO" --prune > gc-running.out 2>&1
+as_app /run/p37-payload/p37 gc "$REPO" --prune > gc-running.out 2>&1
 GC_RUNNING_CODE=$?
 set -e
 cat gc-running.out
@@ -268,12 +299,14 @@ say "停服后 GC"
 sudo systemctl stop p37d.service
 [ -x /run/p37-payload/p37 ] || { echo "停服后 payload 被卸载，p37 不可用"; exit 1; }
 set +e
-sudo -u p36 env TMPDIR="$REPO/.p37/tmp" \
-  /run/p37-payload/p37 gc "$REPO" --prune --pack > gc-stopped.out 2>&1
+as_app /run/p37-payload/p37 gc "$REPO" --prune --pack > gc-stopped.out 2>&1
 GC_STOPPED_CODE=$?
 set -e
 cat gc-stopped.out
 [ "$GC_STOPPED_CODE" -eq 0 ]
 
-say "acceptance ok (NNP_FAILED=$NNP_FAILED)"
-echo "NNP_FAILED=$NNP_FAILED" | tee -a "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+say "acceptance ok (NNP_FAILED=$NNP_FAILED ROOT_FALLBACK=$ROOT_FALLBACK)"
+{
+  echo "NNP_FAILED=$NNP_FAILED"
+  echo "ROOT_FALLBACK=$ROOT_FALLBACK"
+} | tee -a "$GITHUB_STEP_SUMMARY" 2>/dev/null || true

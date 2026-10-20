@@ -206,6 +206,10 @@ P36 应使用 `--strict`。inotify 不足只 WARN，不会自动修改内核参�
   因此 MCP 客户端进程必须与 p37d 同 uid（默认都是 `p36`）；换用户会连不上。
 - 没有自更新；不要试图在实例内替换 `/run/p37-payload` 下的文件。
 - `p37d --check` 有写探测，不适合当作在线探针。
+- GitHub-hosted runner 可能禁止非 root 进程挂载 OverlayFS（即使有 ambient
+  `CAP_SYS_ADMIN`）。Actions 验收脚本在这种情况下会退化为 `User=root` 并在
+  日志中标记 `ROOT_FALLBACK=1`；**真实 P36 验收必须用 `User=p36` 的 P36 实例
+  或 self-hosted runner**（`vars.P37_RUNNER`）。
 
 ## 9. P36 集成需要的字段
 

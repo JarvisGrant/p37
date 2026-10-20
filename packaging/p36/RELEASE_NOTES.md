@@ -43,6 +43,9 @@
 - 在线 GC 未实现；`p37 gc` 在 daemon 运行时拒绝，需维护窗口。
 - payload 换盘需要重启实例；服务级 restart 不保证换盘。
 - `p37d --check` 有少量写探测，适合启动前检查，不建议作为在线高频探针。
+- GitHub-hosted runner 可能禁止非 root 挂载 OverlayFS；Actions 验收会退化
+  `User=root` 并标记 `ROOT_FALLBACK=1`。真实 P36 的 `User=p36` 验收需用
+  P36 实例或 self-hosted runner（`vars.P37_RUNNER`）。
 - `p37d --stdio` 在启动时快照 daemon 工具清单；daemon 升级后客户端应重连。
 - HTTP 模式仍强制 `auth_token`；stdio 模式依赖 unix socket `0600`，客户端需与
   p37d 同 uid。
