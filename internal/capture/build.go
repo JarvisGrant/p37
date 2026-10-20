@@ -545,18 +545,20 @@ func (b *builder) file(p, repoPath string, info os.FileInfo) (hash.ID, bool, err
 		return hash.ID{}, false, fmt.Errorf("%w: %s (%d 字节)", ErrFileTooLarge, repoPath, info.Size())
 	}
 
-	// 快路径 1：已有缓存条目（含播种条目，见 sameStat）。
-	if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
-		b.sameStat(prev, info) && !prev.ObjectID.IsZero() {
-		return prev.ObjectID, true, nil
-	}
-	// 快路径 2：惰性判定 —— 基准树里有这个路径，且文件不比物化时刻更新，
-	// 说明它仍是基准树里那一份，直接复用对象 id（不读、不哈希）。
-	if b.opt.MaterializedNS > 0 {
-		if id, found := b.opt.BaseEntries[repoPath]; found && !id.IsZero() &&
-			info.ModTime().UnixNano() <= b.opt.MaterializedNS {
-			b.putStatWith(repoPath, codec.EntryFile, info, hash.ID{}, id, hash.ID{})
-			return id, true, nil
+	if !b.opt.ForceHash {
+		// 快路径 1：已有缓存条目（含播种条目，见 sameStat）。
+		if prev, ok := b.cached(repoPath); ok && prev.Kind == codec.EntryFile &&
+			b.sameStat(prev, info) && !prev.ObjectID.IsZero() {
+			return prev.ObjectID, true, nil
+		}
+		// 快路径 2：惰性判定 —— 基准树里有这个路径，且文件不比物化时刻更新，
+		// 说明它仍是基准树里那一份，直接复用对象 id（不读、不哈希）。
+		if b.opt.MaterializedNS > 0 {
+			if id, found := b.opt.BaseEntries[repoPath]; found && !id.IsZero() &&
+				info.ModTime().UnixNano() <= b.opt.MaterializedNS {
+				b.putStatWith(repoPath, codec.EntryFile, info, hash.ID{}, id, hash.ID{})
+				return id, true, nil
+			}
 		}
 	}
 
