@@ -140,15 +140,15 @@ func Default() Config {
 		},
 		Workspace: WorkspaceConfig{
 			Materialize:    string(mountmgr.ModeAuto),
-			BaseCacheBytes: 20 << 30,
+			BaseCacheBytes: 4 << 30,
 			ScanInterval:   "30s",
 			Debounce:       "500ms",
 			StableRetries:  5,
 			StableDelay:    "200ms",
-			MaxActive:      64,
+			MaxActive:      8,
 			MaxDepth:       32,
 			MaxFanout:      16,
-			WarnDiskBytes:  50 << 30,
+			WarnDiskBytes:  12 << 30,
 		},
 		Merge: MergeConfig{
 			ContextLines:   tree.DefaultContextLines,
@@ -178,21 +178,48 @@ func Path(root string) string { return filepath.Join(root, ".p37", "config.toml"
 
 // Load 读取配置；文件不存在时返回默认值。
 func Load(root string) (Config, error) {
-	cfg := Default()
-	b, err := os.ReadFile(Path(root))
+	cfg, err := LoadTemplate(Path(root))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return cfg, nil
+			return Default(), nil
 		}
-		return cfg, err
-	}
-	if _, err := toml.Decode(string(b), &cfg); err != nil {
 		return cfg, err
 	}
 	if cfg.Daemon.Socket == "" {
 		cfg.Daemon.Socket = filepath.Join(root, ".p37", "p37d.sock")
 	}
 	return cfg, nil
+}
+
+// LoadTemplate 读取一个配置模板，并以 Default() 为底做覆盖。
+//
+// 与 Load 的区别：文件不存在时返回错误（引导脚本需要区分“没给模板”和
+// “模板给了但读不了”）；socket 的相对路径由调用方按仓库根解析。
+func LoadTemplate(path string) (Config, error) {
+	cfg := Default()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	if _, err := toml.Decode(string(b), &cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// SocketPath 返回 daemon 的 unix socket 路径。
+//
+// 配置里没写时用 <root>/.p37/p37d.sock；相对路径相对仓库根，避免 CLI 与
+// daemon 因 cwd 不同而连接到不同 socket。
+func SocketPath(root string, cfg Config) string {
+	p := cfg.Daemon.Socket
+	if p == "" {
+		return filepath.Join(root, ".p37", "p37d.sock")
+	}
+	if !filepath.IsAbs(p) {
+		return filepath.Join(root, p)
+	}
+	return p
 }
 
 // Save 写出配置（供 init 生成模板）。
@@ -242,7 +269,7 @@ func (c Config) StableOptions() (time.Duration, int) {
 // WarnDiskBytes 返回磁盘告警阈值（附录 B 的 workspace.warn_disk_bytes）。
 func (c Config) WarnDiskBytes() int64 {
 	if c.Workspace.WarnDiskBytes <= 0 {
-		return 50 << 30
+		return 12 << 30
 	}
 	return c.Workspace.WarnDiskBytes
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/chenyiwen/p37/internal/buildinfo"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
@@ -24,8 +25,8 @@ import (
 	"github.com/chenyiwen/p37/internal/workspace"
 )
 
-// Version 是实现的版本号。
-const Version = "0.1.0"
+// Version 是实现的版本号。必须保持为 var：发布构建通过 -X 注入。
+var Version = buildinfo.Version
 
 // Envelope 是统一返回信封。
 type Envelope struct {

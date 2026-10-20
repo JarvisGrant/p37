@@ -90,12 +90,18 @@ func TestRepoOptionsWiresEveryKnob(t *testing.T) {
 // TestDefaultConfigIsSane 钉住默认值（附录 B）。
 func TestDefaultConfigIsSane(t *testing.T) {
 	c := Default()
-	if c.Workspace.MaxActive != workspace.HardMaxActive {
-		t.Errorf("默认 max_active 应等于硬上限 %d，得到 %d",
-			workspace.HardMaxActive, c.Workspace.MaxActive)
+	// P36 的 L2 默认 20 GiB：默认值按「8 个活跃工作区」收敛，硬上限仍是 64。
+	if c.Workspace.MaxActive != 8 {
+		t.Errorf("默认 max_active = %d，期望 8", c.Workspace.MaxActive)
 	}
-	if got := c.WarnDiskBytes(); got != 50<<30 {
-		t.Errorf("默认 warn_disk_bytes = %d", got)
+	if c.Workspace.MaxActive > workspace.HardMaxActive {
+		t.Errorf("默认 max_active 超过硬上限 %d", workspace.HardMaxActive)
+	}
+	if c.Workspace.BaseCacheBytes != 4<<30 {
+		t.Errorf("默认 base_cache_bytes = %d，期望 4 GiB", c.Workspace.BaseCacheBytes)
+	}
+	if got := c.WarnDiskBytes(); got != 12<<30 {
+		t.Errorf("默认 warn_disk_bytes = %d，期望 12 GiB", got)
 	}
 	if c.LogLevel() != "info" {
 		t.Errorf("默认 log_level = %q", c.LogLevel())

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -16,34 +17,71 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chenyiwen/p37/internal/buildinfo"
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/mcpsrv"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/remotesync"
 	"github.com/chenyiwen/p37/internal/repo"
+	"github.com/chenyiwen/p37/internal/repolock"
 	"github.com/chenyiwen/p37/internal/watch"
 )
 
 func main() {
 	var (
-		repoRoot  = flag.String("repo", "", "仓库容器目录（必填）")
-		serveHTTP = flag.Bool("http", false, "额外监听 HTTP（需配置 auth_token）")
-		version   = flag.Bool("version", false, "打印版本")
+		repoRoot       = flag.String("repo", "", "仓库容器目录（daemon/check/stdio 必填）")
+		serveHTTP      = flag.Bool("http", false, "额外监听 HTTP（需配置 auth_token）")
+		version        = flag.Bool("version", false, "打印版本")
+		stdio          = flag.Bool("stdio", false, "作为 stdio MCP 代理连接现有 daemon（不取仓库锁）")
+		check          = flag.Bool("check", false, "健康检查（不取仓库锁）")
+		jsonOut        = flag.Bool("json", false, "--check 输出 JSON")
+		strict         = flag.Bool("strict", false, "--check 将 ext4 等部署项视为必需")
+		connectTimeout = flag.Duration("connect-timeout", 15*time.Second,
+			"--stdio 等待 daemon socket 的时长")
 	)
 	flag.Parse()
 
 	if *version {
-		fmt.Printf("p37d %s\n", mcpsrv.Version)
+		printVersion(os.Stdout)
 		return
 	}
-	if *repoRoot == "" {
-		fmt.Fprintln(os.Stderr, "用法: p37d --repo <root> [--http]")
+
+	if *stdio && *check {
+		fmt.Fprintln(os.Stderr, "--stdio 与 --check 不能同时使用")
 		os.Exit(2)
 	}
-	if err := runDaemon(*repoRoot, *serveHTTP); err != nil {
-		fmt.Fprintf(os.Stderr, "p37d: %v\n", err)
-		os.Exit(1)
+	if *stdio && *serveHTTP {
+		fmt.Fprintln(os.Stderr, "--stdio 只连接已有 daemon，不能再开 --http")
+		os.Exit(2)
 	}
+
+	if *repoRoot == "" {
+		fmt.Fprintln(os.Stderr,
+			"用法: p37d --repo <root> [--http]\n"+
+				"      p37d --check --repo <root> [--json] [--strict]\n"+
+				"      p37d --stdio --repo <root> [--connect-timeout 15s]")
+		os.Exit(2)
+	}
+
+	switch {
+	case *check:
+		os.Exit(runCheck(*repoRoot, *jsonOut, *strict, os.Stdout, os.Stderr))
+	case *stdio:
+		if err := runStdio(*repoRoot, *connectTimeout, os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "p37d: %v\n", err)
+			os.Exit(1)
+		}
+	default:
+		if err := runDaemon(*repoRoot, *serveHTTP); err != nil {
+			fmt.Fprintf(os.Stderr, "p37d: %v\n", err)
+			os.Exit(1)
+		}
+	}
+}
+
+func printVersion(out io.Writer) {
+	fmt.Fprintf(out, "p37d version=%s commit=%s buildTime=%s goVersion=%s\n",
+		buildinfo.Version, buildinfo.Commit, buildinfo.BuildTime, buildinfo.GoVersion)
 }
 
 func runDaemon(root string, serveHTTP bool) error {
@@ -54,15 +92,14 @@ func runDaemon(root string, serveHTTP bool) error {
 
 	// 1. 取仓库排他锁（§11.1）。
 	lockPath := filepath.Join(root, ".p37", "lock")
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := repolock.TryExclusive(lockPath)
 	if err != nil {
-		return fmt.Errorf("打开锁文件失败: %w", err)
+		if errors.Is(err, repolock.ErrBusy) {
+			return fmt.Errorf("已有 p37d 实例持有 %s", lockPath)
+		}
+		return fmt.Errorf("获取仓库锁 %s 失败: %w", lockPath, err)
 	}
-	defer func() { _ = lock.Close() }()
-	if err := flockExclusive(lock); err != nil {
-		return fmt.Errorf("已有 p37d 实例持有 %s（%w）", lockPath, err)
-	}
-	defer func() { _ = flockRelease(lock) }()
+	defer func() { _ = lock.Release() }()
 
 	// 2. 打开仓库（内部会做格式校验与 land 修复，§7.7）。
 	repoOpt := cfg.RepoOptions()
@@ -136,10 +173,7 @@ func runDaemon(root string, serveHTTP bool) error {
 		cfg.Workspace.Debounce, cfg.Workspace.ScanInterval)
 
 	// 4. 监听。
-	sockPath := cfg.Daemon.Socket
-	if sockPath == "" {
-		sockPath = filepath.Join(root, ".p37", "p37d.sock")
-	}
+	sockPath := config.SocketPath(root, cfg)
 	_ = os.Remove(sockPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		_ = r.Close()

@@ -56,15 +56,21 @@ p37 status /srv/repo
 p37 doctor /srv/repo                  # 部署自检
 p37 gc /srv/repo --prune --pack       # 保留策略 + 回收 + 小对象打包（§9 P2）
 
-# 起 daemon，agent 通过 MCP 连接
+# 起 daemon（常驻进程，持有仓库排他锁）
 p37d --repo /srv/repo
 ```
 
-agent 侧 MCP 配置（unix socket）：
+agent 侧 MCP 配置（stdio 代理 → 同仓库 daemon 的 unix socket）：
 
 ```json
-{ "mcpServers": { "p37": { "command": "p37d", "args": ["--repo", "/srv/repo"] } } }
+{ "mcpServers": { "p37": {
+    "command": "p37d",
+    "args": ["--stdio", "--repo", "/srv/repo"] } } }
 ```
+
+> `p37d --repo` 是 daemon，不是 stdio MCP server。MCP 客户端必须加
+> `--stdio`（P36 实例内用稳定包装 `/usr/local/bin/p37-mcp`）。stdio 代理
+> 只连接已有 daemon，不取仓库锁，也不会自动启动第二个 daemon。
 
 HTTP 模式（**必须**配置 `auth_token`）：
 
@@ -74,6 +80,52 @@ HTTP 模式（**必须**配置 `auth_token`）：
     "url": "http://127.0.0.1:7757/mcp",
     "headers": { "Authorization": "Bearer <auth_token>" } } } }
 ```
+
+## P36 microVM 部署
+
+P36 的 L0/L1 只读，L2 每实例可写。p37/p37d **不烙进镜像**：宿主投递一块只读
+ext4 小盘（label `P37PAYLOAD`），实例内的稳定脚本挂到 `/run/p37-payload` 后
+执行。仓库固定在 `/srv/repo`，工作区用 OverlayFS；p37d 以非 root 用户 `p36`
+运行，systemd 只授予 `CAP_SYS_ADMIN`。
+
+```bash
+make release VERSION=0.1.0       # 发布 tar + sha256
+make p36-bootstrap               # L0 胶水：p37-run/p37-mcp/p37-mount/...
+```
+
+payload 布局、systemd unit、L2 前置、升级与已知限制见
+[`packaging/p36/README.md`](packaging/p36/README.md)。部署自检用
+`p37d --check --strict --repo /srv/repo [--json]`（0=通过，1=必需项失败，
+2=用法），systemd/监控可直接消费退出码。
+
+### 默认配置（20GB L2）
+
+| 配置 | 默认值 | 说明 |
+|---|---:|---|
+| `workspace.base_cache_bytes` | 4 GiB | overlay 基底缓存上限 |
+| `workspace.warn_disk_bytes` | 12 GiB | 剩余空间低于此值时 doctor/check 告警 |
+| `workspace.max_active` | 8 | 活跃工作区默认上限（硬上限仍是 64） |
+
+P36 模板显式写 `materialize = "overlay"`：20GB 盘上静默回退 copy 会迅速耗尽
+磁盘，因此宁可让启动失败并要求修复 OverlayFS。
+
+本轮适配**不改变仓库格式**：`format_ver` 仍为 1，无需 `p37 migrate`；配置新增
+项都是可选的，旧仓库直接打开即可。
+
+## 维护窗口
+
+`p37 gc` 会删除对象；daemon 的 `landMu` 只在 daemon 进程内有效，CLI 与
+daemon 同时跑没有共享锁。因此：
+
+```bash
+systemctl stop p37d
+p37 gc /srv/repo --prune --pack
+systemctl start p37d
+```
+
+`p37 gc` 检测到同仓库 daemon 持锁时会拒绝执行；`--force` 是显式逃生口，
+会打印警告，不推荐在线使用。`fsck`、`migrate`、`import` 等写命令也应在
+维护窗口执行。在线 GC 尚未实现。
 
 ## 工作方式
 
@@ -146,10 +198,16 @@ p37 sync /srv/repo status --remote
 |---|---|
 | [`PROGRESS.md`](PROGRESS.md) | 实现进度、已知缺口、规格修正记录 |
 | [`VERIFY.md`](VERIFY.md) | 真机（Ubuntu + ext4）验证清单 |
+| [`packaging/p36/`](packaging/p36/) | P36 microVM 部署包、payload 布局、升级与集成字段 |
 
 ## 安全
 
 - HTTP 模式**强制** Bearer token；未配置时 fail-closed。
+- unix socket 权限为 `0600`；`p37d --stdio` 只走该 socket，不额外引入 token。
+- 发布物只含 `p37`、`p37d`、`manifest.json`，不含配置或密钥；S3 凭据只从
+  环境变量读取。
+- 所有可写状态只落在仓库根下；引导脚本把 `TMPDIR` 指到
+  `/srv/repo/.p37/tmp`，p37/p37d 不做自更新。
 - 仓库元数据与工作区目录权限为 `0700`，数据库文件 `0600`。
 - 物化与重放**绝不穿过符号链接**（`internal/safefs`）：工作区里由 agent 创建的
   恶意链接无法把写入引到仓库之外。

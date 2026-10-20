@@ -1,0 +1,39 @@
+# P36 实例（20 GiB L2）的 p37 配置模板。
+#
+# 首次启动时由 p37-run 传给：
+#   p37 init --if-missing --config /usr/local/share/p37/config.toml /srv/repo
+# 已存在的仓库不会被覆盖。
+#
+# 注意：这里不要写 auth_token、S3 密钥或任何凭据。HTTP 模式默认关闭；
+# 如确实要开，token 应由实例侧注入，而不是随 L0/发布物分发。
+
+[repo]
+format_ver = 1
+
+[workspace]
+# P36 工作区必须走 OverlayFS；20 GiB 的 L2 承受不了 copy 模式。
+materialize = "overlay"
+# 4 GiB 基底缓存；超出后 LRU 淘汰。
+base_cache_bytes = 4294967296
+# 剩余空间低于 12 GiB 时 doctor/check 告警。
+warn_disk_bytes = 12884901888
+# 20 GiB L2 上默认 8 个活跃工作区；硬上限仍是 64。
+max_active = 8
+scan_interval = "30s"
+debounce = "500ms"
+
+[daemon]
+# socket 默认 <root>/.p37/p37d.sock；P36 的 root 是 /srv/repo。
+# 要改路径时再显式写 socket = "..."
+# HTTP 默认关闭：MCP 客户端与 daemon 同实例，优先 unix socket。
+listen_http = false
+log_level = "info"
+
+[retention]
+keep_versions = 200
+keep_epochs = 20
+epoch_size = 50
+
+[gc]
+scrub_sample = 0.01
+verify_on_read = "sample"

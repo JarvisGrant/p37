@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyiwen/p37/internal/buildinfo"
 	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/repo"
+	"github.com/chenyiwen/p37/internal/repolock"
 	"github.com/chenyiwen/p37/internal/tree"
 	"github.com/chenyiwen/p37/internal/workspace"
 )
@@ -30,13 +32,15 @@ const usage = `p37 —— AI 原生版本控制系统
   p37 <命令> [参数]
 
 初始化与运维：
-  init <root>                     创建空仓库
+  init <root> [--if-missing] [--config <file>]
+                                  创建空仓库；--if-missing 幂等；--config 首次模板
   import <root> <srcdir>          把目录树作为 v0 导入
   status <root>                   打印仓库摘要
   doctor <root>                   运行部署自检（附录 G.4）
   fsck <root>                     校验对象完整性与封闭性
-  gc <root> [--prune] [--scrub] [--pack] [--report-roots] [--workspaces]
-                                  保留策略 + 对象回收 + 抽样校验
+  gc <root> [--prune] [--scrub] [--pack] [--report-roots] [--workspaces] [--force]
+                                  保留策略 + 对象回收 + 抽样校验；
+                                  daemon 持锁时拒绝（--force 才能跳过）
   migrate <root>                  向前迁移 format_ver
   ignore-check <root> <path>      检查某路径是否被忽略
 
@@ -85,8 +89,14 @@ func run(args []string, out, errw io.Writer) int {
 		fmt.Fprint(out, usage)
 		return 0
 	case "version", "-v", "--version":
-		fmt.Fprintf(out, "p37 %s (format_ver=%d)\n", version, formatVer)
+		printVersion(out)
 		return 0
+	}
+
+	// init 的参数里既有 root 也有 flag，不能按「第一个位置参数就是 root」
+	// 的统一规则处理。
+	if cmd == "init" {
+		return cmdInit(rest, out, errw)
 	}
 
 	if len(rest) == 0 {
@@ -96,8 +106,6 @@ func run(args []string, out, errw io.Writer) int {
 	root := rest[0]
 
 	switch cmd {
-	case "init":
-		return cmdInit(root, out, errw)
 	case "import":
 		if len(rest) < 2 {
 			fmt.Fprintln(errw, "import 需要 <srcdir>")
@@ -150,10 +158,13 @@ func run(args []string, out, errw io.Writer) int {
 	}
 }
 
-const (
-	version   = "0.1.0"
-	formatVer = 1
-)
+const formatVer = meta.FormatVer
+
+// printVersion 输出稳定、可解析的一行构建信息。
+func printVersion(out io.Writer) {
+	fmt.Fprintf(out, "p37 version=%s commit=%s buildTime=%s goVersion=%s formatVer=%d\n",
+		buildinfo.Version, buildinfo.Commit, buildinfo.BuildTime, buildinfo.GoVersion, formatVer)
+}
 
 // openRepo 按 root 的 config.toml 打开仓库。
 func openRepo(root string) (*repo.Repo, error) {
@@ -169,11 +180,95 @@ func fail(errw io.Writer, err error) int {
 	return 1
 }
 
-func cmdInit(root string, out, errw io.Writer) int {
-	cfg := config.Default()
-	cfg.Daemon.Socket = filepath.Join(root, ".p37", "p37d.sock")
+// cmdInit 支持：
+//
+//	init <root>                      创建空仓库
+//	init <root> --if-missing         仓库已存在时返回 0，且绝不改写 config
+//	init <root> --config <file>      首次初始化使用配置模板
+//
+// flag 可以出现在 root 前后，方便引导脚本按需拼装。
+func cmdInit(args []string, out, errw io.Writer) int {
+	ifMissing := false
+	template := ""
+	root := ""
 
-	r, err := repo.Init(root, repo.Options{Materialize: mountmgr.ModeAuto})
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--if-missing":
+			ifMissing = true
+		case a == "--config":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errw, "--config 需要 <file>")
+				return 2
+			}
+			template = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--config="):
+			template = strings.TrimPrefix(a, "--config=")
+		case a == "-h" || a == "--help":
+			fmt.Fprint(out, usage)
+			return 0
+		case strings.HasPrefix(a, "-"):
+			fmt.Fprintf(errw, "未知参数 %q\n", a)
+			return 2
+		default:
+			if root != "" {
+				fmt.Fprintf(errw, "init 只接受一个 <root>，多余参数 %q\n", a)
+				return 2
+			}
+			root = a
+		}
+	}
+	if root == "" {
+		fmt.Fprintln(errw, "init 需要 <root>")
+		return 2
+	}
+
+	dbPath := filepath.Join(root, ".p37", "p37.db")
+	cfgPath := config.Path(root)
+
+	// 幂等模式：仓库已存在就原样返回，连模板都不读，避免覆盖现有配置。
+	if _, err := os.Stat(dbPath); err == nil {
+		if ifMissing {
+			fmt.Fprintf(out, "仓库已存在，跳过初始化: %s\n", root)
+			return 0
+		}
+		return fail(errw, fmt.Errorf("%w: %s", repo.ErrAlreadyInitialized, root))
+	}
+
+	// 只有 config 没有 db 的半初始化仓库：拒绝覆盖，避免把用户配置冲掉。
+	if ifMissing {
+		if _, err := os.Stat(cfgPath); err == nil {
+			return fail(errw, fmt.Errorf(
+				"仓库不完整：%s 存在但 %s 缺失；拒绝覆盖现有配置", cfgPath, dbPath))
+		}
+	}
+
+	cfg := config.Default()
+	if template != "" {
+		loaded, err := config.LoadTemplate(template)
+		if err != nil {
+			return fail(errw, fmt.Errorf("读取配置模板 %s: %w", template, err))
+		}
+		cfg = loaded
+	}
+	if cfg.Repo.FormatVer != 0 && cfg.Repo.FormatVer != formatVer {
+		return fail(errw, fmt.Errorf(
+			"配置模板 format_ver=%d，本程序支持 %d", cfg.Repo.FormatVer, formatVer))
+	}
+	cfg.Repo.FormatVer = formatVer
+
+	// 模板没写 socket 时补默认值；相对路径统一相对仓库根，避免 daemon 的
+	// cwd 不同导致监听位置漂移。
+	switch {
+	case cfg.Daemon.Socket == "":
+		cfg.Daemon.Socket = filepath.Join(root, ".p37", "p37d.sock")
+	case !filepath.IsAbs(cfg.Daemon.Socket):
+		cfg.Daemon.Socket = filepath.Join(root, cfg.Daemon.Socket)
+	}
+
+	r, err := repo.Init(root, repo.Options{Materialize: cfg.MountMode()})
 	if err != nil {
 		return fail(errw, err)
 	}
@@ -427,13 +522,7 @@ func cmdFsck(root string, out, errw io.Writer) int {
 }
 
 func cmdGC(root string, args []string, out, errw io.Writer) int {
-	r, err := openRepo(root)
-	if err != nil {
-		return fail(errw, err)
-	}
-	defer func() { _ = r.Close() }()
-
-	prune, scrub, workspacesOnly, rootsOnly, pack := false, false, false, false, false
+	prune, scrub, workspacesOnly, rootsOnly, pack, force := false, false, false, false, false, false
 	for _, a := range args {
 		switch a {
 		case "--prune":
@@ -446,11 +535,40 @@ func cmdGC(root string, args []string, out, errw io.Writer) int {
 			rootsOnly = true
 		case "--pack":
 			pack = true
+		case "--force":
+			force = true
 		default:
 			fmt.Fprintf(errw, "未知参数 %q\n", a)
 			return 2
 		}
 	}
+
+	// GC 会删对象，而 daemon 的 landMu 只在本进程内有效。CLI 与 daemon
+	// 同时跑时没有共享的 landMu，必须在入口处拒绝。锁要一直持到 GC 结束，
+	// 这样 daemon 也不能在 GC 中途启动。
+	if force {
+		fmt.Fprintln(errw,
+			"警告: --force 跳过了仓库锁检查；daemon 同时运行时可能误删对象。")
+	} else if _, err := os.Stat(filepath.Join(root, ".p37")); err == nil {
+		lock, err := repolock.TryExclusive(filepath.Join(root, ".p37", "lock"))
+		if errors.Is(err, repolock.ErrBusy) {
+			fmt.Fprintln(errw,
+				"错误: 检测到同仓库的 p37d 正在运行（.p37/lock 被占用），GC 已拒绝。")
+			fmt.Fprintln(errw,
+				"      请先停止 p37d（维护窗口），或确认风险后使用 --force。")
+			return 1
+		}
+		if err != nil {
+			return fail(errw, fmt.Errorf("获取仓库锁失败: %w", err))
+		}
+		defer func() { _ = lock.Release() }()
+	}
+
+	r, err := openRepo(root)
+	if err != nil {
+		return fail(errw, err)
+	}
+	defer func() { _ = r.Close() }()
 
 	if workspacesOnly {
 		return gcWorkspaces(r, root, prune, out, errw)

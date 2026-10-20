@@ -2,20 +2,7 @@
 
 package main
 
-import (
-	"os"
-	"syscall"
-)
-
-// flockExclusive 对文件取排他锁（非阻塞）。
-func flockExclusive(f *os.File) error {
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-}
-
-// flockRelease 释放锁。
-func flockRelease(f *os.File) error {
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-}
+import "os"
 
 // maxUserWatches 返回 inotify 的 watch 上限；非 Linux 返回错误表示不适用。
 func maxUserWatches() (int, error) {

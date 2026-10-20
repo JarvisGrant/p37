@@ -75,7 +75,7 @@ type Manager struct {
 // New 创建 Manager。repoRoot 是仓库容器目录。
 func New(repoRoot string, opt Options) (*Manager, error) {
 	if opt.BaseCacheBytes <= 0 {
-		opt.BaseCacheBytes = 20 << 30
+		opt.BaseCacheBytes = 4 << 30
 	}
 	m := &Manager{
 		repoRoot: repoRoot,

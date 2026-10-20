@@ -58,13 +58,3 @@ func maxUserWatches() (int, error) {
 	}
 	return n, nil
 }
-
-// flockExclusive 对文件取排他锁（daemon 用）。
-func flockExclusive(f *os.File) error {
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-}
-
-// flockRelease 释放锁。
-func flockRelease(f *os.File) error {
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-}

@@ -30,6 +30,28 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## P36 可部署性适配（本轮）
+
+目标：把 p37 做成 P36 microVM 里“实例启动即有”的版本控制工具，同时**不改
+仓库格式与核心版本控制语义**。`format_ver` 仍为 1，`p37 migrate` 没有新增
+迁移路径；改动集中在外围。
+
+| 改动 | 落点 |
+|---|---|
+| 构建信息可注入 | `internal/buildinfo`；`p37`/`p37d --version` 输出 `version/commit/buildTime/goVersion`；修掉此前 `-X` 打在 `const` 上静默失效的问题 |
+| 静态发布物 | `make release` 产出 `dist/p37-linux-amd64-<version>.tar.gz`（根目录只有 `p37`/`p37d`/`manifest.json`）与 `.sha256` |
+| stdio MCP 代理 | `internal/mcpstdio` + `p37d --stdio`：连接同仓库 daemon 的 unix socket，不取仓库锁、不启动 daemon；多客户端各自独立 session |
+| 幂等初始化 | `p37 init --if-missing`、`p37 init --config <file>`；已有仓库绝不覆盖 config |
+| 部署健康检查 | `internal/health` + `p37d --check [--json] [--strict]`；可写/ext4/同 FS/OverlayFS/inotify/磁盘/daemon 状态 |
+| GC 维护保护 | `internal/repolock`；daemon 持锁时 `p37 gc` 拒绝，`--force` 才显式跳过 |
+| 默认值适配 20GB L2 | `base_cache_bytes=4 GiB`、`warn_disk_bytes=12 GiB`、`max_active=8`（硬上限仍 64） |
+| P36 部署包 | `packaging/p36/`：`p37d.service`、`p37-run`、`p37-mcp`、`config.toml`、`p37-mount` Go 挂载助手 |
+
+测试新增：stdio 双客户端并发闭环、daemon 不在时的错误、init 幂等/模板、
+`--check` 退出码与 JSON、GC 拒绝、只读目录执行、工具名一致性。`go test ./...`
+全绿；linux/amd64 发布物由 `make release` 生成。仓库格式兼容性由既有
+`meta.FormatVer=1` 与黄金向量测试继续保证。
+
 ## 真机第二遍（S30–S34 + 采集提速）
 
 在 P36 实例（Ubuntu 26.04 / ext4 / overlay，2 vCPU / 1 GiB）上按 `VERIFY.md` 又走了一遍

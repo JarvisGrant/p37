@@ -121,3 +121,44 @@ p37 status /srv/repo      # 期望：head 要么是旧值要么是新值，无�
 | **换 lower 重挂**的实际行为 | 决定 `ws_rebase`（§4.9.2）的实现是否需要改 | §4.9.2 |
 | `CAP_SYS_ADMIN` 下的挂载语义 | 决定附录 G.2 采用方案 A 还是 B | 附录 G.2 |
 | 真实代码库上的 **place 命中率** | M2 出口指标（≥95%） | §16 |
+
+## 6. P36 部署验收（本轮新增）
+
+前置：L2 的 `/srv/repo` 为 ext4、属主 `p36:p36`；宿主已投递 label
+`P37PAYLOAD` 的只读 ext4 盘；`p37d.service` 使用 `User=p36` +
+`AmbientCapabilities=CAP_SYS_ADMIN`。
+
+```bash
+# 6.1 从只读 payload 执行（不要先 cp 到可写目录）
+/run/p37-payload/p37 --version
+/run/p37-payload/p37d --version
+
+# 6.2 健康检查：0=通过，1=必需项失败，2=用法
+/run/p37-payload/p37d --check --strict --repo /srv/repo
+/run/p37-payload/p37d --check --strict --json --repo /srv/repo | jq .
+
+# 6.3 幂等 init（第二次必须返回 0 且不改 config）
+/run/p37-payload/p37 init --if-missing --config /usr/local/share/p37/config.toml /srv/repo
+sha256sum /srv/repo/.p37/config.toml
+/run/p37-payload/p37 init --if-missing /srv/repo
+sha256sum /srv/repo/.p37/config.toml
+
+# 6.4 两个 agent 经 stdio 并发（MCP 客户端 command=/usr/local/bin/p37-mcp）
+#     各自 ws_open → 改文件 → ws_sync → ws_land，断言两个 ws_id 不同、
+#     两次 land 都成功、version_log 至少 3 个版本。
+
+# 6.5 重启恢复
+systemctl restart p37d
+findmnt -T /srv/repo/workspaces/<ws_id>     # 应为 overlay
+/run/p37-payload/p37 status /srv/repo
+
+# 6.6 GC 保护
+systemctl start p37d
+/run/p37-payload/p37 gc /srv/repo --prune; echo $?   # 期望非 0
+systemctl stop p37d
+/run/p37-payload/p37 gc /srv/repo --prune --pack     # 期望 0
+```
+
+验收记录请附：`p37d --check --json` 全文、`findmnt`、两个 stdio 客户端的
+`ws_id` 与 `version_log`、GC 拒绝的退出码与 stderr、`manifest.json` 与
+发布 tar 的 sha256。

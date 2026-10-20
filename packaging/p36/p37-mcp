@@ -1,0 +1,28 @@
+#!/bin/sh
+# p37-mcp —— MCP 客户端的 stdio 入口。
+#
+# 客户端配置：
+#   { "mcpServers": { "p37": { "command": "/usr/local/bin/p37-mcp" } } }
+#
+# 它只是 p37d --stdio 的稳定路径包装；不取仓库锁，也不启动 daemon。
+set -eu
+
+REPO=${P37_REPO:-/srv/repo}
+MNT=${P37_PAYLOAD_MOUNT:-/run/p37-payload}
+
+TMPDIR=${TMPDIR:-$REPO/.p37/tmp}
+export TMPDIR
+mkdir -p "$TMPDIR" 2>/dev/null || true
+
+# p37d.service 还没完成挂载时，短暂等一下；真正连不上 socket 由 --stdio 自己重试。
+i=0
+while [ ! -x "$MNT/p37d" ] && [ "$i" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.2
+done
+if [ ! -x "$MNT/p37d" ]; then
+    echo "p37-mcp: $MNT/p37d 不存在；p37d.service 是否已启动？" >&2
+    exit 1
+fi
+
+exec "$MNT/p37d" --stdio --repo "$REPO"

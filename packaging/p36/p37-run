@@ -1,0 +1,62 @@
+#!/bin/sh
+# p37-run —— P36 实例内的稳定引导脚本。
+#
+# 契约：
+#   1. 按 ext4 label 等宿主投递的只读小盘；
+#   2. 只读挂载到 /run/p37-payload（由 systemd RuntimeDirectory 创建）；
+#   3. 校验 p37/p37d/manifest；
+#   4. 首次启动幂等 init；
+#   5. exec p37d。
+#
+# 改动此脚本意味着要重建 L0；日常升级 p37 只换 P37PAYLOAD 盘并重启实例。
+set -eu
+
+REPO=${P37_REPO:-/srv/repo}
+MNT=${P37_PAYLOAD_MOUNT:-/run/p37-payload}
+LABEL=${P37_PAYLOAD_LABEL:-P37PAYLOAD}
+CONFIG=${P37_CONFIG:-/usr/local/share/p37/config.toml}
+MOUNTER=${P37_MOUNTER:-/usr/local/bin/p37-mount}
+
+mkdir -p "$MNT"
+"$MOUNTER" --label "$LABEL" --target "$MNT" --timeout 20s
+
+for f in p37 p37d manifest.json; do
+    if [ ! -e "$MNT/$f" ]; then
+        echo "p37-run: 投递盘缺少 $f（label=$LABEL）" >&2
+        exit 1
+    fi
+done
+if [ ! -x "$MNT/p37" ] || [ ! -x "$MNT/p37d" ]; then
+    echo "p37-run: p37/p37d 不可执行" >&2
+    exit 1
+fi
+
+# manifest 的 version 必须与二进制自报一致，避免宿主换盘/缓存串版本。
+want=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MNT/manifest.json" | head -n 1)
+if [ -z "$want" ]; then
+    echo "p37-run: manifest.json 缺少 version" >&2
+    exit 1
+fi
+got=$("$MNT/p37d" --version)
+case "$got" in
+    *"version=$want "*) ;;
+    *)
+        echo "p37-run: 版本不一致：manifest=$want，p37d=$got" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$REPO/.p37/tmp"
+export TMPDIR="$REPO/.p37/tmp"
+
+if [ -r "$CONFIG" ]; then
+    "$MNT/p37" init --if-missing --config "$CONFIG" "$REPO"
+else
+    "$MNT/p37" init --if-missing "$REPO"
+fi
+
+# 在 fork 出 daemon 之前先做部署检查；失败时 systemd 会记录清晰原因，
+# 而不是让 daemon 在启动自检里才炸。
+"$MNT/p37d" --check --strict --repo "$REPO" >&2
+
+exec "$MNT/p37d" --repo "$REPO"
