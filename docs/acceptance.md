@@ -1,0 +1,30 @@
+# 验收清单（v0.2 / format_ver=2）
+
+自动化测试：`go test ./...`；并发回归：`go test -race ./internal/hub ./internal/repo ./internal/mcpsrv`。
+P36 真机验收：`go test -tags p36acceptance ./packaging/p36/acceptance -v`。
+
+| # | 场景 | 覆盖 |
+|---|---|---|
+| 1 | 多仓库创建/隔离/删除/重启恢复 | `internal/hub`、`internal/mcpsrv/multi_test.go` |
+| 2 | 命名线创建、land、main 不变、log/compare/graph、reset/protect | `internal/repo/line_v2_test.go` |
+| 3 | `ws_open(parent=line)` + `ws_land(target=line)` + 销毁重开 | `TestLineSessionLoopAndMerge`、`TestMultiRepoMCPLineLoop` |
+| 4 | 子任务 `ws_land_into`（含删除/编辑冲突） | `TestLandIntoWorkspace`、`TestLandIntoDeleteVsEditConflict` |
+| 5 | 会话 line 两回合 + 应用线合并 | `TestLineSessionLoopAndMerge` |
+| 6 | `line_merge` 双亲版本/冲突解决/幂等 | `TestMergeConflictPreviewAndResolve`、`TestLineMergeIdempotent` |
+| 7 | `version_tree/file/archive`、路径穿越、二进制 | `TestVersionReadAPIs` |
+| 8 | Web 编辑 = 专用 workspace + line land | 同 3 |
+| 9 | 目录远端 push/prune/restore、DAG 恢复 | `TestSyncPushRestoreDir` |
+| 10 | 多 repo 并行 land | `TestMultiRepoLandParallel` |
+| 11 | land 崩溃恢复（version/line head/integrating） | `internal/meta` reconcile + repo 测试 |
+| 12 | MCP stdio 真实客户端 / EOF | `internal/mcpstdio`（含 `TestProxyRespondsBeforeEOF`） |
+| 13 | copy/overlay、磁盘统计 | 既有 mount/workspace 测试、`ws_disk_usage` |
+| 14 | P36 新 VM / 多仓库会话 | `packaging/p36/acceptance`（`P37_ROOT`） |
+| 15 | 幂等/错误码/受保护 line/非祖先 reset | `idem_v2_test.go`、`line_v2_test.go`、MCP 测试 |
+
+## 已知未做/限制
+
+- 在线 GC 仍未实现；维护窗口 `p37 gc`。
+- 多 line push 目前为全量 checkpoint；单 line 可增量。
+- `line_reset` 的旧版本 7 天 grace 由 GC 的 reset 日志保留；尚无独立后台清理任务。
+- `sync_restore` 不恢复 workspace/lease；P34 重新 `ws_open`。
+- 同一 `remote_prefix` 只支持单写者；P34 需串行化同一 app 的 push。

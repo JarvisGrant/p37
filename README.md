@@ -63,7 +63,8 @@ p37d --root /srv/repos
 ```
 
 MCP 工具表与调用契约见 [`docs/mcp-contract.md`](docs/mcp-contract.md)；
-P34 接入示例见 [`docs/p34-integration.md`](docs/p34-integration.md)。
+P34 接入示例见 [`docs/p34-integration.md`](docs/p34-integration.md)；
+验收清单见 [`docs/acceptance.md`](docs/acceptance.md)。
 
 agent 侧 MCP 配置（stdio 代理 → 同仓库 daemon 的 unix socket）：
 
