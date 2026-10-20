@@ -92,6 +92,13 @@ func TestSyncPushRestoreDir(t *testing.T) {
 	if len(tree) == 0 {
 		t.Fatal("restored tree empty")
 	}
+	fv, err := r2.VersionFile("line:p34/session/s1", "f.txt", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fv.Size == 0 {
+		t.Fatal("restored file empty")
+	}
 	mh, err := r2.DB.LineHead("main")
 	if err != nil {
 		t.Fatal(err)

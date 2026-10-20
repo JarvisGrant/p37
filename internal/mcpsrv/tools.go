@@ -283,6 +283,9 @@ func (s *Server) resolveVersion(r *repo.Repo, id string) (hash.ID, error) {
 		if err == nil {
 			return h, nil
 		}
+		if errors.Is(err, meta.ErrAmbiguous) {
+			return hash.ID{}, coded("ambiguous_id", "版本前缀 %q 匹配到多个", id)
+		}
 	}
 	return hash.ID{}, coded("version_not_found", "非法版本 id %q", id)
 }
