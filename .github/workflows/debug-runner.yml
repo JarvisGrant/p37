@@ -10,29 +10,47 @@ jobs:
       - name: overlay capability probe
         run: |
           set -x
-          id
           sudo useradd -m -s /bin/bash p36 || true
-          sudo mkdir -p /tmp/ovl-p36/{lower,upper,work,mnt}
-          echo x | sudo tee /tmp/ovl-p36/lower/x >/dev/null
-          sudo chown -R p36:p36 /tmp/ovl-p36
           cat > /tmp/probe.py <<'PY'
-          import ctypes, os
-          target = "/tmp/ovl-p36/mnt"
+          import ctypes, os, sys
+          base = sys.argv[1]
+          extra = sys.argv[2] if len(sys.argv) > 2 else ""
+          target = os.path.join(base, "mnt")
           os.makedirs(target, exist_ok=True)
           libc = ctypes.CDLL(None, use_errno=True)
-          opts = b"lowerdir=/tmp/ovl-p36/lower,upperdir=/tmp/ovl-p36/upper,workdir=/tmp/ovl-p36/work"
+          opts = ("lowerdir=%s,upperdir=%s,workdir=%s" % (
+              os.path.join(base, "lower"), os.path.join(base, "upper"),
+              os.path.join(base, "work"))).encode()
+          if extra:
+              opts += b"," + extra.encode()
           r = libc.mount(b"overlay", target.encode(), b"overlay", 0, opts)
           e = ctypes.get_errno()
-          print("mount_rc", r, "errno", e, os.strerror(e) if e else "")
+          print("mount", base, extra, "rc", r, "errno", e, os.strerror(e) if e else "")
           if r == 0:
               libc.umount2(target.encode(), 2)
           PY
           chmod 0755 /tmp/probe.py
-          python3 /tmp/probe.py
+
+          sudo mkdir -p /tmp/ovl-tmp/{lower,upper,work,mnt}
+          echo x | sudo tee /tmp/ovl-tmp/lower/x >/dev/null
+          sudo chown -R p36:p36 /tmp/ovl-tmp
           sudo setpriv --reuid=p36 --regid=p36 --init-groups \
-            --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py || true
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py /tmp/ovl-tmp || true
           sudo setpriv --reuid=p36 --regid=p36 --init-groups \
-            --inh-caps=+sys_admin --ambient-caps=+sys_admin capsh --print | grep -E 'Current:|Ambient set|no-new-privs' || true
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py /tmp/ovl-tmp userxattr || true
+
+          truncate -s 256M /tmp/repo.ext4
+          sudo mkfs.ext4 -q -F /tmp/repo.ext4
+          sudo mkdir -p /tmp/repo-mnt
+          sudo mount -o loop /tmp/repo.ext4 /tmp/repo-mnt
+          sudo mkdir -p /tmp/repo-mnt/{lower,upper,work,mnt}
+          echo x | sudo tee /tmp/repo-mnt/lower/x >/dev/null
+          sudo chown -R p36:p36 /tmp/repo-mnt
+          sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py /tmp/repo-mnt || true
+          sudo setpriv --reuid=p36 --regid=p36 --init-groups \
+            --inh-caps=+sys_admin --ambient-caps=+sys_admin python3 /tmp/probe.py /tmp/repo-mnt userxattr || true
+          sudo umount /tmp/repo-mnt
       - name: systemd NNP ambient probe
         run: |
           set -x
