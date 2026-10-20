@@ -36,13 +36,13 @@ jobs:
       - name: systemd NNP ambient probe
         run: |
           set -x
-          sudo systemd-run --unit=p37probe-nnp --property=User=p36 \
+          sudo systemd-run --pipe --unit=p37probe-nnp --property=User=p36 \
             --property=AmbientCapabilities=CAP_SYS_ADMIN \
             --property=CapabilityBoundingSet=CAP_SYS_ADMIN \
-            --property=NoNewPrivileges=yes --wait --collect \
+            --property=NoNewPrivileges=yes \
             /bin/sh -c 'capsh --print | grep -E "Current:|Ambient set|no-new-privs"' || true
-          sudo systemd-run --unit=p37probe-nonnp --property=User=p36 \
+          sudo systemd-run --pipe --unit=p37probe-nonnp --property=User=p36 \
             --property=AmbientCapabilities=CAP_SYS_ADMIN \
             --property=CapabilityBoundingSet=CAP_SYS_ADMIN \
-            --property=NoNewPrivileges=no --wait --collect \
+            --property=NoNewPrivileges=no \
             /bin/sh -c 'capsh --print | grep -E "Current:|Ambient set|no-new-privs"' || true
