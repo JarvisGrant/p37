@@ -124,6 +124,15 @@ func Pull(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetch
 	if err != nil {
 		return nil, err
 	}
+	// 先按 ref 应用 line（包括新增的 session line），再做 default head 快进。
+	if ref, err := remote.GetRef(ctx); err == nil {
+		if _, err := ApplyLineRefs(r, ref); err != nil {
+			return nil, err
+		}
+		if h, ok, _ := r.Head(); ok {
+			res.LocalHead = h.String()
+		}
+	}
 	if res.UpToDate {
 		return res, nil
 	}
@@ -148,11 +157,7 @@ func Pull(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetch
 	if err := r.AdvanceHead(target, epochOf(r, target)); err != nil {
 		return nil, err
 	}
-	if ref, err := remote.GetRef(ctx); err == nil {
-		if _, err := ApplyLineRefs(r, ref); err != nil {
-			return nil, err
-		}
-	}
+
 	res.LocalHead = target.String()
 	res.FastForward = true
 	res.Ahead = 0

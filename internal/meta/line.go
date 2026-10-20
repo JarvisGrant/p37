@@ -198,7 +198,11 @@ func (d *DB) DefaultLine() (string, error) {
 // SetDefaultLine 修改默认 line（本轮工具层不暴露，供迁移/测试使用）。
 func (d *DB) SetDefaultLine(name string) error {
 	return d.withWrite(func(tx *sql.Tx) error {
-		_, err := tx.Exec(`UPDATE repo SET default_line=? WHERE id=1`, name)
+		var head string
+		if err := tx.QueryRow(`SELECT head FROM line WHERE name=? AND deleted_ts=0`, name).Scan(&head); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`UPDATE repo SET default_line=?, mainline_head=? WHERE id=1`, name, head)
 		return err
 	})
 }
