@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -92,7 +93,9 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(regPath, 0o600)
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)
-	return &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}}, nil
+	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}}
+	h.recoverRegistry()
+	return h, nil
 }
 
 // Root 返回多仓库根目录。
@@ -164,6 +167,7 @@ func (h *Hub) CreateEx(name, defaultLine, remoteKey, remotePrefix string) (*Entr
 	_ = os.Chmod(filepath.Join(path, ".p37"), 0o700)
 	// 把根配置作为该 repo 的默认配置落盘，后续 repo.Open 才能保持一致。
 	_ = config.Save(path, h.cfg)
+	_ = writeRepoMeta(path, repoMeta{ID: id, Name: name, DefaultLine: defaultLine})
 	return h.lookupLocked(id)
 }
 
@@ -188,6 +192,7 @@ func (h *Hub) Register(name, path, defaultLine string) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = writeRepoMeta(path, repoMeta{ID: id, Name: name, DefaultLine: defaultLine})
 	return h.lookupLocked(id)
 }
 
@@ -386,3 +391,46 @@ func (h *Hub) UpdateRemote(ref, remoteKey, remotePrefix string) error {
 
 // CleanName 供 CLI 诊断。
 func CleanName(s string) string { return strings.TrimSpace(s) }
+
+type repoMeta struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DefaultLine string `json:"default_line"`
+}
+
+func writeRepoMeta(path string, m repoMeta) error {
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(path, ".p37", "repo.json"), b, 0o600)
+}
+
+// recoverRegistry 在 registry 丢失时从各 repo 的 .p37/repo.json 重建。
+func (h *Hub) recoverRegistry() {
+	var n int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM repo`).Scan(&n); err != nil || n > 0 {
+		return
+	}
+	entries, err := os.ReadDir(h.root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		path := filepath.Join(h.root, e.Name())
+		b, err := os.ReadFile(filepath.Join(path, ".p37", "repo.json"))
+		if err != nil {
+			continue
+		}
+		var m repoMeta
+		if json.Unmarshal(b, &m) != nil || m.ID == "" || m.Name == "" {
+			continue
+		}
+		_, _ = h.db.Exec(
+			`INSERT OR IGNORE INTO repo(id,name,path,default_line,created_ts)
+			 VALUES(?,?,?,?,?)`, m.ID, m.Name, path, m.DefaultLine, time.Now().UnixMilli())
+	}
+}

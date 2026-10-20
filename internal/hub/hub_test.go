@@ -176,3 +176,42 @@ func TestMultiRepoLandParallel(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryRecovery(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	h, err := hub.New(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Create("a", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Create("b", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, ".p37", "registry.db")); err != nil {
+		t.Fatal(err)
+	}
+	for _, suf := range []string{"-wal", "-shm"} {
+		_ = os.Remove(filepath.Join(root, ".p37", "registry.db"+suf))
+	}
+	h2, err := hub.New(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h2.Close()
+	es, err := h2.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 2 {
+		t.Fatalf("recovered=%d", len(es))
+	}
+	if _, err := h2.Open("a"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -233,6 +233,11 @@ func (s *Server) registerSyncV2() {
 			if dry {
 				return map[string]any{"dry_run": true, "remote": 0, "local": 0}, nil
 			}
+			release, ok := rr.BeginSync()
+			if !ok {
+				return nil, coded("sync_in_progress", "该仓库已有同步在运行")
+			}
+			defer release()
 			remote, _, err := remoteFor(rr)
 			if err != nil {
 				return nil, err

@@ -734,7 +734,7 @@ func (s *Server) registerLand() {
 
 	s.register("ws_land",
 		"把工作区落地到命名 line 或直接父工作区。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"drop_workspace":{"type":"boolean"},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"},"expected_ws_ops_epoch":{"type":"integer"},"idempotency_key":{"type":"string"},"task":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"drop_workspace":{"type":"boolean"},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"},"expected_ws_ops_epoch":{"type":"integer"},"expected_parent_tree":{"type":"string"},"preview_id":{"type":"string"},"idempotency_key":{"type":"string"},"task":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
@@ -749,6 +749,7 @@ func (s *Server) registerLand() {
 				ExpectedParentTree string          `json:"expected_parent_tree"`
 				ExpectedWSTree     string          `json:"expected_ws_tree"`
 				ExpectedWSOpsEpoch int64           `json:"expected_ws_ops_epoch"`
+				PreviewID          string          `json:"preview_id"`
 				IdempotencyKey     string          `json:"idempotency_key"`
 				Task               string          `json:"task"`
 			}
@@ -768,7 +769,7 @@ func (s *Server) registerLand() {
 				if exp == "" {
 					exp = a.ExpectedHead
 				}
-				res, err := rr.LandInto(a.WsID, id, exp, "", a.IdempotencyKey)
+				res, err := rr.LandInto(a.WsID, id, exp, a.PreviewID, a.IdempotencyKey)
 				if err != nil {
 					return nil, err
 				}
@@ -933,6 +934,11 @@ func (s *Server) registerSync() {
 			if err != nil {
 				return nil, err
 			}
+			release, ok := rr.BeginSync()
+			if !ok {
+				return nil, coded("sync_in_progress", "该仓库已有同步在运行")
+			}
+			defer release()
 			cfg, _ := config.Load(rr.Root)
 			m, err := remotesync.Prepare(rr, cfg.RemoteOptions(), a.Force, a.Full)
 			if err != nil {
