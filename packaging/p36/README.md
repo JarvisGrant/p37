@@ -37,7 +37,7 @@ L2 /srv/repos（每实例可写 ext4；旧 /srv/repo 原地注册为 default）
 ```
 
 L2 必须预先把 `/srv/repos` 建成 `p36:p36` 可写（建议 `0750`）；p37d 以 `p36`
-运行，不做 root 提权。`/srv/repo` 与 `workspaces/`、`.p37/` 必须在同一个
+运行，不做 root 提权。`/srv/repos` 与 `workspaces/`、`.p37/` 必须在同一个
 ext4 上。
 
 `p37d.service` 有 `ConditionPathIsDirectory=/srv/repos`，所以 **`/srv/repos`
