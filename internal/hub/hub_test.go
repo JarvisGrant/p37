@@ -215,3 +215,25 @@ func TestRegistryRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConcurrentOpenSameRepo(t *testing.T) {
+	root := t.TempDir()
+	h, err := hub.New(root, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if _, err := h.Create("a", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	const n = 16
+	ch := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() { _, err := h.Open("a"); ch <- err }()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-ch; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

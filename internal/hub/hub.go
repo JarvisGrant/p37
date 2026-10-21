@@ -249,21 +249,20 @@ func scanEntry(s interface{ Scan(...any) error }) (*Entry, error) {
 
 // Open 打开（或复用）一个 repo。ref 可为 id 或 name。
 func (h *Hub) Open(ref string) (*repo.Repo, error) {
+	// 整个 open 过程持有 h.mu：同一 repo 的并发首次访问会等待第一个完成，
+	// 而不是第二个去抢 repolock 然后报「正被另一个进程持有」。
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if r := h.repos[ref]; r != nil {
-		h.mu.Unlock()
 		return r, nil
 	}
 	e, err := h.lookupLocked(ref)
 	if errors.Is(err, sql.ErrNoRows) {
-		h.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, ref)
 	}
 	if err != nil {
-		h.mu.Unlock()
 		return nil, err
 	}
-	h.mu.Unlock()
 
 	_ = os.Chmod(e.Path, 0o750)
 	_ = os.Chmod(filepath.Join(e.Path, ".p37"), 0o700)
@@ -286,9 +285,7 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 		h.markDegraded(e.ID, err)
 		return nil, err
 	}
-	h.mu.Lock()
 	if old := h.repos[e.ID]; old != nil {
-		h.mu.Unlock()
 		_ = r.Close()
 		_ = lock.Release()
 		return old, nil
@@ -296,7 +293,6 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	h.repos[e.ID] = r
 	h.repos[e.Name] = r
 	h.locks[e.ID] = lock
-	h.mu.Unlock()
 	return r, nil
 }
 
