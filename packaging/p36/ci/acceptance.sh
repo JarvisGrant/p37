@@ -196,7 +196,7 @@ as_app /usr/local/bin/p37 init "$LEGACY" --if-missing --config /usr/local/share/
 say "创建多仓库验收 repo"
 as_app /usr/local/bin/p37 --root "$ROOTDIR" repo create "$REPO_NAME" --json | tee repo-create.json
 REPO_DIR="$(as_app /usr/local/bin/p37 --root "$ROOTDIR" repo info "$REPO_NAME" --json | jq -r .path)"
-[ -n "$REPO_DIR" ] && [ -d "$REPO_DIR/.p37" ] || { echo "repo create 后 path 无效: $REPO_DIR"; exit 1; }
+[ -n "$REPO_DIR" ] && sudo test -d "$REPO_DIR/.p37" || { echo "repo create 后 path 无效: $REPO_DIR"; exit 1; }
 echo "REPO_DIR=$REPO_DIR"
 
 say "启动 systemd 服务"
