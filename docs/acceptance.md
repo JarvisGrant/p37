@@ -1,7 +1,15 @@
 # 验收清单（v0.2 / format_ver=2）
 
 自动化测试：`go test ./...`；并发回归：`go test -race ./internal/hub ./internal/repo ./internal/mcpsrv`。
-P36 真机验收：`go test -tags p36acceptance ./packaging/p36/acceptance -v`。
+P36 真机验收（多仓库）：
+
+```bash
+P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
+  bash packaging/p36/ci/acceptance.sh
+```
+
+脚本会创建 `/srv/repos`、初始化 legacy `/srv/repo`、创建 `accept` repo，
+并验证 legacy 自动注册为 `default`。
 
 | # | 场景 | 覆盖 |
 |---|---|---|
@@ -18,7 +26,7 @@ P36 真机验收：`go test -tags p36acceptance ./packaging/p36/acceptance -v`�
 | 11 | land 崩溃恢复（version/line head/integrating） | `internal/meta` reconcile + repo 测试 |
 | 12 | MCP stdio 真实客户端 / EOF | `internal/mcpstdio`（含 `TestProxyRespondsBeforeEOF`） |
 | 13 | copy/overlay、磁盘统计 | 既有 mount/workspace 测试、`ws_disk_usage` |
-| 14 | P36 新 VM / 多仓库会话 | `packaging/p36/acceptance`（`P37_ROOT`） |
+| 14 | P36 新 VM / 多仓库会话 / legacy default | `packaging/p36/acceptance` + `ci/acceptance.sh`（`P37_ROOT`） |
 | 15 | 幂等/错误码/受保护 line/非祖先 reset | `idem_v2_test.go`、`line_v2_test.go`、MCP 测试 |
 
 ## 已知未做/限制

@@ -155,6 +155,10 @@ sudo mkdir -p /dev/disk/by-label
 sudo ln -sfn "$LOOP" /dev/disk/by-label/P37PAYLOAD
 ls -l "$LOOP" /dev/disk/by-label/P37PAYLOAD
 
+# 在 service 启动前先把 payload 挂上：legacy init / repo create 需要 p37 CLI。
+sudo /usr/local/bin/p37-mount --label P37PAYLOAD --target /run/p37-payload --timeout 20s
+[ -x /run/p37-payload/p37 ] || { echo "payload 未挂载出 p37"; exit 1; }
+
 # 显式检查需要 CAP_SYS_ADMIN 才能 probe overlay；用 setpriv 模拟 unit 的
 # p36 + ambient CAP_SYS_ADMIN（NNP 由 systemd 服务本身覆盖）。
 as_p36_caps() {

@@ -200,3 +200,20 @@ root + overlay 是可选变体：`config-overlay.toml` +
 `findmnt`、两个 stdio 客户端的 `ws_id` 与 `version_log`、GC 拒绝的退出码与
 stderr、`manifest.json` 与发布 tar 的 sha256，以及 `ROOT_FALLBACK`/`NNP_FAILED`
 （默认都应为 0）。
+
+
+## v0.2 多仓库补充验收
+
+```bash
+# 维护/自检
+p37 --root /srv/repos repo list --json
+p37 --root /srv/repos --repo <name> doctor
+p37d --check --strict --root /srv/repos
+
+# legacy /srv/repo 自动注册
+p37 --root /srv/repos repo list | grep default
+
+# 多仓库会话（需要 MCP 客户端或 acceptance）
+P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
+  bash packaging/p36/ci/acceptance.sh
+```
