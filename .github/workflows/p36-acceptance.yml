@@ -74,7 +74,9 @@ jobs:
           P37_TAG: ${{ steps.meta.outputs.tag }}
           P37_ARTIFACT_DIR: ${{ github.workspace }}/dist/release
           P37_BOOTSTRAP_DIR: ${{ github.workspace }}/dist/p36-bootstrap
+          P37_ROOT: /srv/repos
           P37_REPO: /srv/repo
+          P37_REPO_NAME: accept
         run: |
           chmod +x packaging/p36/ci/acceptance.sh
           bash packaging/p36/ci/acceptance.sh

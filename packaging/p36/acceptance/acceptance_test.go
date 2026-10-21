@@ -31,6 +31,9 @@ type agentResult struct {
 }
 
 func repoRoot() string {
+	if v := os.Getenv("P37_REPO_DIR"); v != "" {
+		return v
+	}
 	if v := os.Getenv("P37_REPO"); v != "" {
 		return v
 	}
@@ -55,6 +58,12 @@ func startClient(t *testing.T, ctx context.Context) *mcp.ClientSession {
 	)
 	if v := os.Getenv("P37_ROOT"); v != "" {
 		env = append(env, "P37_ROOT="+v)
+	}
+	if v := os.Getenv("P37_REPO_DIR"); v != "" {
+		env = append(env, "P37_REPO_DIR="+v)
+	}
+	if v := os.Getenv("P37_REPO_NAME"); v != "" {
+		env = append(env, "P37_REPO_NAME="+v)
 	}
 	cmd.Env = env
 	cmd.Stderr = os.Stderr
@@ -280,6 +289,43 @@ func TestP36TwoAgents(t *testing.T) {
 		t.Fatalf("写 ws 列表: %v", err)
 	}
 	t.Logf("acceptance: MATERIALIZE=%s keeper=%s agents=%v versions=%d", keeperMaterialize, keeperID, results, len(raw.Data))
+}
+
+// TestP36LegacyDefault 验证旧 /srv/repo 被原地注册为 default。
+func TestP36LegacyDefault(t *testing.T) {
+	if os.Getenv("P37_ROOT") == "" {
+		t.Skip("P37_ROOT 未设置")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cs := startClient(t, ctx)
+	env, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "repo_list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Content) == 0 {
+		t.Fatal("repo_list 空响应")
+	}
+	txt := env.Content[0].(*mcp.TextContent).Text
+	var raw struct {
+		OK   bool `json:"ok"`
+		Data []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(txt), &raw); err != nil {
+		t.Fatalf("repo_list JSON: %v", err)
+	}
+	for _, e := range raw.Data {
+		if e.Name == "default" {
+			if e.Path == "" {
+				t.Fatal("default path 为空")
+			}
+			return
+		}
+	}
+	t.Fatalf("repo_list 没有 default: %s", txt)
 }
 
 // TestP36MultiRepoSession 在 P37_ROOT 模式下验证多仓库 + 会话 line 闭环。

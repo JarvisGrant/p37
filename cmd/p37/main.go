@@ -18,6 +18,7 @@ import (
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hash"
+	"github.com/chenyiwen/p37/internal/hub"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/repo"
@@ -30,6 +31,8 @@ const usage = `p37 —— AI 原生版本控制系统
 
 用法：
   p37 <命令> [参数]
+  p37 --root <root> repo <list|create|info|delete> ...   多仓库维护
+  p37 --root <root> --repo <id|name> <命令> [参数]       对指定 repo 执行
 
 初始化与运维：
   init <root> [--if-missing] [--config <file>]
@@ -67,6 +70,12 @@ const usage = `p37 —— AI 原生版本控制系统
   sync <root> pull                        fetch + 仅快进本地 head
   sync <root> prune [--local] [--remote]  清理已上传的本地包 / 远端旧包
 
+多仓库维护：
+  p37 --root /srv/repos repo list [--json]
+  p37 --root /srv/repos repo create <name> [--default-line main] [--json]
+  p37 --root /srv/repos repo info <id|name> [--json]
+  p37 --root /srv/repos repo delete <id|name> [--force]
+
 其它：
   version
   help
@@ -77,12 +86,17 @@ func main() {
 }
 
 func run(args []string, out, errw io.Writer) int {
-	if len(args) == 0 {
+	rootMode, rootDir, repoRef, rest, err := parseGlobal(args)
+	if err != nil {
+		fmt.Fprintf(errw, "%v\n\n%s", err, usage)
+		return 2
+	}
+	if len(rest) == 0 {
 		fmt.Fprint(errw, usage)
 		return 2
 	}
-	cmd := args[0]
-	rest := args[1:]
+	cmd := rest[0]
+	cmdArgs := rest[1:]
 
 	switch cmd {
 	case "help", "-h", "--help":
@@ -93,25 +107,91 @@ func run(args []string, out, errw io.Writer) int {
 		return 0
 	}
 
-	// init 的参数里既有 root 也有 flag，不能按「第一个位置参数就是 root」
-	// 的统一规则处理。
-	if cmd == "init" {
-		return cmdInit(rest, out, errw)
+	if rootMode {
+		if cmd == "repo" {
+			return cmdRepo(rootDir, cmdArgs, out, errw)
+		}
+		if cmd == "init" {
+			fmt.Fprintln(errw, "多仓库模式请用: p37 --root <root> repo create <name>")
+			return 2
+		}
+		if repoRef == "" {
+			fmt.Fprintln(errw, "多仓库模式必须提供 --repo <id|name>")
+			return 2
+		}
+		path, err := resolveRepoPath(rootDir, repoRef)
+		if err != nil {
+			return fail(errw, err)
+		}
+		return dispatch(cmd, path, cmdArgs, out, errw)
 	}
 
-	if len(rest) == 0 {
+	if cmd == "init" {
+		return cmdInit(cmdArgs, out, errw)
+	}
+	if len(cmdArgs) == 0 {
 		fmt.Fprintf(errw, "命令 %s 缺少 <root>\n\n%s", cmd, usage)
 		return 2
 	}
-	root := rest[0]
+	return dispatch(cmd, cmdArgs[0], cmdArgs[1:], out, errw)
+}
 
+// parseGlobal 解析命令前的 --root / --repo。其余参数原样返回。
+func parseGlobal(args []string) (rootMode bool, rootDir, repoRef string, rest []string, err error) {
+	rest = append([]string{}, args...)
+	for len(rest) > 0 {
+		a := rest[0]
+		switch {
+		case a == "--root" || a == "--repo":
+			if len(rest) < 2 {
+				return false, "", "", nil, fmt.Errorf("%s 需要参数", a)
+			}
+			if a == "--root" {
+				rootDir = rest[1]
+				rootMode = true
+			} else {
+				repoRef = rest[1]
+			}
+			rest = rest[2:]
+		case strings.HasPrefix(a, "--root="):
+			rootDir = strings.TrimPrefix(a, "--root=")
+			rootMode = true
+			rest = rest[1:]
+		case strings.HasPrefix(a, "--repo="):
+			repoRef = strings.TrimPrefix(a, "--repo=")
+			rest = rest[1:]
+		default:
+			return rootMode, rootDir, repoRef, rest, nil
+		}
+	}
+	return rootMode, rootDir, repoRef, rest, nil
+}
+
+func resolveRepoPath(rootDir, ref string) (string, error) {
+	cfg, err := config.Load(rootDir)
+	if err != nil {
+		return "", err
+	}
+	h, err := hub.New(rootDir, cfg)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = h.Close() }()
+	e, err := h.Get(ref)
+	if err != nil {
+		return "", err
+	}
+	return e.Path, nil
+}
+
+func dispatch(cmd, root string, args []string, out, errw io.Writer) int {
 	switch cmd {
 	case "import":
-		if len(rest) < 2 {
+		if len(args) < 1 {
 			fmt.Fprintln(errw, "import 需要 <srcdir>")
 			return 2
 		}
-		return cmdImport(root, rest[1], out, errw)
+		return cmdImport(root, args[0], out, errw)
 	case "status":
 		return cmdStatus(root, out, errw)
 	case "doctor":
@@ -119,39 +199,39 @@ func run(args []string, out, errw io.Writer) int {
 	case "fsck":
 		return cmdFsck(root, out, errw)
 	case "gc":
-		return cmdGC(root, rest[1:], out, errw)
+		return cmdGC(root, args, out, errw)
 	case "migrate":
 		return cmdMigrate(root, out, errw)
 	case "ignore-check":
-		if len(rest) < 2 {
+		if len(args) < 1 {
 			fmt.Fprintln(errw, "ignore-check 需要 <path>")
 			return 2
 		}
-		return cmdIgnoreCheck(root, rest[1], out, errw)
+		return cmdIgnoreCheck(root, args[0], out, errw)
 	case "ws-open":
-		return cmdWSOpen(root, rest[1:], out, errw)
+		return cmdWSOpen(root, args, out, errw)
 	case "ws-list":
 		return cmdWSList(root, out, errw)
 	case "ws-info":
-		return cmdWSInfo(root, rest[1:], out, errw)
+		return cmdWSInfo(root, args, out, errw)
 	case "ws-sync":
-		return cmdWSSync(root, rest[1:], out, errw)
+		return cmdWSSync(root, args, out, errw)
 	case "ws-diff":
-		return cmdWSDiff(root, rest[1:], out, errw)
+		return cmdWSDiff(root, args, out, errw)
 	case "ws-land":
-		return cmdWSLand(root, rest[1:], out, errw)
+		return cmdWSLand(root, args, out, errw)
 	case "ws-drop":
-		return cmdWSDrop(root, rest[1:], out, errw)
+		return cmdWSDrop(root, args, out, errw)
 	case "log":
-		return cmdLog(root, rest[1:], out, errw)
+		return cmdLog(root, args, out, errw)
 	case "show":
-		return cmdShow(root, rest[1:], out, errw)
+		return cmdShow(root, args, out, errw)
 	case "revert":
-		return cmdRevert(root, rest[1:], out, errw)
+		return cmdRevert(root, args, out, errw)
 	case "blame":
-		return cmdBlame(root, rest[1:], out, errw)
+		return cmdBlame(root, args, out, errw)
 	case "sync":
-		return cmdSync(root, rest[1:], out, errw)
+		return cmdSync(root, args, out, errw)
 	default:
 		fmt.Fprintf(errw, "未知命令 %q\n\n%s", cmd, usage)
 		return 2

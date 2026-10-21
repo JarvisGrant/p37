@@ -31,22 +31,22 @@ P36 中设备顺序：
 ├── p37d
 └── manifest.json
 
-L2 /srv/repo（每实例可写 ext4）
+L2 /srv/repos（每实例可写 ext4；旧 /srv/repo 原地注册为 default）
 ├── .p37/                           # 元数据库、CAS、overlay upper、tmp
 └── workspaces/                     # overlay 挂载点，或 auto 回退后的 copy 目录
 ```
 
-L2 必须预先把 `/srv/repo` 建成 `p36:p36` 可写（建议 `0750`）；p37d 以 `p36`
+L2 必须预先把 `/srv/repos` 建成 `p36:p36` 可写（建议 `0750`）；p37d 以 `p36`
 运行，不做 root 提权。`/srv/repo` 与 `workspaces/`、`.p37/` 必须在同一个
 ext4 上。
 
-`p37d.service` 有 `ConditionPathIsDirectory=/srv/repo`，所以 **`/srv/repo`
+`p37d.service` 有 `ConditionPathIsDirectory=/srv/repos`，所以 **`/srv/repos`
 必须在服务启动前存在**。P36 的 L1 `install.sh` 负责创建它；不存在时服务不
 启动是故意的 fail-fast。
 
 默认 `materialize = "auto"`：先尝试 OverlayFS，失败自动回退 copy。
 Ubuntu 26.04 非 root 下 overlay 可能 `EPERM`（即使有 `CAP_SYS_ADMIN`），
-这时工作区是 `/srv/repo/workspaces` 下的普通目录，不是 overlay。
+这时工作区是 `/srv/repos/<repo_id>/workspaces` 下的普通目录，不是 overlay。
 copy 模式每个工作区是一份完整树；默认 `max_active=4`、`warn_disk_bytes=8 GiB`，
 按实际仓库体积和 L2 容量调整。
 
@@ -109,6 +109,7 @@ payload 作为额外一块只读 virtio-blk 投递；P36 中它是第三块（`v
 构建方式替换）：
 
 ```bash
+install -m 0755 dist/p36-bootstrap/p37         /mnt/l1/usr/local/bin/p37
 install -m 0755 dist/p36-bootstrap/p37-run     /mnt/l1/usr/local/bin/p37-run
 install -m 0755 dist/p36-bootstrap/p37-mcp     /mnt/l1/usr/local/bin/p37-mcp
 install -m 0755 dist/p36-bootstrap/p37-mount   /mnt/l1/usr/local/bin/p37-mount
@@ -124,7 +125,7 @@ install -m 0644 dist/p36-bootstrap/tmpfiles-p37.conf /mnt/l1/etc/tmpfiles.d/p37.
 
 P36 的 L1 `install.sh` 还应：
 
-- 创建 `/srv/repo`（`p36:p36`，`0750`）；
+- 创建 `/srv/repos`（`p36:p36`，`0750`）；旧 `/srv/repo` 可选保留用于迁移；
 - 确保 `p36` 能读 `/dev/disk/by-label/P37PAYLOAD` 对应的块设备
   （`SupplementaryGroups=disk` 或 udev 规则）；
 - 执行 `sysctl --system`（或确保实例启动时应用 `/etc/sysctl.d/90-p37.conf`）；
@@ -159,7 +160,7 @@ MCP 客户端配置：
 { "mcpServers": { "p37": { "command": "/usr/local/bin/p37-mcp" } } }
 ```
 
-`p37-mcp` 会执行 `/run/p37-payload/p37d --stdio --repo /srv/repo`。它不取
+`p37-mcp` 会执行 `/run/p37-payload/p37d --stdio --root /srv/repos`。它不取
 仓库锁、不自动启动 daemon；socket 权限 `0600`，所以 MCP 客户端必须与 p37d
 同 uid（默认都是 `p36`）。
 
@@ -189,7 +190,7 @@ MCP 客户端配置：
 
 ```bash
 systemctl stop p37d
-/run/p37-payload/p37 gc /srv/repo --prune --pack
+p37 --root /srv/repos --repo <id|name> gc --prune --pack
 systemctl start p37d
 ```
 
@@ -252,11 +253,11 @@ auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式�
 | payload 根 | `p37`、`p37d`、`manifest.json` |
 | 设备顺序 | 额外一块；P36 中 `vdc`（`vda=root`，`vdb=P36AGENT`） |
 | VM 创建参数（建议名） | `p37PayloadPath`、`p37PayloadVersion`、`p37PayloadSHA256` |
-| 实例内仓库 | `/srv/repo`（L2 ext4，`p36:p36` 可写，建议 `0750`） |
+| 实例内仓库根 | `/srv/repos`（L2 ext4，`p36:p36` 可写，建议 `0750`） |
 | 挂载点 | `/run/p37-payload` |
 | 工作区模式 | 默认 `workspace.materialize = "auto"`；非 root overlay EPERM 时回退 copy |
-| 运行时环境 | `P37_REPO=/srv/repo`、`P37_PAYLOAD_LABEL=P37PAYLOAD`、`TMPDIR=/srv/repo/.p37/tmp` |
-| L1 必需文件 | `p37-run`、`p37-mcp`、`p37-mount`、`config.toml`、`p37d.service`、`90-p37.conf`、`tmpfiles-p37.conf` |
+| 运行时环境 | `P37_ROOT=/srv/repos`、`P37_REPO=/srv/repo`、`P37_PAYLOAD_LABEL=P37PAYLOAD`、`TMPDIR=/srv/repos/.p37/tmp` |
+| L1 必需文件 | `p37`、`p37-run`、`p37-mcp`、`p37-mount`、`config.toml`、`p37d.service`、`90-p37.conf`、`tmpfiles-p37.conf` |
 | L1 可选文件 | `config-overlay.toml`、`p37d-root-overlay.service`（root+overlay 变体） |
 
 ## v0.2 多仓库变更（format_ver=2）
@@ -276,3 +277,25 @@ auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式�
 - `p37d.service`：`ConditionPathIsDirectory=/srv/repos`，
   `Environment=P37_ROOT=/srv/repos`，`TMPDIR=/srv/repos/.p37/tmp`。
 - 发布物 `dist/p36-bootstrap` 新增 `p37` wrapper。
+
+
+## 多仓库 CLI（v0.2+）
+
+```bash
+p37 --root /srv/repos repo list --json
+p37 --root /srv/repos repo create app
+p37 --root /srv/repos repo info app --json
+p37 --root /srv/repos --repo app status
+p37 --root /srv/repos --repo app doctor
+p37 --root /srv/repos --repo app ws-list
+p37 --root /srv/repos --repo app gc --prune --pack
+```
+
+P36 acceptance 现在创建 `/srv/repos` + `accept` repo，并把 `/srv/repo`
+初始化为 legacy repo 验证自动注册为 `default`。CI 使用：
+
+```text
+P37_ROOT=/srv/repos
+P37_REPO=/srv/repo
+P37_REPO_NAME=accept
+```

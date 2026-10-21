@@ -19,6 +19,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/repo"
+	"github.com/chenyiwen/p37/internal/repolock"
 )
 
 // Errors.
@@ -53,6 +54,7 @@ type Hub struct {
 
 	mu    sync.Mutex
 	repos map[string]*repo.Repo
+	locks map[string]*repolock.Lock
 }
 
 // New 打开/创建 registry。root 通常是 /srv/repos。
@@ -93,7 +95,7 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(regPath, 0o600)
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)
-	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}}
+	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{}}
 	h.recoverRegistry()
 	return h, nil
 }
@@ -269,10 +271,18 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	if err != nil {
 		return nil, err
 	}
+	lock, err := repolock.TryExclusive(filepath.Join(e.Path, ".p37", "lock"))
+	if err != nil {
+		if errors.Is(err, repolock.ErrBusy) {
+			return nil, fmt.Errorf("repo %s 正被另一个进程持有", e.Name)
+		}
+		return nil, err
+	}
 	opt := cfg.RepoOptions()
 	opt.RemountWorkspaces = true
 	r, err := repo.Open(e.Path, opt)
 	if err != nil {
+		_ = lock.Release()
 		h.markDegraded(e.ID, err)
 		return nil, err
 	}
@@ -280,10 +290,12 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	if old := h.repos[e.ID]; old != nil {
 		h.mu.Unlock()
 		_ = r.Close()
+		_ = lock.Release()
 		return old, nil
 	}
 	h.repos[e.ID] = r
 	h.repos[e.Name] = r
+	h.locks[e.ID] = lock
 	h.mu.Unlock()
 	return r, nil
 }
@@ -311,6 +323,10 @@ func (h *Hub) CloseRepo(ref string) error {
 		_ = r.Close()
 		delete(h.repos, e.ID)
 		delete(h.repos, e.Name)
+	}
+	if l := h.locks[e.ID]; l != nil {
+		_ = l.Release()
+		delete(h.locks, e.ID)
 	}
 	return nil
 }
@@ -365,6 +381,10 @@ func (h *Hub) Close() error {
 		}
 		_ = r.Close()
 		delete(h.repos, id)
+	}
+	for id, l := range h.locks {
+		_ = l.Release()
+		delete(h.locks, id)
 	}
 	h.mu.Unlock()
 	return h.db.Close()
