@@ -38,6 +38,15 @@ func runRootDaemon(root string, serveHTTP bool) error {
 	if _, err := h.RegisterLegacy("/srv/repo"); err != nil {
 		fmt.Fprintf(os.Stderr, "p37d: 注册旧仓库 /srv/repo 失败: %v\n", err)
 	}
+	// 启动时打开现有仓库：恢复 workspace 挂载，并让维护命令能看到
+	// per-repo flock。单个 repo 失败只标记 degraded，不影响其它 repo。
+	if es, err := h.List(); err == nil {
+		for i := range es {
+			if _, err := h.Open(es[i].ID); err != nil {
+				fmt.Fprintf(os.Stderr, "p37d: 打开 repo %s 失败: %v\n", es[i].Name, err)
+			}
+		}
+	}
 
 	srv := mcpsrv.NewWithResolver(nil, func(ref string) (*repo.Repo, error) {
 		return h.Open(ref)
