@@ -74,9 +74,10 @@ merge preview workspace 隐藏，TTL 24h；过期返回 `merge_expired`。
 | `ws_sync` | 返回 ops/files/conflicts/dirty/skipped_unstable |
 | `ws_diff` | 文件级 A/M/D/R/C |
 | `ws_rebase` | `to` = version/line/workspace |
-| `ws_drop` | 幂等；`cascade`, `force` |
+| `ws_quota` | 配额用量：`max_active`/`active_used`/`active_available`/`hidden_*`/`max_depth`/`max_fanout`/`landed`/`broken` |
+| `ws_drop` | 幂等；`cascade`, `keep_dir`。**`cascade=true` 是把子工作区重挂到祖父，不是递归删除** |
 | `ws_lease` / `lease_query` | 路径租约 |
-| `ws_reap` | 默认 dry-run；有 lease/active 不删；隐藏工作区 TTL 24h |
+| `ws_reap` | 默认 dry-run；有 lease/active 不删；隐藏工作区 TTL 24h；`state=broken` 可回收；`include_orphan_dirs=true` 顺带清理孤儿目录 |
 | `ws_disk_usage` | 按工作区统计 |
 | `land_preview` | `target`；返回 `target_head`, `ws_tree`, `ws_ops_epoch`, conflicts |
 | `ws_land` | `target`；`fold=self|stack`, `drop_workspace=true`, `expected_head`, `expected_ws_tree`, `idempotency_key` |
@@ -100,12 +101,28 @@ ws_land(ws, target={kind:"line", id:"p34/session/<id>"},
 
 ```text
 child = ws_open(parent={kind:"workspace", id:parent_ws})
-p = land_preview(child, target={kind:"workspace", id:parent_ws})
-ws_land_into(child, parent_ws,
-             expected_parent_tree=p.target_head, preview_id=p.preview_id)
+r = ws_land_into(child, parent_ws)          # 首次不必带 preview_id
+if r.state == "conflict" or !r.can_land:
+    conflict_list(ws_id=child)              # 冲突挂在子工作区上
+    conflict_resolve_all(ws_id=child, policy="prefer_upper")
+    r = ws_land_into(child, parent_ws,
+                     expected_parent_tree=r.target_head,
+                     preview_id=r.preview_id)   # = child id
 ```
 
-`ws_land_into` 只允许直接父；不产生版本、不推进 line。
+`ws_land_into` 只允许直接父；不产生版本、不推进 line。冲突规则：
+
+- 冲突行挂在**子工作区**上，`conflict_list(ws_id=child)` / `conflict_resolve*`
+  直接可用；返回的 `preview_id` 等于子工作区 id（历史 `mg_*` preview 仍接受）。
+- 直接 `ws_land_into` 冲突时子工作区置 `conflicted`；`land_preview` 只记录
+  冲突、不改状态。
+- 冲突 key 包含工作区 id，但同一子工作区的每次重试都用同一个 id，因此
+  `resolve` 后重试会生效（不要每次都新建子工作区）。
+- 子工作区处于 `conflicted` 时父工作区 `ws_land(fold=self)` 返回
+  `ws_has_active_children`，`detail.blocked_by_children` 给出
+  `[{ws_id,state}]`；调用方必须显式 `conflict_resolve*` 或 `ws_drop` 子工作区。
+- `ws_drop(child)` 后配额立即回收；`ws_drop(parent, cascade=true)` 只会把子
+  工作区重挂到祖父，不会释放它们的额度。
 
 ## 历史读取
 
@@ -153,3 +170,23 @@ sync_not_configured sync_in_progress sync_remote_moved
 response_too_large archive_too_large file_too_large corrupt_object
 invalid_argument internal
 ```
+
+`quota_exceeded` 的 `error.detail` 带结构化用量：
+
+```json
+{ "scope": "workspace_active", "used": 4, "limit": 4 }
+```
+
+`scope` ∈ `workspace_active|workspace_hidden|workspace_depth|workspace_fanout`。
+事前限流用 `ws_quota`，不要从错误文本里解析。
+
+`ws_has_active_children` 的 `error.detail` 在 `ws_land(fold=self)` 时带：
+
+```json
+{ "ws_id": "ws_parent", "blocked_by_children": [{"ws_id":"ws_child","state":"conflicted"}] }
+```
+
+`ws_drop` 在元数据已删除、但目录清理失败时返回 `ok=true` 且带
+`dir_cleanup_warning`；land 路径把同类问题放在结果的 `warnings[]`。
+工作区上限的可用量只统计 `active/conflicted/rebasing`；`landed`、`integrating`、
+`hidden`、`broken` 不占 `max_active`（`broken` 在 `ws_quota.broken` 单独暴露）。

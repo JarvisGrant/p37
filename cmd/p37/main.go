@@ -751,7 +751,22 @@ func gcWorkspaces(r *repo.Repo, root string, prune bool, out, errw io.Writer) in
 		orphans = append(orphans, e.Name())
 	}
 	sort.Strings(orphans)
-	fmt.Fprintf(out, "活跃工作区 %d 个，孤儿目录 %d 个\n", len(all), len(orphans))
+	active, hidden, landed, broken := 0, 0, 0, 0
+	for i := range all {
+		w := &all[i]
+		switch {
+		case w.Hidden:
+			hidden++
+		case w.LandedTS != 0:
+			landed++
+		case w.State == meta.StateBroken:
+			broken++
+		default:
+			active++
+		}
+	}
+	fmt.Fprintf(out, "工作区 %d 个（active %d / landed %d / hidden %d / broken %d），孤儿目录 %d 个\n",
+		len(all), active, landed, hidden, broken, len(orphans))
 	for _, o := range orphans {
 		fmt.Fprintf(out, "  孤儿 %s\n", o)
 	}

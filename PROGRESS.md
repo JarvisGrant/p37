@@ -30,6 +30,27 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.3.0：工作区生命周期与配额修复（2026-10-23）
+
+P34「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增、子工作区冲突后
+父工作区永久无法 land。根因不是单一 bug，而是四条链路叠加：
+
+| 问题 | 修复 |
+|---|---|
+| `max_active` 统计把 `landed_ts!=0` / `integrating` 也算进去 | `CountVisibleWorkspaces` 只算 `active/conflicted/rebasing` |
+| `Drop` 先做目录/挂载清理，失败就 `return`，行永久残留 | 元数据先删、配额立即回收；清理失败降级为 `ErrCleanupFailed` 警告 |
+| land 之后的 `Drop` 错误被 `_, _, _ =` 吞掉 | `dropAfterLand` 记录日志并写进 `warnings[]`；`ws_drop` 暴露 `dir_cleanup_warning` |
+| `ws_land_into` 冲突挂在 hidden preview 上，且重试时 conflict key 变化 | 冲突挂到子工作区、`preview_id=child`、重放恒用 child id；不再创建 preview 工作区 |
+| 子工作区冲突后仍是 `active`，父工作区被 `ws_has_active_children` 永久挡住 | 直接 land_into 冲突置 `conflicted`；`ws_land` 返回 `blocked_by_children` 结构化列表 |
+| fanout 把 hidden/landed 子工作区算进去 | 只数活跃子工作区 |
+| 配额不可见 | 新增 `ws_quota`；`quota_exceeded.detail` 带 `scope/used/limit` |
+| 目录/隐藏 preview 残留 | daemon 启动清理孤儿目录与 24h 过期隐藏工作区；`ws_reap` 支持 `state=broken` / `include_orphan_dirs` |
+| `resolution` 表随工作区删除不清理 | `DeleteWorkspace` / `FinishLand` 显式按 `ws_id` 删除 |
+
+默认配置同步调整：`max_active=8`（4 等于「主管 + 3 子会话」，没有缓冲）、
+新增 `max_hidden=32`。回归测试见 `internal/repo/quota_recovery_test.go` 与
+`internal/mcpsrv/quota_test.go`。
+
 ## P36 可部署性适配（本轮）
 
 目标：把 p37 做成 P36 microVM 里“实例启动即有”的版本控制工具，同时**不改
@@ -44,7 +65,7 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 | 幂等初始化 | `p37 init --if-missing`、`p37 init --config <file>`；已有仓库绝不覆盖 config |
 | 部署健康检查 | `internal/health` + `p37d --check [--json] [--strict]`；可写/ext4/同 FS/OverlayFS/inotify/磁盘/daemon 状态 |
 | GC 维护保护 | `internal/repolock`；daemon 持锁时 `p37 gc` 拒绝，`--force` 才显式跳过 |
-| 默认值适配 20GB L2 | `base_cache_bytes=4 GiB`、`warn_disk_bytes=8 GiB`、`max_active=4`（v0.1.13 copy 回退；硬上限仍 64） |
+| 默认值适配 20GB L2 | `base_cache_bytes=4 GiB`、`warn_disk_bytes=8 GiB`、`max_active=4`（v0.1.13 copy 回退；v0.3.0 起为 8；硬上限仍 64） |
 | P36 部署包 | `packaging/p36/`：`p37d.service`、`p37-run`、`p37-mcp`、`config.toml`、`p37-mount` Go 挂载助手 |
 
 测试新增：stdio 双客户端并发闭环、daemon 不在时的错误、init 幂等/模板、

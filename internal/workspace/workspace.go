@@ -52,7 +52,59 @@ var (
 	// 若继续采集会把「挂载丢了」误判成「agent 删光了所有文件」，
 	// 落地后就会清空整棵仓库树。
 	ErrNotMounted = errors.New("workspace: 工作区未挂载")
+	// ErrCleanupFailed 表示工作区元数据已释放、配额已回收，但目录清理失败。
+	//
+	// 调用方应把它当作**警告**而不是失败：工作区已经不可见、也不再占用
+	// max_active；残留目录由孤儿目录清理兜底。
+	ErrCleanupFailed = errors.New("workspace: 工作区已释放，但目录清理失败")
 )
+
+// 上限作用域（quota_exceeded 的 detail.scope）。
+const (
+	ScopeActive = "workspace_active"
+	ScopeHidden = "workspace_hidden"
+	ScopeDepth  = "workspace_depth"
+	ScopeFanout = "workspace_fanout"
+)
+
+// LimitError 是带用量信息的配额错误。
+//
+// 调用方（P34 等）需要事前做准入限流，所以 quota_exceeded 必须在 detail 里
+// 带上 used/limit；仅靠错误文本无法稳定解析。
+type LimitError struct {
+	Scope string
+	Used  int
+	Limit int
+}
+
+func (e *LimitError) Error() string {
+	switch e.Scope {
+	case ScopeHidden:
+		return fmt.Sprintf("%s: 隐藏工作区已达 %d（used=%d）", ErrLimitExceeded, e.Limit, e.Used)
+	case ScopeDepth:
+		return fmt.Sprintf("%s: 栈深将达 %d（used=%d）", ErrLimitExceeded, e.Limit, e.Used)
+	case ScopeFanout:
+		return fmt.Sprintf("%s: 子工作区已达 %d（used=%d）", ErrLimitExceeded, e.Limit, e.Used)
+	default:
+		return fmt.Sprintf("%s: 活跃工作区已达 %d（used=%d）", ErrLimitExceeded, e.Limit, e.Used)
+	}
+}
+
+// Unwrap 让 errors.Is(err, ErrLimitExceeded) 继续成立。
+func (e *LimitError) Unwrap() error { return ErrLimitExceeded }
+
+// Quota 是 ws_quota 的返回（字段名遵循附录 K 的 snake_case 约定）。
+type Quota struct {
+	MaxActive       int `json:"max_active"`
+	ActiveUsed      int `json:"active_used"`
+	ActiveAvailable int `json:"active_available"`
+	MaxHidden       int `json:"hidden_limit"`
+	HiddenUsed      int `json:"hidden_used"`
+	MaxDepth        int `json:"max_depth"`
+	MaxFanout       int `json:"max_fanout"`
+	Landed          int `json:"landed"`
+	Broken          int `json:"broken"`
+}
 
 // Options 配置 Manager。
 type Options struct {
@@ -87,6 +139,57 @@ func (m *Manager) limits() (active, depth, fanout int) {
 		clampLimit(m.opt.MaxFanout, HardMaxFanout)
 }
 
+// hiddenLimit 返回隐藏 merge/preview 工作区上限。
+//
+// 0 表示默认 32；允许配置覆盖，但同样受 max_active 的硬上限约束思路影响，
+// 这里再钳到 [1, 4*HardMaxActive]，避免误配成天文数字。
+func (m *Manager) hiddenLimit() int {
+	h := m.opt.MaxHidden
+	if h <= 0 {
+		return 32
+	}
+	if h > 4*HardMaxActive {
+		return 4 * HardMaxActive
+	}
+	return h
+}
+
+// Quota 返回当前配额用量（供 ws_quota 与准入限流）。
+func (m *Manager) Quota() (*Quota, error) {
+	active, depth, fanout := m.limits()
+	m.openMu.Lock()
+	used, err := m.db.CountVisibleWorkspaces()
+	if err != nil {
+		m.openMu.Unlock()
+		return nil, err
+	}
+	// 把「已预留、尚未落库」的 open 也算进去，避免调用方看到虚假的可用额度。
+	used += m.pendingActive
+	m.openMu.Unlock()
+	hidden, err := m.db.CountHiddenWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	landed, err := m.db.CountLandedWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	broken, err := m.db.CountBrokenWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	avail := active - used
+	if avail < 0 {
+		avail = 0
+	}
+	return &Quota{
+		MaxActive: active, ActiveUsed: used, ActiveAvailable: avail,
+		MaxHidden: m.hiddenLimit(), HiddenUsed: hidden,
+		MaxDepth: depth, MaxFanout: fanout,
+		Landed: landed, Broken: broken,
+	}, nil
+}
+
 // clampLimit 把配置值钳到 [1, hard]；非法值取 hard。
 func clampLimit(v, hard int) int {
 	if v <= 0 || v > hard {
@@ -116,6 +219,12 @@ type Manager struct {
 	// （§5.2）。只用于可观测性，不参与任何判定。
 	unstableMu   sync.Mutex
 	lastUnstable map[string][]string
+
+	// openMu 保护「配额检查 + 名额预留」这一段，避免并发 ws_open 同时看到
+	// 最后一个名额（TOCTOU）。物化本身不持锁，以免把 copy 模式的整树复制
+	// 串行化。
+	openMu        sync.Mutex
+	pendingActive int
 }
 
 // New 创建 Manager。ig 为 nil 时使用内置忽略集。
@@ -147,25 +256,22 @@ type OpenRequest struct {
 
 // Open 打开一个工作区并物化（§4.1、§4.6、§11.4）。
 func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
-	// 上限检查：用户工作区与隐藏工作区分开计数。
-	n, err := m.db.CountVisibleWorkspaces()
-	if err != nil {
+	// 上限检查 + 名额预留：并发 open 不能同时看到最后一个名额。
+	activeLimit, _, _ := m.limits()
+	hlimit := m.hiddenLimit()
+	if err := m.reserveActive(activeLimit, hlimit); err != nil {
 		return nil, err
 	}
-	if limit, _, _ := m.limits(); n >= limit {
-		return nil, fmt.Errorf("%w: 活跃工作区已达 %d", ErrLimitExceeded, limit)
+	reserved := true
+	release := func() {
+		if reserved {
+			m.openMu.Lock()
+			m.pendingActive--
+			m.openMu.Unlock()
+			reserved = false
+		}
 	}
-	hn, err := m.db.CountHiddenWorkspaces()
-	if err != nil {
-		return nil, err
-	}
-	hlimit := m.opt.MaxHidden
-	if hlimit <= 0 {
-		hlimit = 32
-	}
-	if hn >= hlimit {
-		return nil, fmt.Errorf("%w: 隐藏工作区已达 %d", ErrLimitExceeded, hlimit)
-	}
+	defer release()
 
 	parentKind, parentID, baseTree, baseVersion, baseLine, err := m.resolveParent(req.Parent)
 	if err != nil {
@@ -207,10 +313,13 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 
 	// 必须先插入工作区行，再回填 stat_cache —— stat_cache.ws_id 有外键约束，
 	// 顺序颠倒会导致写入被拒（早前实现里该错误被静默吞掉，缓存其实没落库）。
-	if err := m.db.InsertWorkspace(w); err != nil {
+	if err := m.insertReserved(w); err != nil {
 		_ = m.mm.Close(wsID, false, w.Mounted)
 		return nil, err
 	}
+	// 行已经落库，之后由 CountVisibleWorkspaces 统计；预留名额已在
+	// insertReserved 内释放。
+	reserved = false
 	// 记录物化完成时刻。采集靠它做惰性判定（见 capture.Options），
 	// 因此 ws_open 完全不必走文件系统 —— 这正是「与文件数无关」的实现方式。
 	w.MaterializedTS = time.Now().UnixNano()
@@ -221,10 +330,52 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 	}
 	for _, p := range req.Leases {
 		if err := m.db.AddLease(wsID, p, "shared", now); err != nil {
+			_ = m.mm.Close(wsID, false, w.Mounted)
+			_ = m.db.DeleteWorkspace(wsID)
 			return nil, err
 		}
 	}
 	return &w, nil
+}
+
+// reserveActive 在配额检查通过后预留一个 active 名额。
+//
+// pendingActive 覆盖「已经通过检查、但行还没落库」的窗口。计数时把 pending
+// 加上，宁可短暂保守（少放行一个），也不会让并发 open 超限。
+func (m *Manager) reserveActive(activeLimit, hiddenLimit int) error {
+	m.openMu.Lock()
+	defer m.openMu.Unlock()
+	n, err := m.db.CountVisibleWorkspaces()
+	if err != nil {
+		return err
+	}
+	if n+m.pendingActive >= activeLimit {
+		return &LimitError{Scope: ScopeActive, Used: n + m.pendingActive, Limit: activeLimit}
+	}
+	hn, err := m.db.CountHiddenWorkspaces()
+	if err != nil {
+		return err
+	}
+	if hn >= hiddenLimit {
+		return &LimitError{Scope: ScopeHidden, Used: hn, Limit: hiddenLimit}
+	}
+	m.pendingActive++
+	return nil
+}
+
+// insertReserved 在同一临界区内插入工作区行并释放预留名额。
+//
+// 必须原子：如果先插入再单独释放，openMu 之外的 reserveActive 会同时看到
+// 「行已存在」和「pending 还未减」，把最后一个名额重复扣掉（保守到并发度
+// 退化为 1）。
+func (m *Manager) insertReserved(w meta.Workspace) error {
+	m.openMu.Lock()
+	defer m.openMu.Unlock()
+	if err := m.db.InsertWorkspace(w); err != nil {
+		return err
+	}
+	m.pendingActive--
+	return nil
 }
 
 // resolveParent 把 parent 参数解析为 (kind, id, baseTree, baseVersion)。
@@ -321,14 +472,23 @@ func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID
 		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
 	if _, maxDepth, _ := m.limits(); depth+1 >= maxDepth {
-		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 栈深将达 %d", ErrLimitExceeded, depth+1)
+		return "", "", hash.ID{}, hash.ID{}, "", &LimitError{Scope: ScopeDepth, Used: depth + 1, Limit: maxDepth}
 	}
 	kids, err := m.db.Children(pw.ID)
 	if err != nil {
 		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
-	if _, _, maxFanout := m.limits(); len(kids) >= maxFanout {
-		return "", "", hash.ID{}, hash.ID{}, "", fmt.Errorf("%w: 子工作区已达 %d", ErrLimitExceeded, maxFanout)
+	// 只数**真正活跃**的子工作区：已落地（landed_ts!=0）与隐藏 merge/preview
+	// 不参与 fanout，否则 land_into 的每次冲突 preview 都会永久吃掉一个名额。
+	activeKids := 0
+	for i := range kids {
+		if kids[i].Hidden || kids[i].LandedTS != 0 {
+			continue
+		}
+		activeKids++
+	}
+	if _, _, maxFanout := m.limits(); activeKids >= maxFanout {
+		return "", "", hash.ID{}, hash.ID{}, "", &LimitError{Scope: ScopeFanout, Used: activeKids, Limit: maxFanout}
 	}
 	return meta.ParentWorkspace, pw.ID, et, pw.BaseVersion, "", nil
 }
@@ -675,6 +835,11 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 }
 
 // Drop 放弃工作区（§11.4）。
+//
+// **配额优先**：只要元数据删除成功，max_active 名额立即回收；目录/挂载清理
+// 失败只返回 ErrCleanupFailed 警告，不再让工作区行残留。历史实现把 Close
+// 放在 DeleteWorkspace 之前并直接 return，overlay umount 遇到 EBUSY（P34 的
+// exec 还留着进程/工作目录）时行会永久残留，配额随时间单调衰减。
 func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented []string, err error) {
 	w, err := m.Get(wsID)
 	if err != nil {
@@ -688,7 +853,7 @@ func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented 
 		return nil, nil, fmt.Errorf("%w: %s 有 %d 个子工作区", ErrHasChildren, wsID, len(kids))
 	}
 
-	// 子重挂到祖父（§4.4）。
+	// 子重挂到祖父（§4.4）。重挂失败是真正的错误：不能留下悬挂的 parent_id。
 	for _, k := range kids {
 		kind, id := w.ParentKind, w.ParentID
 		if err := m.db.UpdateWorkspaceParent(k.ID, kind, id, m.now()); err != nil {
@@ -698,13 +863,86 @@ func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented 
 	}
 
 	overlay := w.Materialize == meta.MaterializeOverlay
-	if err := m.mm.Close(wsID, keepDir, overlay); err != nil {
-		return nil, nil, err
-	}
+	dir := m.mm.WorkspaceDir(wsID)
+	closeErr := m.mm.Close(wsID, keepDir, overlay)
 	if err := m.db.DeleteWorkspace(wsID); err != nil {
 		return nil, nil, err
 	}
+	if closeErr != nil {
+		return []string{wsID}, reparented,
+			fmt.Errorf("%w: %s: %v", ErrCleanupFailed, dir, closeErr)
+	}
 	return []string{wsID}, reparented, nil
+}
+
+// ReapOrphanDirs 删除 workspaces/ 下没有对应数据库行的孤儿目录（启动兜底）。
+//
+// 行是唯一事实来源：目录存在但行不存在，说明进程在 Land/Open 的中间态崩溃，
+// 或早前 Drop 的元数据删除成功而目录清理失败。调用方负责记录日志。
+func (m *Manager) ReapOrphanDirs() ([]string, error) {
+	all, err := m.db.ListWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool, len(all))
+	for i := range all {
+		known[all[i].ID] = true
+	}
+	root := filepath.Join(m.repoRoot, "workspaces")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var reaped []string
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() || known[e.Name()] {
+			continue
+		}
+		// mountmgr.Close 会先尽力卸载（overlay），再删目录与状态文件。
+		// 非 ws_* 目录（历史遗留命名）走直接删除。
+		var err error
+		if mountmgr.ValidWSID(e.Name()) {
+			err = m.mm.Close(e.Name(), false, true)
+		} else {
+			err = os.RemoveAll(filepath.Join(root, e.Name()))
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		reaped = append(reaped, e.Name())
+	}
+	return reaped, errors.Join(errs...)
+}
+
+// ReapStaleHidden 回收超过 ttl 的隐藏 merge/preview 工作区。
+//
+// land_into 冲突不再创建 hidden preview（D 修复），但老仓库里可能残留。
+// 这些行不占 max_active，却会吃满 hidden 上限，必须有过期兜底。
+func (m *Manager) ReapStaleHidden(ttl time.Duration) ([]string, error) {
+	all, err := m.db.ListWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := m.now() - ttl.Milliseconds()
+	var reaped []string
+	var errs []error
+	for i := range all {
+		w := &all[i]
+		if !w.Hidden || w.UpdatedTS > cutoff {
+			continue
+		}
+		if _, _, err := m.Drop(w.ID, true, false); err != nil && !errors.Is(err, ErrNotFound) {
+			errs = append(errs, err)
+			continue
+		}
+		reaped = append(reaped, w.ID)
+	}
+	return reaped, errors.Join(errs...)
 }
 
 // FoldSet 返回 land 应折叠的工作区集合（§7.1）：从 ws 向上直到最近的 version 祖先。

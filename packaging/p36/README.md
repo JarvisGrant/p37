@@ -47,7 +47,8 @@ ext4 上。
 默认 `materialize = "auto"`：先尝试 OverlayFS，失败自动回退 copy。
 Ubuntu 26.04 非 root 下 overlay 可能 `EPERM`（即使有 `CAP_SYS_ADMIN`），
 这时工作区是 `/srv/repos/<repo_id>/workspaces` 下的普通目录，不是 overlay。
-copy 模式每个工作区是一份完整树；默认 `max_active=4`、`warn_disk_bytes=8 GiB`，
+copy 模式每个工作区是一份完整树；默认 `max_active=8`、`max_hidden=32`、
+`warn_disk_bytes=8 GiB`，
 按实际仓库体积和 L2 容量调整。
 
 ## 2. 构建与发布物

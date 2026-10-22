@@ -237,10 +237,24 @@ func classify(err error) (code, msg string, detail any) {
 	case errors.Is(err, repo.ErrPreviewExpired):
 		return "preview_expired", err.Error(), nil
 	case errors.Is(err, repo.ErrHasActiveChildren):
+		var ace *repo.ActiveChildrenError
+		if errors.As(err, &ace) {
+			return "ws_has_active_children", ace.Error(), map[string]any{
+				"ws_id": ace.WSID, "blocked_by_children": ace.Children,
+			}
+		}
 		return "ws_has_active_children", err.Error(), nil
 	case errors.Is(err, workspace.ErrNotFound):
 		return "ws_not_found", err.Error(), nil
+	case errors.Is(err, workspace.ErrCleanupFailed):
+		return "ws_cleanup_warning", err.Error(), nil
 	case errors.Is(err, workspace.ErrLimitExceeded):
+		var le *workspace.LimitError
+		if errors.As(err, &le) {
+			return "quota_exceeded", err.Error(), map[string]any{
+				"scope": le.Scope, "used": le.Used, "limit": le.Limit,
+			}
+		}
 		return "quota_exceeded", err.Error(), nil
 	case errors.Is(err, workspace.ErrHasChildren):
 		return "ws_has_active_children", err.Error(), nil

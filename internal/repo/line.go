@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -393,6 +394,7 @@ type MergeResult struct {
 	Conflicts     []op.Conflict `json:"conflicts,omitempty"`
 	Files         []FileStat    `json:"files,omitempty"`
 	AutoMerged    int           `json:"auto_merged"`
+	Warnings      []string      `json:"warnings,omitempty"`
 }
 
 // MergeOptions 控制 line_merge。
@@ -650,7 +652,12 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 	}
 	if mergeID != "" {
 		_ = r.DB.ClearConflicts(mergeID)
-		_, _, _ = r.WS.Drop(mergeID, true, true)
+		if _, _, err := r.WS.Drop(mergeID, true, true); err != nil &&
+			!errors.Is(err, workspace.ErrNotFound) {
+			msg := fmt.Sprintf("merge 已提交，但清理 merge 工作区 %s 失败: %v", mergeID, err)
+			log.Printf("p37: %s", msg)
+			res.Warnings = append(res.Warnings, msg)
+		}
 	}
 	res.VersionID = v.ID()
 	res.TargetHead = v.ID()

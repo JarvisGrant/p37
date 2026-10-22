@@ -15,6 +15,7 @@ import (
 	"github.com/chenyiwen/p37/internal/hub"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
+	"github.com/chenyiwen/p37/internal/workspace"
 )
 
 // registerRepoLineRead 注册多仓库、命名线、历史读取与新的工作区/land 工具。
@@ -566,16 +567,17 @@ func (s *Server) registerRepoLineRead() {
 		})
 
 	s.register("ws_reap", "清理过期/孤儿工作区，默认 dry-run。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"older_than":{"type":"string"},"state":{"type":"string"},"dry_run":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
+		`{"type":"object","properties":{"repo":{"type":"string"},"older_than":{"type":"string"},"state":{"type":"string"},"include_orphan_dirs":{"type":"boolean"},"dry_run":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
 			var a struct {
-				OlderThan string `json:"older_than"`
-				State     string `json:"state"`
-				DryRun    *bool  `json:"dry_run"`
+				OlderThan        string `json:"older_than"`
+				State            string `json:"state"`
+				IncludeOrphanDir bool   `json:"include_orphan_dirs"`
+				DryRun           *bool  `json:"dry_run"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
@@ -584,7 +586,18 @@ func (s *Server) registerRepoLineRead() {
 			if a.DryRun != nil {
 				dry = *a.DryRun
 			}
-			return reapWorkspaces(rr, a.OlderThan, a.State, dry)
+			res, err := reapWorkspaces(rr, a.OlderThan, a.State, dry)
+			if err != nil {
+				return nil, err
+			}
+			if a.IncludeOrphanDir && !dry {
+				reaped, err := rr.WS.ReapOrphanDirs()
+				if err != nil {
+					res["orphan_errors"] = err.Error()
+				}
+				res["orphan_dirs"] = reaped
+			}
+			return res, nil
 		})
 }
 
@@ -651,6 +664,9 @@ func landView2(res *repo.LandResult) map[string]any {
 	if res.State != "" {
 		out["state"] = res.State
 	}
+	if len(res.Warnings) > 0 {
+		out["warnings"] = res.Warnings
+	}
 	return out
 }
 
@@ -687,12 +703,16 @@ func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string
 		cutoff = now.Add(-d).UnixMilli()
 	}
 	var out []string
+	failed := map[string]string{}
 	for i := range all {
 		w := &all[i]
 		if state != "" && w.State != state {
 			continue
 		}
-		if w.LandedTS == 0 && !w.Hidden {
+		// 默认只回收已落地/隐藏的工作区；broken 是显式 state=broken 时的例外，
+		// 否则「挂载丢失留下的死工作区」永远占着目录。
+		explicitBroken := state == meta.StateBroken && w.State == meta.StateBroken
+		if w.LandedTS == 0 && !w.Hidden && !explicitBroken {
 			continue // 用户活跃工作区绝不自动回收
 		}
 		if w.Hidden && cutoff == 0 {
@@ -713,10 +733,17 @@ func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string
 		}
 		out = append(out, w.ID)
 		if !dry {
-			_, _, _ = r.WS.Drop(w.ID, true, false)
+			if _, _, err := r.WS.Drop(w.ID, true, false); err != nil &&
+				!errors.Is(err, workspace.ErrNotFound) {
+				failed[w.ID] = err.Error()
+			}
 		}
 	}
-	return map[string]any{"dry_run": dry, "workspaces": out, "count": len(out)}, nil
+	res := map[string]any{"dry_run": dry, "workspaces": out, "count": len(out)}
+	if len(failed) > 0 {
+		res["failed"] = failed
+	}
+	return res, nil
 }
 
 var _ = fmt.Sprintf

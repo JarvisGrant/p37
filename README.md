@@ -102,7 +102,7 @@ copy。copy 模式每个工作区是一份完整树，20GB L2 上需要更保守
 `config-overlay.toml` + `p37d-root-overlay.service` 走 OverlayFS。
 
 ```bash
-make release VERSION=0.1.13      # 发布 tar + sha256
+make release VERSION=0.3.0       # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 
@@ -119,7 +119,8 @@ daemon 启动前检查，不建议作为在线高频探针。
 | `workspace.materialize` | `auto` | 优先 overlay，失败回退 copy |
 | `workspace.base_cache_bytes` | 4 GiB | overlay 基底缓存上限（copy 不用） |
 | `workspace.warn_disk_bytes` | 8 GiB | copy 模式更早告警 |
-| `workspace.max_active` | 4 | 两个 agent + keeper 验收至少需要 3；硬上限仍是 64 |
+| `workspace.max_active` | 8 | 主管 + 子会话至少 1+N；4 没有缓冲，硬上限仍是 64 |
+| `workspace.max_hidden` | 32 | 隐藏 merge/preview 工作区上限，不占 max_active |
 
 `p37 doctor` 在 copy 模式下仍会把 `OverlayFS` 标成 `FAIL`（这是检查器的既有
 严格判定）；P36 的正式门禁应使用 `p37d --check --strict`，auto 下 overlay

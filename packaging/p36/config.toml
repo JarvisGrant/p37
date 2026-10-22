@@ -14,9 +14,13 @@ format_ver = 2
 materialize = "auto"
 # 4 GiB 基底缓存；只有 overlay 模式使用，copy 模式不使用。
 base_cache_bytes = 4294967296
-# copy 模式每个工作区都是完整树；20 GiB L2 上默认 4 个活跃工作区。
-# 两个 agent 并发 + 一个 keeper 验收工作区至少需要 3 个。
-max_active = 4
+# copy 模式每个工作区都是完整树；P34「主管 + N 子会话」至少需要 1+N 个。
+# 4 正好等于「主管 + 3 子会话」，没有任何缓冲（主管每轮 drop 再重开时尤其
+# 容易撞配额），因此默认 8；20 GiB L2 上请按仓库树大小与 repo_disk_usage
+# 复核，必要时收紧。硬上限仍是 64。
+max_active = 8
+# 隐藏 merge/preview 工作区上限（不占 max_active）。
+max_hidden = 32
 # copy 模式磁盘占用更高；剩余空间低于 8 GiB 就告警。
 warn_disk_bytes = 8589934592
 scan_interval = "30s"

@@ -59,6 +59,7 @@ type WorkspaceConfig struct {
 	MaxActive       int    `toml:"max_active"`
 	MaxDepth        int    `toml:"max_depth"`
 	MaxFanout       int    `toml:"max_fanout"`
+	MaxHidden       int    `toml:"max_hidden"`
 	InotifyFallback bool   `toml:"inotify_fallback"`
 	WarnDiskBytes   int64  `toml:"warn_disk_bytes"`
 }
@@ -306,6 +307,7 @@ func (c Config) RepoOptions() repo.Options {
 		MaxActive:      c.Workspace.MaxActive,
 		MaxDepth:       c.Workspace.MaxDepth,
 		MaxFanout:      c.Workspace.MaxFanout,
+		MaxHidden:      c.Workspace.MaxHidden,
 		MaxMatches:     c.Merge.MaxMatches,
 		GC: repo.GCOptions{
 			KeepVersions: c.Retention.KeepVersions,

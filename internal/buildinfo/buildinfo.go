@@ -9,7 +9,7 @@ import "runtime"
 
 var (
 	// Version 是发布版本号（git tag / git describe）。
-	Version = "0.1.0"
+	Version = "0.3.0"
 	// Commit 是构建时的 git commit。
 	Commit = "unknown"
 	// BuildTime 是 UTC RFC3339 构建时间。

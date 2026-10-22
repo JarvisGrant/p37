@@ -3,6 +3,8 @@ package repo
 import (
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
@@ -17,6 +19,47 @@ import (
 var ErrHasActiveChildren = errors.New("repo: 工作区仍有活跃子工作区")
 var ErrTargetInvalid = errors.New("repo: 非法 land 目标")
 var ErrPreviewExpired = errors.New("repo: land_into preview 已过期")
+
+// ChildRef 是被父工作区 land 阻塞的子工作区。
+type ChildRef struct {
+	WSID  string `json:"ws_id"`
+	State string `json:"state"`
+}
+
+// ActiveChildrenError 让 ws_land 的 ws_has_active_children 带上结构化列表，
+// 调用方可以据此决定「先解冲突」还是「显式 drop 子工作区」。
+type ActiveChildrenError struct {
+	WSID     string
+	Children []ChildRef
+}
+
+func (e *ActiveChildrenError) Error() string {
+	ids := make([]string, 0, len(e.Children))
+	for _, c := range e.Children {
+		ids = append(ids, c.WSID+"("+c.State+")")
+	}
+	return fmt.Sprintf("%s: %s", ErrHasActiveChildren, strings.Join(ids, ", "))
+}
+
+// Unwrap 保持 errors.Is(err, ErrHasActiveChildren) 成立。
+func (e *ActiveChildrenError) Unwrap() error { return ErrHasActiveChildren }
+
+// dropAfterLand 在 land 已经提交之后清理工作区。
+//
+// 提交成功后再返回错误会让调用方误以为 land 失败，因此这里只记录日志并把
+// 警告带回 LandResult；配额回收由 workspace.Drop 保证（元数据先删）。
+func (r *Repo) dropAfterLand(res *LandResult, wsID string, keepDir bool) {
+	dropped, _, err := r.WS.Drop(wsID, true, keepDir)
+	if err == nil || errors.Is(err, workspace.ErrNotFound) {
+		_ = dropped
+		return
+	}
+	msg := fmt.Sprintf("land 已提交，但清理工作区 %s 失败: %v", wsID, err)
+	log.Printf("p37: %s", msg)
+	if res != nil {
+		res.Warnings = append(res.Warnings, msg)
+	}
+}
 
 // LandOptions 控制 land 行为。
 type LandOptions struct {
@@ -108,6 +151,7 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 		if err != nil {
 			return nil, err
 		}
+		var blockers []ChildRef
 		for i := range kids {
 			k := &kids[i]
 			if k.Hidden || k.LandedTS != 0 {
@@ -115,8 +159,11 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 			}
 			switch k.State {
 			case meta.StateActive, meta.StateConflicted, meta.StateRebasing:
-				return nil, fmt.Errorf("%w: %s", ErrHasActiveChildren, k.ID)
+				blockers = append(blockers, ChildRef{WSID: k.ID, State: k.State})
 			}
+		}
+		if len(blockers) > 0 {
+			return nil, &ActiveChildrenError{WSID: wsID, Children: blockers}
 		}
 	}
 
@@ -191,6 +238,7 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 	res.CanLand = len(replayed.Conflicts) == 0
 	res.AutoMerged = replayed.AutoMerged
 	if len(replayed.Conflicts) > 0 {
+		res.State = "conflict"
 		if err := r.persistConflicts(wsID, replayed.Conflicts); err != nil {
 			return nil, err
 		}
@@ -239,7 +287,11 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 	if opt.DropWorkspace {
 		for _, fw := range fold {
 			overlay := fw.Materialize == meta.MaterializeOverlay
-			_ = r.MM.Close(fw.ID, false, overlay)
+			if err := r.MM.Close(fw.ID, false, overlay); err != nil {
+				msg := fmt.Sprintf("land 已提交，但清理工作区 %s 目录失败: %v", fw.ID, err)
+				log.Printf("p37: %s", msg)
+				res.Warnings = append(res.Warnings, msg)
+			}
 		}
 		if err := r.DB.FinishLand(foldIDs); err != nil {
 			return nil, err
@@ -280,7 +332,9 @@ func (r *Repo) LandInto(wsID, parentWsID, expectedParentTree, previewID, idemKey
 
 func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	expectedParentTree, previewID, idemKey string) (*LandResult, error) {
-	if previewID != "" {
+	// 兼容旧调用方：如果传入的是历史 hidden preview 工作区（mg_*），仍然
+	// 做 24h 过期校验；新协议下 preview_id == 子工作区 id，不再单独建 preview。
+	if previewID != "" && previewID != wsID {
 		if pw, err := r.DB.GetWorkspace(previewID); err == nil {
 			if time.Now().UnixMilli()-pw.CreatedTS > int64(24*time.Hour/time.Millisecond) {
 				return nil, ErrPreviewExpired
@@ -294,7 +348,9 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if child.ParentKind != meta.ParentWorkspace || child.ParentID != parentWsID {
 		return nil, fmt.Errorf("%w: child 的直接父不是 %s", ErrTargetMoved, parentWsID)
 	}
-	if child.State != meta.StateActive {
+	// conflicted 允许重试：冲突解决后直接再调 ws_land_into 即可，
+	// 不必先让调用方猜状态。真正的冲突会在重放后再次返回。
+	if child.State != meta.StateActive && child.State != meta.StateConflicted {
 		return nil, fmt.Errorf("%w: child 状态为 %s", workspace.ErrWrongState, child.State)
 	}
 	parent, err := r.WS.Get(parentWsID)
@@ -343,12 +399,11 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if err != nil {
 		return nil, err
 	}
-	replayID := previewID
-	if replayID == "" {
-		replayID = wsID
-	}
+	// 冲突 key 含 WsID：这里必须**恒用子工作区 id**，不能因为调用方传了
+	// preview_id 就换 key 域。否则「preview → resolve → 带 preview_id 重试」
+	// 会算出新 key，解决记录永远匹配不上（沙盒 #66.2 的死循环）。
 	replayed, err := op.Replay(parentTreeObj, ops, r.Store, op.Options{
-		WsID: replayID, MaxMatches: op.DefaultMaxMatches,
+		WsID: wsID, MaxMatches: op.DefaultMaxMatches,
 		Resolver: r.DB.Resolver(), Candidates: true,
 	})
 	if err != nil {
@@ -357,30 +412,19 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	res := &LandResult{
 		OpsCount: len(ops), Files: summarize(ops), Conflicts: replayed.Conflicts,
 		CanLand: len(replayed.Conflicts) == 0, AutoMerged: replayed.AutoMerged,
-		TargetHead: parentTree, WSTree: childTree, PreviewID: previewID,
+		TargetHead: parentTree, WSTree: childTree, PreviewID: wsID,
 	}
 	if len(replayed.Conflicts) > 0 {
-		pid := previewID
-		if pid == "" {
-			pid, err = newMergeID()
-			if err != nil {
-				return nil, err
-			}
-			res.PreviewID = pid
-			// 隐藏 preview workspace 承载冲突；parent_tree 存在 BaseTree。
-			w := meta.Workspace{
-				ID: pid, Name: parentWsID, ParentKind: meta.ParentWorkspace,
-				ParentID: parentWsID, BaseTree: parentTree, BaseVersion: child.BaseVersion,
-				BaseLine: "", TaskDesc: "land_into_preview", State: meta.StateConflicted,
-				Materialize: meta.MaterializeCopy, Hidden: true, Kind: "preview",
-				CreatedTS: time.Now().UnixMilli(), UpdatedTS: time.Now().UnixMilli(),
-			}
-			if err := r.DB.InsertWorkspace(w); err != nil {
-				return nil, err
-			}
-		}
-		if err := r.persistConflicts(pid, replayed.Conflicts); err != nil {
+		// 冲突挂在**子工作区**上：conflict_list(child) / conflict_resolve_all(child)
+		// 直接可用，不再依赖调用方记住 hidden preview id。
+		if err := r.persistConflicts(wsID, replayed.Conflicts); err != nil {
 			return nil, err
+		}
+		res.State = "conflict"
+		if !preview {
+			if err := r.DB.UpdateWorkspaceState(wsID, meta.StateConflicted, time.Now().UnixMilli()); err != nil {
+				return nil, err
+			}
 		}
 		return res, nil
 	}
@@ -400,7 +444,8 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if err := r.DB.InsertLandedWS(wsID, replayed.Tree.ID().String(), time.Now().UnixMilli()); err != nil {
 		return nil, err
 	}
-	_, _, _ = r.WS.Drop(wsID, true, false)
+	_ = r.DB.ClearConflicts(wsID)
+	r.dropAfterLand(res, wsID, false)
 	if js, err := r.DB.ListLandIntoJournal(); err == nil {
 		for _, j := range js {
 			if j.WsID == wsID && j.ParentWsID == parentWsID {
@@ -408,9 +453,10 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 			}
 		}
 	}
-	if previewID != "" {
+	// 老协议遗留的 hidden preview：成功时顺手清掉。
+	if previewID != "" && previewID != wsID {
 		_ = r.DB.ClearConflicts(previewID)
-		_, _, _ = r.WS.Drop(previewID, true, true)
+		r.dropAfterLand(res, previewID, true)
 	}
 	if idemKey != "" {
 		r.putIdem("ws_land_into", idemKey, res)

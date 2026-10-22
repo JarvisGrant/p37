@@ -85,6 +85,10 @@ func (d *DB) FinishLand(foldWsIDs []string) error {
 			if _, err := tx.Exec(`DELETE FROM lease WHERE ws_id = ?`, wsID); err != nil {
 				return err
 			}
+			// resolution 没有外键，必须显式清理（key 含 wsID，不会复用）。
+			if _, err := tx.Exec(`DELETE FROM resolution WHERE ws_id = ?`, wsID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(`DELETE FROM workspace WHERE id = ?`, wsID); err != nil {
 				return err
 			}

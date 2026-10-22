@@ -27,9 +27,15 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessOpt(t, repo.Options{Materialize: mountmgr.ModeAuto})
+}
+
+// newHarnessOpt 允许测试自定义仓库上限（例如把 max_active 调到 1 来验证配额 detail）。
+func newHarnessOpt(t *testing.T, opts repo.Options) *harness {
+	t.Helper()
 	root := t.TempDir()
 	src := t.TempDir()
-	r, err := repo.Init(root, repo.Options{Materialize: mountmgr.ModeAuto})
+	r, err := repo.Init(root, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,6 +135,7 @@ func TestToolsListed(t *testing.T) {
 		"repo_status", "version_log", "version_show", "version_diff",
 		"lease_query", "blame",
 		"ws_open", "ws_list", "ws_info", "ws_lease", "ws_sync", "ws_drop", "ws_rebase",
+		"ws_quota",
 		"conflict_list", "conflict_show", "conflict_resolve", "conflict_resolve_all",
 		"land_preview", "ws_land", "version_revert",
 		"sync_status", "sync_prepare", "sync_list", "sync_show",

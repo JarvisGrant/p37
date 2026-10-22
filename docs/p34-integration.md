@@ -60,14 +60,26 @@ ws_land(repo, ws_id,
 parent = ws_open(parent=session line)
 child  = ws_open(parent={kind:"workspace", id:parent.ws_id})
 ... worker 改文件 ...
-p = land_preview(child, target={kind:"workspace", id:parent.ws_id})
-ws_land_into(child, parent.ws_id,
-             expected_parent_tree=p.target_head,
-             preview_id=p.preview_id,
-             idempotency_key=...)
+
+r = ws_land_into(child, parent.ws_id, idempotency_key=<child-task-id>)
+# r.can_land=false / r.state="conflict" 时：
+#   conflict_list(ws_id=child)
+#   conflict_resolve(key, ...) 或 conflict_resolve_all(ws_id=child, policy="prefer_upper")
+#   r2 = land_preview 可选；直接带最新 target_head 重试：
+#   ws_land_into(child, parent.ws_id,
+#                expected_parent_tree=<最新 target_head>,
+#                preview_id=r.preview_id, idempotency_key=<同一个 key>)
 ```
 
-子工作区默认销毁；父保留。`ws_land_into` 只允许直接父，不产生版本。
+- 冲突挂在子工作区上，`preview_id` 等于子工作区 id；不要再为每次重试新建子工作区。
+- 解决记录按冲突 key 保存，key 含工作区 id；同一子工作区重试才会命中。
+- 子工作区默认销毁；父保留。`ws_land_into` 只允许直接父，不产生版本。
+- 子工作区冲突未解决时，父工作区 `ws_land(fold=self)` 会返回
+  `ws_has_active_children`，`detail.blocked_by_children` 列出阻塞项；此时要么
+  解冲突，要么 `ws_drop(child)`（配额立即回收），不要无限重试。
+- 配额：派发前读 `ws_quota`；可用子任务数 = `active_available`（主管工作区
+  已计入 `active_used`）。`quota_exceeded` 的 `detail` 带 `used/limit/scope`，
+  应作为平台容量问题暂停+退避，而不是判定模型空转。
 
 ## 6. 用户并入应用线
 

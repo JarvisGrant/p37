@@ -518,12 +518,31 @@ func (s *Server) registerWorkspace() {
 					return map[string]any{"dropped": []string{a.WsID}, "already_dropped": true,
 						"reparented": []string{}, "conflicts": []any{}, "dirty_ops_discarded": 0}, nil
 				}
+				// 元数据已删除、配额已回收；目录清理失败只是警告。
+				if errors.Is(err, workspace.ErrCleanupFailed) {
+					return map[string]any{
+						"dropped": dropped, "reparented": reparented,
+						"conflicts": []any{}, "dirty_ops_discarded": n,
+						"dir_cleanup_warning": err.Error(),
+					}, nil
+				}
 				return nil, err
 			}
 			return map[string]any{
 				"dropped": dropped, "reparented": reparented,
 				"conflicts": []any{}, "dirty_ops_discarded": n,
 			}, nil
+		})
+
+	s.register("ws_quota",
+		"返回工作区配额用量（max_active / 隐藏 / 栈深 / fanout），供调用方做准入限流。",
+		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, err := s.repoFor(repoArg(raw))
+			if err != nil {
+				return nil, err
+			}
+			return rr.WS.Quota()
 		})
 
 	s.register("ws_rebase",

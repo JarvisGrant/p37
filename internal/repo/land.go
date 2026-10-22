@@ -3,6 +3,7 @@ package repo
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,9 @@ type LandResult struct {
 	PreviewID     string  `json:"-"`
 	AlreadyLanded bool    `json:"-"`
 	State         string  `json:"-"`
+	// Warnings 是「land 已成功，但清理/收尾有非致命问题」的说明。
+	// 典型场景：工作区元数据已释放，但 overlay 目录 umount 忙（EBUSY）。
+	Warnings []string `json:"-"`
 }
 
 // ConflictsJSON 返回面向 MCP 的冲突列表（带 key）。
@@ -268,7 +272,11 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	}
 	for _, w := range fold {
 		overlay := w.Materialize == meta.MaterializeOverlay
-		_ = r.MM.Close(w.ID, false, overlay)
+		if err := r.MM.Close(w.ID, false, overlay); err != nil {
+			msg := fmt.Sprintf("land 已提交，但清理工作区 %s 目录失败: %v", w.ID, err)
+			log.Printf("p37: %s", msg)
+			out.Warnings = append(out.Warnings, msg)
+		}
 	}
 	if err := r.DB.FinishLand(foldIDs); err != nil {
 		return nil, err
@@ -295,6 +303,7 @@ func (r *Repo) Land(wsID string) (*LandResult, error) {
 		return nil, err
 	}
 	if len(res.Conflicts) > 0 {
+		res.State = "conflict"
 		if err := r.persistConflicts(wsID, res.Conflicts); err != nil {
 			return nil, err
 		}

@@ -28,6 +28,8 @@ P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
 | 13 | copy/overlay、磁盘统计 | 既有 mount/workspace 测试、`ws_disk_usage` |
 | 14 | P36 新 VM / 多仓库会话 / legacy default | `packaging/p36/acceptance` + `ci/acceptance.sh`（`P37_ROOT`） |
 | 15 | 幂等/错误码/受保护 line/非祖先 reset | `idem_v2_test.go`、`line_v2_test.go`、MCP 测试 |
+| 16 | 配额回收：landed 不占额度、Drop 清理失败仍删行、fanout 忽略 hidden/landed | `internal/repo/quota_recovery_test.go` |
+| 17 | 子工作区冲突可发现/可重试/父 land 不死锁 + `ws_quota`/quota detail | `quota_recovery_test.go`、`internal/mcpsrv/quota_test.go` |
 
 ## 已知未做/限制
 

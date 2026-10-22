@@ -28,10 +28,16 @@ repo_registry 锁
 
 - `landed` 用 `landed_ts` 表达（state 仍存 active），`ws_info`/`ws_list`
   对外显示 `landed`。
+- `max_active` 只统计 `active/conflicted/rebasing`（`ws_quota.active_used`）；
+  `landed`、`integrating`、`hidden`、`broken` 不占额度，`broken` 在
+  `ws_quota.broken` 单独暴露。
 - 隐藏 merge/preview 工作区 `hidden=1`，不占用户 `max_active`，单独
   `max_hidden`（默认 32），默认不出现在 `ws_list`。
+- `ws_drop` 先释放元数据（配额立即回收），目录清理失败只返回
+  `dir_cleanup_warning`；daemon 启动会清掉没有行引用的孤儿目录。
 - `ws_reap` 不删除有 lease 的工作区；用户 active 工作区不自动回收；隐藏
-  merge/preview TTL 24h；landed/broken 可回收。
+  merge/preview TTL 24h；landed 可在 24h 后回收；显式 `state=broken` 可回收
+  broken 工作区；`include_orphan_dirs=true` 顺带清理孤儿目录。
 
 ## 幂等
 

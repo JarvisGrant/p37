@@ -200,7 +200,7 @@ func (d *DB) UpdateWorkspaceBase(id string, baseTree, baseVersion hash.ID, ts in
 	})
 }
 
-// DeleteWorkspace 删除工作区（级联清理 op/lease/stat_cache/conflict）。
+// DeleteWorkspace 删除工作区（级联清理 op/lease/stat_cache/conflict/resolution）。
 func (d *DB) DeleteWorkspace(id string) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM stat_cache WHERE ws_id = ?`, id); err != nil {
@@ -210,6 +210,18 @@ func (d *DB) DeleteWorkspace(id string) error {
 			return err
 		}
 		if _, err := tx.Exec(`DELETE FROM ws_effective_tree WHERE ws_id = ?`, id); err != nil {
+			return err
+		}
+		// conflict / lease 有 ON DELETE CASCADE，但显式删除不依赖 pragma，
+		// 也让「删行」与 FinishLand 的清理集合保持一致。
+		if _, err := tx.Exec(`DELETE FROM conflict WHERE ws_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM lease WHERE ws_id = ?`, id); err != nil {
+			return err
+		}
+		// resolution 没有外键（key 是主键），不删会随工作区使用单调增长。
+		if _, err := tx.Exec(`DELETE FROM resolution WHERE ws_id = ?`, id); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`DELETE FROM workspace WHERE id = ?`, id)
@@ -502,10 +514,35 @@ func (d *DB) SetWorkspaceLanded(id string, ts int64) error {
 	})
 }
 
-// CountVisibleWorkspaces 返回非隐藏工作区数（max_active 只统计用户工作区）。
+// CountVisibleWorkspaces 返回**真正占用 max_active** 的工作区数。
+//
+// 只统计 hidden=0、未落地、且处于活跃状态的行：
+//   - landed_ts != 0 的行是 drop_workspace=false 保留下来的只读工作区，
+//     它们不再参与并发/磁盘预算，必须排除，否则配额只减不增；
+//   - integrating 是 land 的中间态（提交点前后），由 ReconcileLand 收尾；
+//   - broken 不计入额度（挂载/目录异常时不应把用户锁死），但在 ws_quota
+//     里单独暴露，便于调用方决定是否清理。
 func (d *DB) CountVisibleWorkspaces() (int, error) {
 	var n int
-	err := d.sql.QueryRow(`SELECT COUNT(*) FROM workspace WHERE hidden=0`).Scan(&n)
+	err := d.sql.QueryRow(
+		`SELECT COUNT(*) FROM workspace
+		  WHERE hidden=0 AND landed_ts=0 AND state IN (?,?,?)`,
+		StateActive, StateConflicted, StateRebasing).Scan(&n)
+	return n, err
+}
+
+// CountLandedWorkspaces 返回 drop_workspace=false 保留下来的只读工作区数。
+func (d *DB) CountLandedWorkspaces() (int, error) {
+	var n int
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM workspace WHERE hidden=0 AND landed_ts<>0`).Scan(&n)
+	return n, err
+}
+
+// CountBrokenWorkspaces 返回可见的 broken 工作区数。
+func (d *DB) CountBrokenWorkspaces() (int, error) {
+	var n int
+	err := d.sql.QueryRow(`SELECT COUNT(*) FROM workspace WHERE hidden=0 AND landed_ts=0 AND state=?`,
+		StateBroken).Scan(&n)
 	return n, err
 }
 

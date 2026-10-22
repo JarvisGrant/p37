@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -92,6 +93,9 @@ type Options struct {
 	MaxActive int
 	MaxDepth  int
 	MaxFanout int
+	// MaxHidden 是隐藏 merge/preview 工作区上限（不占 max_active）。
+	// 0 表示 workspace 包默认值 32。
+	MaxHidden int
 	// MaxMatches 是 place 的匹配上限（附录 B 的 merge.max_matches）。
 	// 0 表示 op.DefaultMaxMatches。
 	MaxMatches int
@@ -201,6 +205,7 @@ func Open(root string, opt Options) (*Repo, error) {
 		MaxActive:          opt.MaxActive,
 		MaxDepth:           opt.MaxDepth,
 		MaxFanout:          opt.MaxFanout,
+		MaxHidden:          opt.MaxHidden,
 		MaxMatches:         opt.MaxMatches,
 	})
 
@@ -246,6 +251,25 @@ func Open(root string, opt Options) (*Repo, error) {
 	if err := r.reconcileLandInto(); err != nil {
 		_ = r.Close()
 		return nil, err
+	}
+	// daemon 启动的兜底回收：
+	//   - workspaces/ 下没有行引用的孤儿目录（崩溃残留 / Drop 清理失败）；
+	//   - 超过 preview 过期时间的隐藏 merge/preview 工作区（老版本会持续累积）。
+	// 只在 daemon 模式执行：CLI 每次调用都扫盘既慢又容易与运行中的 daemon 抢活。
+	if opt.RemountWorkspaces {
+		if reaped, err := ws.ReapOrphanDirs(); err != nil {
+			log.Printf("p37: 孤儿工作区目录清理有失败项: %v", err)
+			if len(reaped) > 0 {
+				log.Printf("p37: 已清理孤儿目录 %d 个: %v", len(reaped), reaped)
+			}
+		} else if len(reaped) > 0 {
+			log.Printf("p37: 已清理孤儿目录 %d 个: %v", len(reaped), reaped)
+		}
+		if reaped, err := ws.ReapStaleHidden(24 * time.Hour); err != nil {
+			log.Printf("p37: 过期隐藏工作区清理有失败项: %v", err)
+		} else if len(reaped) > 0 {
+			log.Printf("p37: 已清理过期隐藏工作区 %d 个: %v", len(reaped), reaped)
+		}
 	}
 	return r, nil
 }
