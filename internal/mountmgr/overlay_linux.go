@@ -47,6 +47,12 @@ func (m *Manager) mountWithLower(wsID string, baseTree hash.ID, base string) err
 
 // unmountOverlay 卸载工作区（§4.6、§4.9.2）。
 func (m *Manager) unmountOverlay(wsID string) error {
+	// 先确认它真的是挂载点：copy 模式/已卸载的目录直接跳过。
+	// 否则在受限环境（无 CAP_SYS_ADMIN、seccomp、容器 runner）里
+	// umount 会返回 EPERM，被误判成「清理失败」，而其实无事可做。
+	if !m.IsMounted(wsID) {
+		return nil
+	}
 	dir := m.WorkspaceDir(wsID)
 	if err := syscall.Unmount(dir, 0); err != nil {
 		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOENT) {
