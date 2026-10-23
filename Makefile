@@ -5,7 +5,7 @@
 
 GO      ?= go
 OUT     ?= dist
-VERSION ?= 0.3.0
+VERSION ?= 0.3.1
 # 用 := 立即求值：否则 p37、p37d、manifest 会各自调用一次 date，
 # 同一个发布物里的 buildTime 不一致。
 COMMIT  := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)

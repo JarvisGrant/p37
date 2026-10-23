@@ -37,6 +37,9 @@ type Config struct {
 type RepoConfig struct {
 	FormatVer   int      `toml:"format_ver"`
 	IgnoreExtra []string `toml:"ignore_extra"`
+	// ExportRoot 限制 repo_export 的目标目录范围。为空时只要求目标在仓库
+	// 目录之外；非空时 dest_dir 必须位于该绝对路径之下。
+	ExportRoot string `toml:"export_root"`
 }
 
 // FilesConfig 对应 [files]。
@@ -298,6 +301,7 @@ func (c Config) RepoOptions() repo.Options {
 	copt.StableDelay, copt.StableRetries = delay, retries
 	return repo.Options{
 		ExtraIgnore:    c.Repo.IgnoreExtra,
+		ExportRoot:     c.Repo.ExportRoot,
 		Capture:        copt,
 		Materialize:    c.MountMode(),
 		BaseCacheBytes: c.Workspace.BaseCacheBytes,

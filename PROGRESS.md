@@ -1,7 +1,7 @@
 # P37 实现进度
 
 > 设计规格为内部资料，不随本仓库发布
-> 最近更新：2026-10-19
+> 最近更新：2026-10-23
 
 ## 当前状态
 
@@ -29,6 +29,24 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单、闭环、冲突、revert、错误码映射。
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
+
+## v0.3.1：部署导出加固（2026-10-23）
+
+P34 改用 `repo_export` 做自动部署（不创建 workspace、不产生版本）后，补齐
+导出路径的生产级缺口：
+
+| 问题 | 修复 |
+|---|---|
+| 导出大文件整份进内存，1 GiB 实例可能 OOM | `repo_export` / `version_archive` 改为按 CAS 分块流式写入 |
+| `version_file` 先读完整文件再截断 | 新增 `ReadFilePrefix`，只读 `max_bytes` 对应分块 |
+| `dest_dir` 可写任意路径 | 必须是绝对路径、仓库外；`[repo] export_root` 可进一步限制；拒绝 symlink 目标 |
+| 导出错误码不可区分 | 新增 `destination_not_empty`；非法目录 `invalid_argument`；`line:` 不存在 `line_not_found` |
+| 导出结果不可观测 | 返回 `version_id/files/bytes/duration_ms` |
+| Cloudflare 100s / 大仓库同步超时 | 新增 `async=true` + `repo_export_status(job_id)` |
+| umask 可能抹掉可执行位 | 导出文件显式 chmod |
+
+P36 模板新增 `[repo] export_root = "/srv/repos/.p37/tmp/p34-deploy"`。
+仓库格式仍为 `format_ver=2`，无需迁移。
 
 ## v0.3.0：工作区生命周期与配额修复（2026-10-23）
 

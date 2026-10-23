@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
+	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/op"
 	"github.com/chenyiwen/p37/internal/tree"
 )
@@ -235,13 +237,10 @@ func (r *Repo) VersionFile(ref, p string, maxBytes int64) (*FileView, error) {
 	if fc.TotalSize > maxBytes {
 		v.Truncated = true
 	}
-	data, err := r.Store.ReadFileData(ent.ID)
+	// 只读前 maxBytes；不能先 ReadFileData 再截断，否则大文件会整份进内存。
+	data, _, err := r.Store.ReadFilePrefix(ent.ID, maxBytes)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		data = data[:maxBytes]
-		v.Truncated = true
 	}
 	v.ContentBase64 = encodeBase64(data)
 	return v, nil
@@ -398,7 +397,7 @@ func (r *Repo) writeTar(tw *tar.Writer, t *tree.Tree, prefix string) error {
 				return err
 			}
 		default:
-			data, err := r.Store.ReadFileData(e.ID)
+			fc, err := r.Store.GetFileContent(e.ID)
 			if err != nil {
 				return err
 			}
@@ -406,12 +405,16 @@ func (r *Repo) writeTar(tw *tar.Writer, t *tree.Tree, prefix string) error {
 			if e.Mode == codec.ModeExecutable {
 				mode = 0o755
 			}
-			if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(data)),
+			if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: fc.TotalSize,
 				Typeflag: tar.TypeReg, ModTime: time.Unix(0, 0)}); err != nil {
 				return err
 			}
-			if _, err := tw.Write(data); err != nil {
+			n, err := r.Store.WriteFileData(e.ID, tw)
+			if err != nil {
 				return err
+			}
+			if n != fc.TotalSize {
+				return fmt.Errorf("repo: 归档写入 %s 长度 %d != 声明 %d", name, n, fc.TotalSize)
 			}
 		}
 	}
@@ -452,10 +455,6 @@ func (r *Repo) writeZip(zw *zip.Writer, t *tree.Tree, prefix string) error {
 				return err
 			}
 		default:
-			data, err := r.Store.ReadFileData(e.ID)
-			if err != nil {
-				return err
-			}
 			h := &zip.FileHeader{Name: name, Method: zip.Deflate}
 			if e.Mode == codec.ModeExecutable {
 				h.SetMode(0o755)
@@ -466,7 +465,7 @@ func (r *Repo) writeZip(zw *zip.Writer, t *tree.Tree, prefix string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := w.Write(data); err != nil {
+			if _, err := r.Store.WriteFileData(e.ID, w); err != nil {
 				return err
 			}
 		}
@@ -552,29 +551,146 @@ func (r *Repo) diffTrees(a, b *tree.Tree) ([]op.Op, error) {
 	return captureDiff(r.Store, "__diff__", a, b, r.CaptureOpt)
 }
 
-// Export 把 ref 的树物化到 dest 目录。dest 必须为空或不存在。
-func (r *Repo) Export(ref, dest string) error {
-	if dest == "" {
-		return fmt.Errorf("repo: 缺少目标目录")
-	}
-	if entries, err := os.ReadDir(dest); err == nil && len(entries) > 0 {
-		return fmt.Errorf("repo: 目标目录非空: %s", dest)
-	}
-	t, _, err := r.resolveTreeAt(ref, "")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return err
-	}
-	return writeTreeTo(dest, "", t, r.Store)
+// ExportResult 是 repo_export 的结果。
+type ExportResult struct {
+	VersionID hash.ID `json:"version_id"`
+	Files     int     `json:"files"`
+	Bytes     int64   `json:"bytes"`
+	DestDir   string  `json:"dest_dir"`
 }
 
-func writeTreeTo(dest, prefix string, t *tree.Tree, store interface {
+// Export 把 ref 的树物化到 dest 目录。dest 必须为空或不存在。
+//
+// dest 必须是绝对路径、位于仓库目录之外；如果配置了 export_root，还必须
+// 位于 export_root 之下。这避免 MCP 调用方把文件写到任意路径。
+func (r *Repo) Export(ref, dest string) (*ExportResult, error) {
+	d, err := r.validateExportDest(dest)
+	if err != nil {
+		return nil, err
+	}
+	id, err := r.resolveRef(ref, false)
+	if err != nil {
+		return nil, err
+	}
+	v, err := r.DB.GetVersion(id)
+	if err != nil {
+		if errors.Is(err, meta.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrVersionNotFound, id)
+		}
+		return nil, err
+	}
+	t, err := r.Store.GetTree(v.Tree)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(d, 0o755)
+	files, bytes, err := writeTreeTo(d, "", t, r.Store)
+	if err != nil {
+		return nil, err
+	}
+	return &ExportResult{VersionID: id, Files: files, Bytes: bytes, DestDir: d}, nil
+}
+
+// validateExportDest 校验导出目标，返回清理后的绝对路径。
+func (r *Repo) validateExportDest(dest string) (string, error) {
+	if strings.TrimSpace(dest) == "" {
+		return "", fmt.Errorf("%w: 目标目录为空", ErrInvalidDest)
+	}
+	if !filepath.IsAbs(dest) {
+		return "", fmt.Errorf("%w: 必须是绝对路径: %s", ErrInvalidDest, dest)
+	}
+	dest = filepath.Clean(dest)
+	if dest == string(filepath.Separator) {
+		return "", fmt.Errorf("%w: 不能是根目录", ErrInvalidDest)
+	}
+	// 目标本身是符号链接时拒绝：否则 ReadDir/MkdirAll 会跟随到别处。
+	if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("%w: 不能是符号链接: %s", ErrInvalidDest, dest)
+	}
+	resolvedDest, err := resolveExistingPath(dest)
+	if err != nil {
+		return "", fmt.Errorf("%w: 无法解析目标目录: %v", ErrInvalidDest, err)
+	}
+	resolvedRepo, err := resolveExistingPath(r.Root)
+	if err != nil {
+		return "", fmt.Errorf("%w: 无法解析仓库目录: %v", ErrInvalidDest, err)
+	}
+	if isWithinDir(resolvedRepo, resolvedDest) {
+		return "", fmt.Errorf("%w: 不能位于仓库目录内: %s", ErrInvalidDest, dest)
+	}
+	if r.exportRoot != "" {
+		if !filepath.IsAbs(r.exportRoot) {
+			return "", fmt.Errorf("%w: export_root 必须是绝对路径: %s", ErrInvalidDest, r.exportRoot)
+		}
+		resolvedRoot, err := resolveExistingPath(r.exportRoot)
+		if err != nil {
+			return "", fmt.Errorf("%w: 无法解析 export_root: %v", ErrInvalidDest, err)
+		}
+		if !isWithinDir(resolvedRoot, resolvedDest) {
+			return "", fmt.Errorf("%w: 必须位于 export_root=%s 下: %s",
+				ErrInvalidDest, r.exportRoot, dest)
+		}
+	}
+	if entries, err := os.ReadDir(dest); err == nil {
+		if len(entries) > 0 {
+			return "", fmt.Errorf("%w: %s", ErrDestNotEmpty, dest)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("%w: %v", ErrInvalidDest, err)
+	}
+	return dest, nil
+}
+
+// resolveExistingPath 解析路径中已存在部分的符号链接，并拼回尚不存在的尾部。
+func resolveExistingPath(p string) (string, error) {
+	p = filepath.Clean(p)
+	cur := p
+	var missing []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		missing = append([]string{filepath.Base(cur)}, missing...)
+		cur = parent
+	}
+	resolved, err := filepath.EvalSymlinks(cur)
+	if err != nil {
+		return "", err
+	}
+	if len(missing) > 0 {
+		resolved = filepath.Join(append([]string{resolved}, missing...)...)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// isWithinDir 报告 p 是否等于 root 或位于 root 之下。
+func isWithinDir(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// treeExportStore 是导出需要的只读对象接口。文件内容必须流式写入，
+// 不能整份读进内存。
+type treeExportStore interface {
 	GetTree(hash.ID) (*tree.Tree, error)
-	ReadFileData(hash.ID) ([]byte, error)
+	WriteFileData(hash.ID, io.Writer) (int64, error)
 	ReadBlob(hash.ID) ([]byte, error)
-}) error {
+}
+
+func writeTreeTo(dest, prefix string, t *tree.Tree, store treeExportStore) (int, int64, error) {
+	files, bytes := 0, int64(0)
 	for i := range t.Entries {
 		e := &t.Entries[i]
 		rel := e.Name
@@ -585,45 +701,65 @@ func writeTreeTo(dest, prefix string, t *tree.Tree, store interface {
 		switch e.Kind {
 		case codec.EntryTree:
 			if err := os.MkdirAll(p, 0o755); err != nil {
-				return err
+				return files, bytes, err
 			}
 			sub, err := store.GetTree(e.ID)
 			if err != nil {
-				return err
+				return files, bytes, err
 			}
-			if err := writeTreeTo(dest, rel, sub, store); err != nil {
-				return err
+			f, b, err := writeTreeTo(dest, rel, sub, store)
+			files += f
+			bytes += b
+			if err != nil {
+				return files, bytes, err
 			}
 		case codec.EntrySymlink:
 			b, err := store.ReadBlob(e.ID)
 			if err != nil {
-				return err
+				return files, bytes, err
 			}
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-				return err
+				return files, bytes, err
 			}
 			_ = os.Remove(p)
 			if err := os.Symlink(string(b), p); err != nil {
-				return err
+				return files, bytes, err
 			}
+			files++
+			bytes += int64(len(b))
 		default:
-			b, err := store.ReadFileData(e.ID)
-			if err != nil {
-				return err
-			}
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-				return err
+				return files, bytes, err
 			}
 			mode := os.FileMode(0o644)
 			if e.Mode == codec.ModeExecutable {
 				mode = 0o755
 			}
-			if err := os.WriteFile(p, b, mode); err != nil {
-				return err
+			f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return files, bytes, err
 			}
+			// umask 可能抹掉可执行位；显式 chmod 保证导出结果与版本树一致。
+			if err := f.Chmod(mode); err != nil {
+				_ = f.Close()
+				_ = os.Remove(p)
+				return files, bytes, err
+			}
+			n, werr := store.WriteFileData(e.ID, f)
+			cerr := f.Close()
+			if werr != nil {
+				_ = os.Remove(p)
+				return files, bytes, werr
+			}
+			if cerr != nil {
+				_ = os.Remove(p)
+				return files, bytes, cerr
+			}
+			files++
+			bytes += n
 		}
 	}
-	return nil
+	return files, bytes, nil
 }
 
 func cleanupArchives(dir string, before time.Time) {

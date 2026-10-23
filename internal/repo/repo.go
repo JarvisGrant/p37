@@ -47,6 +47,9 @@ type Repo struct {
 	// redactTaskDesc 为真时血缘（journal）不落任务描述原文
 	// （附录 B 的 journal.redact_task_desc）。
 	redactTaskDesc bool
+	// exportRoot 非空时，repo_export 的 dest_dir 必须位于该目录之下。
+	// 这是防止 MCP 调用方把文件写到任意路径的服务端护栏。
+	exportRoot string
 
 	// syncMu 避免同一 repo 同时跑 push/fetch/pull。
 	syncMu sync.Mutex
@@ -68,6 +71,11 @@ var (
 	ErrNotDirty = errors.New("repo: 无改动")
 	// ErrLandQueueFull 表示 land 队列已满。
 	ErrLandQueueFull = errors.New("repo: land 队列已满")
+	// ErrDestNotEmpty 表示 repo_export 的目标目录非空。
+	ErrDestNotEmpty = errors.New("repo: 导出目标目录非空")
+	// ErrInvalidDest 表示 repo_export 的目标目录非法（相对路径、仓库内、
+	// 符号链接或越过 export_root）。
+	ErrInvalidDest = errors.New("repo: 非法导出目录")
 )
 
 // Options 配置打开仓库。
@@ -88,6 +96,9 @@ type Options struct {
 
 	// EpochSize 是 epoch 的版本数（§9.4）。0 表示 DefaultEpochSize。
 	EpochSize int
+	// ExportRoot 限制 repo_export 的目标目录范围（绝对路径）。
+	// 为空表示只要求目标在仓库目录之外；非空时还必须位于该目录之下。
+	ExportRoot string
 	// MaxActive / MaxDepth / MaxFanout 覆盖工作区上限（附录 B）。
 	// 0 表示硬上限；只能调小，不能调大（D20）。
 	MaxActive int
@@ -239,6 +250,7 @@ func Open(root string, opt Options) (*Repo, error) {
 	r := &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
 		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
 		redactTaskDesc: opt.RedactTaskDesc,
+		exportRoot:     opt.ExportRoot,
 		landSem:        make(chan struct{}, qmax)}
 	// 步骤 3：恢复活跃工作区的挂载。**必须在 land 修复之后**，因为修复可能
 	// 焚毁/恢复工作区。只重建挂载，upper 层原样保留。

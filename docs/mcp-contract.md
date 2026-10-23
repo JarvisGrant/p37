@@ -34,7 +34,8 @@
 | `repo_delete` | `force`, `delete_remote`；有活跃工作区/租约时返回 `repo_busy` |
 | `repo_disk_usage` | 磁盘占用 |
 | `repo_import` | 空仓库导入目录为 v0 |
-| `repo_export` | 把 line/version 物化到目录 |
+| `repo_export` | 把 line/version 物化到目录；`async=true` 返回 `job_id` |
+| `repo_export_status` | 查询异步导出任务；任务只在当前 daemon 进程内有效 |
 | `repo_set_remote` | 更新 per-repo `[remote]`；凭证只从环境变量读 |
 | `ws_disk_usage` | 按工作区统计磁盘占用 |
 
@@ -137,7 +138,29 @@ if r.state == "conflict" or !r.can_land:
 | `version_compare` | 两个 ref 的 ahead/behind |
 
 `version_file.max_bytes` 默认 4 MiB、最大 8 MiB（base64 膨胀后仍低于 16 MiB
-响应上限）；更大内容用 `version_archive`。
+响应上限）；更大内容用 `version_archive`。实现只读取前 `max_bytes`，不会把
+整文件读进内存。
+
+## 导出（部署 / 迁移）
+
+```text
+repo_export(repo, ref, dest_dir, async=false)
+→ { exported, ref, dest_dir, version_id, files, bytes, duration_ms }
+```
+
+- 不创建 workspace、不占 `ws_quota`、不出现在 `ws_list`，也不会被 fs watcher
+  监听；导出目录里的构建产物不会进入 CAS/op/版本。
+- `dest_dir` 必须是绝对路径、位于仓库目录之外。配置了
+  `[repo] export_root` 时还必须位于该目录之下（P36 模板默认
+  `/srv/repos/.p37/tmp/p34-deploy`）。
+- `dest_dir` 必须不存在或为空；非空返回 `destination_not_empty`。
+- 文件按分块流式写出，内存占用上界为单个 CAS 分块（64 KiB），不会因为大文件
+  整份进内存。`files` 统计普通文件与 symlink，不统计目录；`bytes` 是普通文件
+  字节数加 symlink 目标字符串长度。
+- 保留 symlink、可执行位；不保留 mtime/uid/gid/xattr/硬链接。
+- 导出目录的清理完全由调用方负责；P37 不自动删除导出目录。
+- `async=true` 时立即返回 `{job_id, state:"running", dest_dir}`，用
+  `repo_export_status(job_id)` 轮询。任务不持久化，daemon 重启后失效。
 
 ## 同步
 
@@ -164,7 +187,7 @@ target_invalid target_moved source_moved target_not_ancestor
 parent_moved preview_expired preview_mismatch merge_expired merge_base_ambiguous
 ws_not_found ws_not_mounted ws_broken ws_busy ws_has_active_children
 already_landed already_merged already_dropped already_deleted
-not_dirty conflict invalid_path quota_exceeded land_queue_full
+not_dirty conflict invalid_path destination_not_empty quota_exceeded land_queue_full
 idempotency_key_conflict idempotency_expired ambiguous_id
 sync_not_configured sync_in_progress sync_remote_moved
 response_too_large archive_too_large file_too_large corrupt_object

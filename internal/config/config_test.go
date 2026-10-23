@@ -37,6 +37,7 @@ func TestRepoOptionsWiresEveryKnob(t *testing.T) {
 	c.Files.MaxFileSize = 111
 	c.Files.MaxTextSize = 222
 	c.Files.BinaryProbeBytes = 333
+	c.Repo.ExportRoot = "/srv/repos/.p37/tmp/p34-deploy"
 
 	o := c.RepoOptions()
 
@@ -54,6 +55,9 @@ func TestRepoOptionsWiresEveryKnob(t *testing.T) {
 	}
 	if o.BaseCacheBytes != 456 {
 		t.Errorf("workspace.base_cache_bytes 未接线: %d", o.BaseCacheBytes)
+	}
+	if o.ExportRoot != "/srv/repos/.p37/tmp/p34-deploy" {
+		t.Errorf("repo.export_root 未接线: %q", o.ExportRoot)
 	}
 	if o.GC.KeepVersions != 21 || o.GC.KeepEpochs != 4 {
 		t.Errorf("retention.keep_* 未接线: %+v", o.GC)

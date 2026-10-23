@@ -11,6 +11,8 @@
 
 [repo]
 format_ver = 2
+# 限制 repo_export 只能写到这里（P34 部署约定见 config.toml）。
+export_root = "/srv/repos/.p37/tmp/p34-deploy"
 
 [workspace]
 materialize = "overlay"

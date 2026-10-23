@@ -893,8 +893,9 @@ func refAsLine(r *repo.Repo, ref string) (string, error) {
 }
 
 func (s *Server) registerRepoExport() {
-	s.register("repo_export", "把 line/version 物化到目录（迁移/导出）。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"dest_dir":{"type":"string"}},"required":["repo","ref","dest_dir"],"additionalProperties":false}`,
+	s.register("repo_export",
+		"把 line/version 物化到目录（迁移/部署导出）。async=true 时返回 job_id，用 repo_export_status 轮询。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"dest_dir":{"type":"string"},"async":{"type":"boolean"}},"required":["repo","ref","dest_dir"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
@@ -903,14 +904,45 @@ func (s *Server) registerRepoExport() {
 			var a struct {
 				Ref     string `json:"ref"`
 				DestDir string `json:"dest_dir"`
+				Async   bool   `json:"async"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
-			if err := rr.Export(a.Ref, a.DestDir); err != nil {
+			if strings.TrimSpace(a.Ref) == "" {
+				return nil, coded("invalid_argument", "ref 不能为空")
+			}
+			if strings.TrimSpace(a.DestDir) == "" {
+				return nil, coded("invalid_argument", "dest_dir 不能为空")
+			}
+			if a.Async {
+				id, state := s.startExportJob(rr, repoArg(raw), a.Ref, a.DestDir)
+				return map[string]any{
+					"job_id": id, "state": state, "dest_dir": a.DestDir,
+				}, nil
+			}
+			start := nowMS()
+			res, err := rr.Export(a.Ref, a.DestDir)
+			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"exported": true, "ref": a.Ref, "dest_dir": a.DestDir}, nil
+			return map[string]any{
+				"exported": true, "ref": a.Ref, "dest_dir": res.DestDir,
+				"version_id": res.VersionID.String(), "files": res.Files,
+				"bytes": res.Bytes, "duration_ms": nowMS() - start,
+			}, nil
+		})
+
+	s.register("repo_export_status", "查询异步 repo_export 任务状态。",
+		`{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var a struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			return s.exportJobStatus(a.JobID)
 		})
 }
 

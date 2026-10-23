@@ -7,6 +7,10 @@
 
 [repo]
 format_ver = 2
+# 限制 repo_export 只能写到这里，避免 MCP 调用方把文件导出到任意路径。
+# P34 部署约定：/srv/repos/.p37/tmp/p34-deploy/<jobId>。
+# 如果不使用导出能力或需要其它目录，删除/修改本行即可。
+export_root = "/srv/repos/.p37/tmp/p34-deploy"
 
 [workspace]
 # Ubuntu 26.04 非 root 下 OverlayFS 可能 EPERM（即使有 CAP_SYS_ADMIN）。

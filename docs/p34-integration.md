@@ -141,6 +141,31 @@ sync_restore(repo="my-app", name="my-app", remote_prefix="<...>/rk_...",
 `sync_push` 必须 durable 成功后才能删 VM。`sync_restore` 恢复所有 line；
 workspace 不恢复，P34 重新 `ws_open`。
 
+## 11. 自动部署（不产生版本，不占 workspace 配额）
+
+推荐用 `repo_export`，不要用 `ws_open` 做构建：
+
+```text
+line_info(repo, name="main")            # 取 head，固定版本
+repo_export(repo,
+            ref="version:"+head,
+            dest_dir="/srv/repos/.p37/tmp/p34-deploy/<jobId>",
+            async=false)                 # 大仓库可用 true + repo_export_status
+P36 exec: cd dest_dir && npm ci && npm run build
+P34 直接读 dest_dir/dist/**（P37 没有读 workspace 文件的工具）
+finally: rm -rf dest_dir
+```
+
+- `repo_export` 不创建 workspace、不占 `max_active`、不出现在 `ws_list`，也不会
+  被 fs watcher 采集；构建产物不会进入 CAS/op/版本。
+- `dest_dir` 由 P34 服务端生成，必须是绝对路径、仓库外、且（P36 默认配置）
+  位于 `/srv/repos/.p37/tmp/p34-deploy` 之下；不要使用用户输入。
+- 每次 job 用唯一目录，finally 删除；P37 不清理导出目录。
+- 大仓库/Cloudflare 100s 场景用 `async=true` + `repo_export_status(job_id)`；
+  任务只在当前 daemon 进程内有效。
+- 如果必须用 workspace，固定 `parent={kind:"version",id:head}`，构建后
+  `ws_drop`，**绝不调用 `ws_land`**；但 watcher 仍会采集未忽略文件。
+
 ## 注意
 
 - 同一 `remote_prefix` 只允许单写者；P34 需要保证同一 app 的 push 串行。

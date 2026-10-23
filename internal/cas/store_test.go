@@ -250,6 +250,45 @@ func TestCorruptionDetected(t *testing.T) {
 	}
 }
 
+// TestStreamFileData 断言大文件可以按分块流式写出，并且前缀读取不会
+// 读取尾部数据。两者是 repo_export / version_file 避免整文件进内存的基础。
+func TestStreamFileData(t *testing.T) {
+	s := newTestStore(t)
+	data := bytes.Repeat([]byte("0123456789abcdef"), 1024*64) // 1 MiB
+	id, err := s.PutFileData(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	n, err := s.WriteFileData(id, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(len(data)) || !bytes.Equal(buf.Bytes(), data) {
+		t.Fatalf("流式写出不一致: n=%d, len=%d", n, buf.Len())
+	}
+
+	prefix, total, err := s.ReadFilePrefix(id, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != int64(len(data)) {
+		t.Fatalf("总长度 = %d，期望 %d", total, len(data))
+	}
+	if !bytes.Equal(prefix, data[:1024]) {
+		t.Fatalf("前缀内容不一致: len=%d", len(prefix))
+	}
+
+	all, _, err := s.ReadFilePrefix(id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(all, data) {
+		t.Fatal("max<=0 应读取全部内容")
+	}
+}
+
 // TestMissingObject 断言对象缺失返回 ErrNotExist。
 func TestMissingObject(t *testing.T) {
 	s := newTestStore(t)

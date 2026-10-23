@@ -310,6 +310,9 @@ func (s *Store) ReadBlob(id hash.ID) ([]byte, error) { return s.GetBlob(id) }
 // ReadFileData 把 FileContent 的全部分片拼成文件原始字节。
 //
 // 它是 op.ContentStore 的一部分，供重放引擎读取内容。
+//
+// 注意：它会把整个文件读进内存。导出、归档等可能处理大文件的路径应使用
+// WriteFileData / ReadFilePrefix，避免在 1 GiB 级别的实例上 OOM。
 func (s *Store) ReadFileData(id hash.ID) ([]byte, error) {
 	fc, err := s.GetFileContent(id)
 	if err != nil {
@@ -327,6 +330,64 @@ func (s *Store) ReadFileData(id hash.ID) ([]byte, error) {
 		return nil, fmt.Errorf("cas: 文件 %s 长度 %d != 声明 %d", id, len(out), fc.TotalSize)
 	}
 	return out, nil
+}
+
+// WriteFileData 按分块顺序把文件原文写到 w，内存占用上界为单个分块
+// （MaxSize = 64 KiB），因此可以安全地导出大文件。
+func (s *Store) WriteFileData(id hash.ID, w io.Writer) (int64, error) {
+	fc, err := s.GetFileContent(id)
+	if err != nil {
+		return 0, err
+	}
+	var written int64
+	for _, cid := range fc.Chunks {
+		b, err := s.GetBlob(cid)
+		if err != nil {
+			return written, err
+		}
+		n, err := w.Write(b)
+		written += int64(n)
+		if err != nil {
+			return written, err
+		}
+		if n != len(b) {
+			return written, io.ErrShortWrite
+		}
+	}
+	if written != fc.TotalSize {
+		return written, fmt.Errorf("cas: 文件 %s 长度 %d != 声明 %d", id, written, fc.TotalSize)
+	}
+	return written, nil
+}
+
+// ReadFilePrefix 只读取文件前 max 字节，返回内容与文件总长度。
+//
+// 与 ReadFileData 不同，它不会为尾部数据分配内存；max <= 0 表示读取全部。
+// version_file 这类有响应上限的接口应使用它。
+func (s *Store) ReadFilePrefix(id hash.ID, max int64) ([]byte, int64, error) {
+	fc, err := s.GetFileContent(id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if max <= 0 || max > fc.TotalSize {
+		max = fc.TotalSize
+	}
+	out := make([]byte, 0, max)
+	for _, cid := range fc.Chunks {
+		if int64(len(out)) >= max {
+			break
+		}
+		b, err := s.GetBlob(cid)
+		if err != nil {
+			return nil, fc.TotalSize, err
+		}
+		need := max - int64(len(out))
+		if int64(len(b)) > need {
+			b = b[:need]
+		}
+		out = append(out, b...)
+	}
+	return out, fc.TotalSize, nil
 }
 
 // PutFileData 对内容分块、写入 Blob 与 FileContent，返回 FileContent id。

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -79,6 +80,11 @@ type Server struct {
 	// syncOpt / remoteConfigured 供 sync_* 工具使用（由 daemon 注入）。
 	syncOpt          remotesync.Options
 	remoteConfigured bool
+
+	// exportMu 保护异步导出任务表。任务只在当前进程内有效；daemon 重启后
+	// 调用方应重新发起（导出目录可能已部分写入，需自行清理）。
+	exportMu   sync.Mutex
+	exportJobs map[string]*exportJob
 }
 
 // SetSyncOptions 注入远端同步参数（p37d 在启动时调用）。
@@ -105,7 +111,7 @@ func New(r *repo.Repo) *Server {
 		Version:     Version,
 	}, nil)
 
-	s := &Server{R: r, Srv: srv}
+	s := &Server{R: r, Srv: srv, exportJobs: map[string]*exportJob{}}
 	s.registerAll()
 	return s
 }
@@ -280,6 +286,10 @@ func classify(err error) (code, msg string, detail any) {
 		return "land_queue_full", err.Error(), nil
 	case errors.Is(err, repo.ErrPathNotFound):
 		return "path_not_found", err.Error(), nil
+	case errors.Is(err, repo.ErrDestNotEmpty):
+		return "destination_not_empty", err.Error(), nil
+	case errors.Is(err, repo.ErrInvalidDest):
+		return "invalid_argument", err.Error(), nil
 	case errors.Is(err, repo.ErrNotInitialized):
 		return "repo_not_initialized", err.Error(), nil
 	case errors.Is(err, meta.ErrNotExist):

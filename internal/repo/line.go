@@ -700,7 +700,14 @@ func (r *Repo) resolveRef(ref string, allowEmpty bool) (hash.ID, error) {
 	}
 	switch {
 	case len(ref) > 5 && ref[:5] == "line:":
-		return r.DB.LineHead(ref[5:])
+		h, err := r.DB.LineHead(ref[5:])
+		if err != nil {
+			if errors.Is(err, meta.ErrNotExist) {
+				return hash.ID{}, fmt.Errorf("%w: %s", ErrLineNotFound, ref[5:])
+			}
+			return hash.ID{}, err
+		}
+		return h, nil
 	case ref == "mainline":
 		def, err := r.DB.DefaultLine()
 		if err != nil {

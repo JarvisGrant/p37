@@ -139,6 +139,7 @@ func TestToolsListed(t *testing.T) {
 		"conflict_list", "conflict_show", "conflict_resolve", "conflict_resolve_all",
 		"land_preview", "ws_land", "version_revert",
 		"sync_status", "sync_prepare", "sync_list", "sync_show",
+		"repo_export", "repo_export_status",
 	}
 	got := map[string]bool{}
 	for _, tl := range res.Tools {

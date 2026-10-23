@@ -266,7 +266,7 @@ func TestExportTree(t *testing.T) {
 	if err := os.RemoveAll(dest); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.r.Export("mainline", dest); err != nil {
+	if _, err := e.r.Export("mainline", dest); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dest, "dir/b.txt"))
