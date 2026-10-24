@@ -255,6 +255,27 @@ func TestLandExpectedWorkspaceToken(t *testing.T) {
 	}
 }
 
+func TestLandExpectedOpsEpoch(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "A\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	w := e.open("", "t")
+	e.write(w.ID, "b.txt", "B\n")
+	p, err := e.r.PreviewTo(w.ID, repo.LandOptions{Line: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.write(w.ID, "c.txt", "C\n")
+	_, err = e.r.LandTo(w.ID, repo.LandOptions{
+		Line: "main", ExpectedWSOpsEpoch: p.WSOpsEpoch,
+	})
+	if !errors.Is(err, repo.ErrTargetMoved) {
+		t.Fatalf("expected target_moved, got %v", err)
+	}
+}
+
 func TestExportTree(t *testing.T) {
 	e := newEnv(t)
 	e.seed("a.txt", "A\n")

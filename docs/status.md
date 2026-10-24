@@ -1,0 +1,78 @@
+# 当前状态（v0.3.2）
+
+> 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
+> [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
+
+## 版本
+
+| 项 | 值 |
+|---|---|
+| 发布版本 | `v0.3.2` |
+| 仓库格式 | `format_ver = 2` |
+| MCP 工具 | 61 个（以 `internal/mcpsrv` 注册为准） |
+| 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
+| 测试 | `go test ./...` 全绿；`make cross` 通过 |
+
+`format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
+线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
+[`format-v2.md`](format-v2.md)。
+
+## 里程碑
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| **M1 存储底座** | ✅ 完成 | BLAKE3、确定性编码、CDC、CAS、pack、对象索引、格式版本校验 |
+| **M2 树与 op** | ✅ 完成 | histogram diff、块移动检测、rename 归并、ignore、EOL/二进制、重放 |
+| **P2 归因** | ✅ 完成 | `blame` 行/hunk 级归因 + 缓存 |
+| **M3 工作区与整合** | ✅ 完成 | overlay/copy 物化、重启重挂、未挂载防护、land 三段提交与恢复 |
+| **M4 冲突** | ✅ 完成 | place、结构化冲突、resolution、候选解、不重叠行自动合并 |
+| **M5 栈与回退** | ✅ 完成 | 折叠集合、`ws_land_into`、`version_revert`、journal |
+| **多仓库 / 命名线** | ✅ 完成 | `--root`、registry、line、DAG、多 line 同步与恢复 |
+| **应用卷生命周期** | ✅ 完成 | `repo_register` / `repo_unregister` / `repo_scan`、挂载点保护、tombstone |
+
+## 当前可用的端到端路径
+
+```text
+p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_preview → ws_land
+                                                        ↓ 有冲突
+                                        conflict_show → conflict_resolve → ws_land
+```
+
+以及：
+
+- 会话线：`line_create` → `ws_open(parent=line)` → `ws_land(target=line)`；
+- 子任务：`ws_open(parent=workspace)` → `ws_land_into`；
+- 应用线合并：`line_merge(preview=true)` → `conflict_resolve*` → `line_merge`；
+- 历史读取：`version_tree/file/archive/log/show/diff/compare/graph`、`blame`；
+- 回滚：`version_revert`、`line_reset`；
+- 同步：`sync_prepare/push/fetch/pull/restore/prune`；
+- 部署导出：`repo_export`（同步或 `async=true` + `repo_export_status`）；
+- 应用卷热插拔：`repo_register` / `repo_unregister` / `repo_scan`。
+
+## 已知缺口与限制
+
+| 项 | 现状 | 影响 / 绕过方式 |
+|---|---|---|
+| 在线 GC | 未实现 | 维护窗口停 daemon 后执行 `p37 gc --prune --pack`；daemon 持锁时 `p37 gc` 会拒绝 |
+| 写时打包 / repack 压实 | 未实现 | 只有离线 `p37 gc --pack`；pack 内对象全部不可达才整包删除 |
+| 多 line push | 使用全量 checkpoint | 单 line 可增量；大仓库建议按会话保留 VM |
+| `sync_restore` | 不恢复 workspace / lease | 恢复后由 P34 重新 `ws_open` |
+| `remote_prefix` 单写者 | 同一前缀只允许一个写者 | P34 需串行化同一 app 的 push |
+| `line_reset` 旧版本 grace | 由 GC 的 reset 日志保留 7 天 | 尚无独立后台清理任务 |
+| `p37d --check --root` | 只做 registry / DB / line 链检查 | 完整 ext4/写探测/OverlayFS/inotify/磁盘检查用 `--check --repo <root>` |
+| P36 payload 换盘 | 需要重启实例 | 服务级 `systemctl restart` 不保证换盘 |
+| `p37d --stdio` | 启动时快照工具清单 | daemon 升级后客户端应重连 |
+| `repo_unregister` | 不等待已经进入执行中的 MCP 调用 | detach 前由 P36 在上层确认应用空闲 |
+| 非 root OverlayFS | Ubuntu 26.04 可能 `EPERM` | 默认 `materialize=auto` 回退 copy；按 L2 容量收紧 `max_active` / `warn_disk_bytes` |
+| 自更新 | 不支持 | 升级靠替换 payload 盘，不在实例内改 `/run/p37-payload` |
+| 发布平台 | 只发布 linux/amd64 | linux/arm64 只做编译校验 |
+
+## 下一步优先级
+
+1. 在线 GC 与 daemon/CLI 共享写锁。
+2. 写时打包与 repack 压实。
+3. 多 line 增量同步。
+4. P36 应用卷 detach 的 in-flight 调用排空机制。
+
+文档与工具面的自动校验已加入 `internal/mcpsrv/docs_test.go` 和
+`internal/buildinfo/buildinfo_test.go`。

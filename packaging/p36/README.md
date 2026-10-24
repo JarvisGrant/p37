@@ -244,7 +244,8 @@ MCP 客户端配置：
 2. 生成新的 `P37PAYLOAD` 盘（同 label，新版本目录）。
 3. 停止实例（或按 P36 的方式替换第三块磁盘 `vdc`）。
 4. 启动实例；`p37-run` 挂载新盘并校验 `manifest.version` 与 `p37d --version`。
-5. 仓库格式不变，不需要 `p37 migrate`。
+5. 打开仓库时自动处理格式迁移（v1 → v2 会先备份 `p37.db`）；一般不需要
+   手工执行 `p37 migrate`。迁移与回滚见 `docs/format-v2.md`。
 
 > **从 v0.1.12 升级到 v0.1.13**：已有仓库的 `.p37/config.toml` 可能仍写着
 > `materialize = "overlay"`。`p37 init --if-missing` 不会覆盖现有配置；
@@ -273,27 +274,32 @@ systemctl start p37d
 
 ## 7. `p37d --check` 的边界
 
-`p37d --check` 适合 **daemon 启动前** 做部署检查（`p37-run` 就是这么用的），
-不建议作为 daemon 运行中的高频在线健康检查。
+`p37d --check` 适合 **daemon 启动前** 做部署检查。它有两种模式，检查范围不同：
 
-它会：
+- `p37d --check --repo <root>`：**完整健康检查**。`meta.Open` 打开 SQLite
+  （可能产生 WAL/SHM、权限收紧）；在 `.p37/tmp`、`workspaces` 下创建并删除
+  探测文件；做一次 OverlayFS probe；读取 inotify/磁盘信息。
+- `p37d --check --root <root>`：**registry 级检查**。只检查每个已注册 repo 的
+  `.p37/p37.db` 是否存在；`--strict` 时打开 repo 并走一遍 line 链。它不做写
+  探测、OverlayFS probe 或 inotify/磁盘检查。
 
-- `meta.Open` 打开 SQLite（可能产生 WAL/SHM、权限收紧）；
-- 在 `.p37/tmp`、`workspaces` 下创建并删除探测文件；
-- 做一次 OverlayFS probe；
-- 读取 inotify/磁盘信息。
+`p37-run` 启动前调用的是非 strict 的 `--check --root`，只确认 registry 和
+DB 可见；如果要在部署阶段做完整健康检查或 line 链检查，需另外执行
+`p37d --check --strict --repo <root>`（完整）或
+`p37d --check --strict --root <root>`（registry）。
 
-退出码：`0=通过`、`1=必需项失败`、`2=用法`。`--strict` 把 ext4 视为必需项，
-P36 应使用 `--strict`。inotify 不足只 WARN，不会自动修改内核参数。
+退出码：`0=通过`、`1=必需项失败`、`2=用法`。`--strict` 把 ext4（`--repo` 模式）
+或 line 链（`--root` 模式）视为必需项。inotify 不足只 WARN，不会自动修改内核
+参数。
 
-`--check` 的 OverlayFS probe 需要 `CAP_SYS_ADMIN`。在 P36 里可由 systemd unit /
-`p37-run` 提供；手工执行时要带同样的能力（例如 `setpriv --ambient-caps
+`--check --repo` 的 OverlayFS probe 需要 `CAP_SYS_ADMIN`。在 P36 里可由 systemd
+unit / `p37-run` 提供；手工执行时要带同样的能力（例如 `setpriv --ambient-caps
 +sys_admin` 或 `p37-run` 的 unit 环境），不要用 root 直接跑后留下 root 属主的
 `.p37` 子目录。
 
-auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式门禁用
-`p37d --check --strict`。`p37 doctor` 的 OverlayFS 判定更严格，copy 模式下
-会显示 `[FAIL] OverlayFS`，这是预期，不应据此判定 P36 部署失败。
+auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；完整部署门禁用
+`p37d --check --strict --repo <root>`。`p37 doctor` 的 OverlayFS 判定更严格，
+copy 模式下会显示 `[FAIL] OverlayFS`，这是预期，不应据此判定 P36 部署失败。
 
 如果后续需要在线监控，应单独实现只读检查，而不是高频调用 `--check`。
 
@@ -310,7 +316,8 @@ auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式�
   在上层确认应用空闲。活跃 workspace/lease 会被 `repo_busy` 挡住。
 - `repo_delete` 拒绝挂载点、root 自身和 root 外路径；应用卷删除只能走
   `repo_unregister → guest umount → 宿主删卷`。
-- `p37d --check` 有写探测，不适合当作在线探针。
+- `p37d --check --repo` 有写探测，不适合当作在线探针；`--check --root` 只做
+  registry/DB/line 检查，也不应高频轮询。
 - Ubuntu 26.04 非 root 下 OverlayFS 可能 `EPERM`（即使有 ambient
   `CAP_SYS_ADMIN`）。默认 auto 会回退 copy；copy 模式磁盘占用 ≈ 仓库树 ×
   活跃工作区数，必须按 L2 容量收紧 `max_active` / `warn_disk_bytes`。
@@ -318,7 +325,8 @@ auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式�
   `P37_ALLOW_ROOT_FALLBACK=1` 才退化 root 做对照。真实 P36 仍应验证
   `User=p36` + auto copy；root+overlay 用可选变体。
 - `p37 doctor` 在 copy 模式下会报 `[FAIL] OverlayFS`，这是检查器的既有严格
-  判定；P36 正式门禁看 `p37d --check --strict`。
+  判定；P36 完整部署门禁看 `p37d --check --strict --repo <root>`，多仓库
+  registry 检查用 `--check --strict --root <root>`。
 
 ## 9. P36 集成需要的字段
 

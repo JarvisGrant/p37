@@ -138,7 +138,8 @@ sync_restore(repo="my-app", name="my-app", remote_prefix="<...>/rk_...",
              remote={enabled,backend,endpoint,bucket,prefix,path_style})
 ```
 
-`sync_push` 必须 durable 成功后才能删 VM。`sync_restore` 恢复所有 line；
+`sync_push` 必须 durable 成功后才能删 VM；`async=true` 不算 durable。
+`sync_restore` 恢复所有 line；
 workspace 不恢复，P34 重新 `ws_open`。
 
 ## 11. 自动部署（不产生版本，不占 workspace 配额）

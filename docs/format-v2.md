@@ -31,7 +31,7 @@ merge 版本的 id 覆盖全部 parents。parents 除 first parent 外按 source
 - `version_parent(version_id, parent_id, ordinal)`
 - `idempotency_result(tool, key, result_json, created_ts, expires_ts)`
 - `line_reset_log(...)`
-- `land_into_journal(...)`（预留）
+- `land_into_journal(...)`（`ws_land_into` 的恢复记录）
 
 新增列：
 

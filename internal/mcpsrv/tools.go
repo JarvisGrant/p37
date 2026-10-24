@@ -809,7 +809,8 @@ func (s *Server) registerLand() {
 			res, err := rr.LandTo(a.WsID, repo.LandOptions{
 				Line: line, Fold: a.Fold, DropWorkspace: drop,
 				ExpectedHead: a.ExpectedHead, ExpectedWSTree: a.ExpectedWSTree,
-				IdempotencyKey: a.IdempotencyKey, TaskDesc: a.Task,
+				ExpectedWSOpsEpoch: a.ExpectedWSOpsEpoch,
+				IdempotencyKey:     a.IdempotencyKey, TaskDesc: a.Task,
 			})
 			if err != nil {
 				if errorsIsLandConflict(err) && res != nil {

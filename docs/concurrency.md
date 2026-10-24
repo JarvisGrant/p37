@@ -1,48 +1,88 @@
 # 并发模型与锁顺序
 
-## 锁
+本文描述**代码里实际存在**的并发控制。旧版文档里的 `repo_registry` /
+`repo_mutation` / `workspace` 三层锁并不存在，请以本文为准。
+
+## 1. 锁与串行化机制
+
+| 机制 | 位置 | 保护范围 |
+|---|---|---|
+| `Hub.mu` | `internal/hub/hub.go` | registry 读写、repo 缓存、打开/关闭 repo；打开期间持有，避免并发首次打开争抢 per-repo flock |
+| per-repo flock | `internal/repolock` | daemon 生命周期内独占 `<repo>/.p37/lock`；CLI `gc` 用同一把锁拒绝在线 GC |
+| `Repo.landMu` | `internal/repo/repo.go` | 整条 land 流水线、revert、line reset/delete/merge、`ws_land_into`、GC、pack；**这是 repo 级的粗粒度写串行化** |
+| `Repo.landSem` | `internal/repo/repo.go` | 限制同时进入 land 的请求数；满时返回 `land_queue_full`。它只是准入限流，不提供正确性保证 |
+| `Repo.syncMu` | `internal/repo/repo.go` | 同一 repo 的 `sync_prepare/push/fetch/pull/restore/prune` 互斥；并发返回 `sync_in_progress` |
+| `meta.DB.wmu` | `internal/meta/db.go` | SQLite 写事务串行化；WAL 下读操作可并发 |
+| `workspace.Manager.openMu` | `internal/workspace/workspace.go` | 工作区配额检查与名额预留，避免 open 的 TOCTOU |
+| `workspace.Manager.unstableMu` | `internal/workspace/workspace.go` | `LastUnstable` 快照 |
+| fs watcher goroutine | `internal/watch` | 所有调度在单 goroutine 推进；同一工作区同时最多一个在途采集 |
+
+## 2. 实际顺序
 
 ```text
-repo_registry 锁
-  → repo_mutation 锁（每个 repo 一把；保护 line head / 版本提交）
-    → workspace 锁（多个时按 ws_id 升序）
-      → lease 检查（不是锁）
+Hub.mu
+  → per-repo flock（打开 repo 时）
+    → Repo.landMu（写/整合/GC）
+      → meta.DB.wmu（SQLite 写事务）
+
+Repo.syncMu（同步工具）
+  → Repo.landMu（prepare 需要读稳定快照时）
+    → meta.DB.wmu
 ```
 
 规则：
 
-- 会改 line head 的操作（`ws_land(target=line)`、`line_merge`、`line_reset`、
-  `line_delete`、`repo_delete`、`version_revert`）先拿 `repo_mutation`。
-- 只改工作区的操作（`ws_sync`、`ws_diff`、`ws_rebase`、`ws_land_into`、
-  `ws_drop`）只拿 workspace 锁，不拿 `repo_mutation`。
-- 严禁反向顺序（先 workspace 后 repo_mutation）。
-- 多工作区操作按 `ws_id` 升序取锁。
-- land 流水线与 GC 共用 `repo_mutation`；不同 repo 互不影响。
-- `land_into` 当前在 repo 级 mutation 锁内串行执行，父工作区目录写入与 op
-  重算在同一临界区完成。
+- 不要在持有 `landMu` 时回调 `Hub` 或等待用户输入。
+- 不要在持有 `Hub.mu` 时执行长时间的文件操作；`openLocked` 是例外，它需要保证
+  同一 repo 的首次打开只发生一次。
+- `landMu` 覆盖所有会推进 line head、删除版本/对象、或改变整合结果的操作：
+  `ws_land`、`ws_land_into`、`version_revert`、`line_reset`、`line_delete`、
+  `line_merge`、`gc`、`pack`。
+- `ws_sync` / `ws_diff` / `ws_rebase` / `ws_drop` 不取 `landMu`，依靠 SQLite
+  事务和状态检查保证一致性。
+- **没有按工作区的互斥锁，也没有“按 ws_id 升序取多把锁”的实现。** 调用方不要
+  对同一工作区并发执行 `ws_sync` 与 `ws_land`；需要并发时用不同工作区。
+- lease 是建议性路径声明，不是锁；`lease_query` 只用于改动前自查。
 
-## 工作区状态
+## 3. 跨进程
+
+- daemon 打开 repo 后持有该 repo 的 flock，直到 `repo_unregister`、`repo_delete`
+  或 daemon 退出。
+- `p37 gc` 在入口尝试同一把 flock；daemon 持锁时返回非 0，`--force` 才跳过。
+- 其他 CLI 写命令（`import`、`fsck`、`revert` 等）不会自动取这把锁，因此仍应
+  在维护窗口停 daemon 后执行。
+- 多仓库 daemon 中，不同 repo 的 `landMu` / `syncMu` / flock 互不影响；同一 repo
+  的写操作串行。
+
+## 4. 工作区状态与并发
 
 `active` / `conflicted` / `rebasing` / `integrating` / `landed` / `merging` /
 `reaping` / `broken`。
 
-- `landed` 用 `landed_ts` 表达（state 仍存 active），`ws_info`/`ws_list`
-  对外显示 `landed`。
-- `max_active` 只统计 `active/conflicted/rebasing`（`ws_quota.active_used`）；
-  `landed`、`integrating`、`hidden`、`broken` 不占额度，`broken` 在
-  `ws_quota.broken` 单独暴露。
-- 隐藏 merge/preview 工作区 `hidden=1`，不占用户 `max_active`，单独
-  `max_hidden`（默认 32），默认不出现在 `ws_list`。
+- `landed` 用 `landed_ts` 表达（state 仍存 active），`ws_info` / `ws_list` 对外
+  显示 `landed`。
+- `max_active` 只统计 `active/conflicted/rebasing`；`landed`、`integrating`、
+  `hidden`、`broken` 不占额度，`broken` 在 `ws_quota.broken` 单独暴露。
+- 隐藏 merge/preview 工作区 `hidden=1`，不占用户 `max_active`，单独受
+  `max_hidden`（默认 32）限制，默认不出现在 `ws_list`。
 - `ws_drop` 先释放元数据（配额立即回收），目录清理失败只返回
   `dir_cleanup_warning`；daemon 启动会清掉没有行引用的孤儿目录。
 - `ws_reap` 不删除有 lease 的工作区；用户 active 工作区不自动回收；隐藏
-  merge/preview TTL 24h；landed 可在 24h 后回收；显式 `state=broken` 可回收
+  merge/preview TTL 24h；`landed` 可在 24h 后回收；显式 `state=broken` 可回收
   broken 工作区；`include_orphan_dirs=true` 顺带清理孤儿目录。
 
-## 幂等
+## 5. 幂等
 
 - `ws_land` / `line_merge` 的 key 写入 version（`idempotency_key/tool/ts`）。
 - 无版本结果（FF merge / no-op）写入 `idempotency_result`。
 - `sync_push` 也有 `idempotency_result`；重复调用返回原结果。
 - 幂等记录 7 天 TTL；只有未过期记录引用的版本进入 GC 根。
 - `ws_land_into` 只保证同一 VM 生命周期（restore 不恢复 workspace/lease）。
+
+## 6. 已知边界
+
+- `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前由上层确认
+  应用空闲。
+- `p37d --stdio` 在启动时快照 daemon 工具清单；daemon 升级后客户端应重连。
+- `landMu` 只在本进程内有效，跨进程依靠 per-repo flock；不要假设 CLI 与 daemon
+  之间有共享的 land 锁。

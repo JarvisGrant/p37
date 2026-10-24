@@ -1,21 +1,31 @@
-# P37 实现进度
+# P37 实现历史
 
-> 设计规格为内部资料，不随本仓库发布
-> 最近更新：2026-10-24
+> 本文是按时间倒序的实现记录和真机缺陷复盘，**不是当前状态的唯一来源**。
+> 当前状态、已知缺口和支持版本见 [`docs/status.md`](docs/status.md)；
+> MCP 契约见 [`docs/mcp-contract.md`](docs/mcp-contract.md)；
+> 文档索引见 [`docs/README.md`](docs/README.md)。
+>
+> 设计规格为内部资料，不随本仓库发布；文中出现的 `§` / `附录` 编号只用于
+> 内部追溯，公开行为以当前代码和契约文档为准。
+>
+> 最近更新：2026-10-25
 
-## 当前状态
+## 当前状态速查
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| **M1 存储底座** | ✅ 完成 | 附录 L.1 的全部单元/属性测试通过 |
-| **M2 树与 op** | 🟡 主体完成 | 缺：行级移动检测；fs watcher 已实现（`internal/watch`） |
-| **P2 归因** | ✅ 完成 | `blame`（§12.2）行级归因 + 缓存 |
+| **M1 存储底座** | ✅ 完成 | BLAKE3、确定性编码、CDC、CAS、pack、对象索引、格式版本校验 |
+| **M2 树与 op** | ✅ 完成 | histogram diff、块移动检测、rename 归并、ignore、重放；fs watcher 在 `internal/watch` |
+| **P2 归因** | ✅ 完成 | `blame` 行/hunk 级归因 + 缓存 |
 | **M3 工作区与整合** | ✅ 完成 | OverlayFS 已在真机（Ubuntu 26.04 / ext4）验证；重启重挂与未挂载防护已补齐 |
-| **M4 冲突** | ✅ 核心完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
+| **M4 冲突** | ✅ 完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
 | **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal；三层栈 + 分叉端到端用例齐备（并借此修掉 S20） |
+| **多仓库 / 命名线** | ✅ 完成 | `--root`、registry、line、DAG、多 line 同步与恢复 |
+| **应用卷生命周期** | ✅ 完成 | `repo_register` / `repo_unregister` / `repo_scan`、挂载点保护、tombstone |
 
-测试：`go test ./...` 全绿（**166 个测试**）。约 21,400 行 Go（含测试）。
+测试：`go test ./...` 全绿；当前约 283 个可列出测试、4.2 万行 Go（含测试）。
 交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
+具体数字会随代码变化，以实际命令输出为准。
 
 **已可用的端到端路径**（本机用 `copy` 模式验证通过）：
 
@@ -32,7 +42,7 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 ## v0.3.2：多仓库应用卷生命周期（2026-10-24）
 
-P36 把「每应用一个持久卷」做成 qcow2 挂到 `/srv/repos/<app>`。本轮让 p37d
+P36 把「每应用一个持久卷」做成 qcow2 挂到 `/srv/repos/<app>`。v0.3.2 让 p37d
 支持运行中 attach/detach：不重启 daemon 注册/注销 repo，启动时按实际挂载
 reconcile registry。
 
@@ -90,11 +100,12 @@ P34「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增�
 新增 `max_hidden=32`。回归测试见 `internal/repo/quota_recovery_test.go` 与
 `internal/mcpsrv/quota_test.go`。
 
-## P36 可部署性适配（本轮）
+## P36 可部署性适配（v0.1.x 历史）
 
 目标：把 p37 做成 P36 microVM 里“实例启动即有”的版本控制工具，同时**不改
-仓库格式与核心版本控制语义**。`format_ver` 仍为 1，`p37 migrate` 没有新增
-迁移路径；改动集中在外围。
+当时的仓库格式与核心版本控制语义**。这一轮 `format_ver` 仍为 1；v0.2 起才引入
+`format_ver=2`（见后文与 [`docs/format-v2.md`](docs/format-v2.md)）。改动集中在
+外围。
 
 | 改动 | 落点 |
 |---|---|
@@ -109,8 +120,8 @@ P34「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增�
 
 测试新增：stdio 双客户端并发闭环、daemon 不在时的错误、init 幂等/模板、
 `--check` 退出码与 JSON、GC 拒绝、只读目录执行、工具名一致性。`go test ./...`
-全绿；linux/amd64 发布物由 `make release` 生成。仓库格式兼容性由既有
-`meta.FormatVer=1` 与黄金向量测试继续保证。
+全绿；linux/amd64 发布物由 `make release` 生成。当前仓库格式由
+`meta.FormatVer=2` 与黄金向量测试保证。
 
 ### P36 返工（L1 胶水 / 共享 mount namespace / 96 MiB payload）
 
@@ -176,7 +187,8 @@ P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制�
   无变更 1 万文件仍高于附录 D.2 的 100ms 目标：在本机（2 vCPU）`readdir+lstat` 单遍
   约 60ms、SQLite 载入 1 万行 stat_cache 约 30–50ms，已接近该硬件的下限。
 
-**仍未做（与同步有关，需要独立设计）**：P3 的远端同步（`sync_status` 目前是占位）。
+**同步（P3）已在后续版本实现**：`sync_status` 不再是占位，当前支持
+`sync_prepare/push/fetch/pull/restore/prune`，见 [`docs/sync-contract.md`](docs/sync-contract.md)。
 小文件的对象放大已由 P2 的**离线打包**解决（见下节 P2）。
 
 ### 补齐两处「声明未接线」的配置
@@ -556,7 +568,7 @@ PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约�
 
 ### 已知但**未做**（不影响发布，列出来以免误以为已覆盖）
 
-> 本节写作时间较早，多条已实现；权威清单见文件末尾「仍然未做」。
+> 本节写作时间较早，多条已实现；当前缺口以 [`docs/status.md`](docs/status.md) 为准。
 
 - ~~行级移动检测（§5.3 第 1、2 趟）~~：已实现（S26）。
 - ~~`ws_rebase` 的「换 lower 只写 delta」~~：已实现（S27）。
@@ -600,7 +612,7 @@ PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约�
 | `internal/mountmgr` | `overlay`（Linux，含 `ProbeOverlay` 自检）与 `copy`（跨平台）两种物化、基底 LRU、大小写冲突检测、标记文件在被跟踪树之外 |
 | `internal/repo` | init / import / **land 流水线**（可恢复的三段提交协议）/ revert / 状态 / 冲突视图 / 租约违规检测 |
 | `internal/meta` | stat_cache / workspace / op / conflict / resolution / journal 的读写；`CommitLand` / `FinishLand` / `RollbackLand` / `ReconcileLand` |
-| `internal/mcpsrv` | 22 个 MCP 工具（20 个可用 + 2 个 P2 占位） + 统一信封 + 错误码映射（附录 K、附录 E） |
+| `internal/mcpsrv` | 61 个 MCP 工具 + 统一信封 + 错误码映射 |
 | `internal/config` | 附录 B 的配置与默认值 |
 | `cmd/p37` | 运维 CLI（init/import/status/doctor/fsck/gc/migrate/ignore-check + 调试用版本操作） |
 | `cmd/p37d` | 常驻 daemon：flock、unix socket、可选 HTTP（强制 token）、优雅退出 |
@@ -640,21 +652,19 @@ Diff(T0,T1)   --Replay--> T2
 
 ## 下一步
 
-### 仍然未做
+> 当前缺口与优先级以 [`docs/status.md`](docs/status.md) 为准；这里只保留历史
+> 结论，避免两处清单长期不一致。
 
-> 本清单是早期版本，部分已过时；以顶部「当前状态」与各轮修复小节为准。
+### 已完成的旧清单
 
-1. ~~**行级移动检测**（§5.3 第 1、2 趟）~~：已实现（S26）。
-2. **P2 的对象打包**：已实现**离线打包**（`p37 gc --prune --pack`，见顶部 P2 节）。
-   仍未做：`package` 表的 checkpoint/delta 语义、`retention.keep_epochs` 的对应物、
-   以及写时打包 / repack 压实。`blame_cache` 的回收已由 `meta.PruneVersion` 覆盖。
+1. ~~**行级移动检测**~~：已实现（S26）。
+2. ~~**P2 的对象打包**~~：已实现**离线打包**（`p37 gc --prune --pack`，见顶部 P2 节）。
+   写时打包 / repack 压实仍未做。
 3. ~~**`ws_rebase` 的「换 lower 只写 delta」**~~：已实现（S27）。
 4. ~~符号链接内容变化走 delete + create~~：已改为 `blob_put`（R2）。
 5. ~~**P3 远端同步**~~：已实现（S3 兼容对象存储 + 增量包 + 本地暂存审查，见顶部 P3 节）。
-
-### 下一步建议顺序
-
-`行级移动检测` → `P2 包与 GC` → `ws_rebase 增量重挂`。
+6. ~~**多仓库 / 命名线 / land_into / line_merge**~~：v0.2 已实现。
+7. ~~**应用卷热插拔**~~：v0.3.2 已实现。
 
 ### 真机结论（已完成）
 
@@ -677,7 +687,7 @@ go test ./internal/cas -update     # 重新冻结 gear 表（仅格式变更时�
 
 ## v0.2 · 目标形态改造（format_ver=2）
 
-本轮把 p37 从「单仓库 + 单父 mainline」扩到 P34 需要的目标形态。
+v0.2 把 p37 从「单仓库 + 单父 mainline」扩到 P34 需要的目标形态。
 
 ### 多仓库
 
