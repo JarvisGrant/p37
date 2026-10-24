@@ -16,9 +16,6 @@ import (
 )
 
 func TestUnregisterForceUnmountsOverlay(t *testing.T) {
-	if err := mountmgr.ProbeOverlay(t.TempDir()); err != nil {
-		t.Skipf("OverlayFS 不可用: %v", err)
-	}
 	root := t.TempDir()
 	h, err := hub.New(root, config.Default())
 	if err != nil {
