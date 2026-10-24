@@ -18,17 +18,38 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/chenyiwen/p37/internal/config"
+	"github.com/chenyiwen/p37/internal/mountmgr"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/repolock"
 )
 
 // Errors.
 var (
-	ErrRepoNotFound = errors.New("hub: repo 不存在")
-	ErrRepoExists   = errors.New("hub: repo 已存在")
-	ErrRepoBusy     = errors.New("hub: repo 仍有活跃工作区或租约")
-	ErrInvalidName  = errors.New("hub: 非法 repo 名")
+	ErrRepoNotFound       = errors.New("hub: repo 不存在")
+	ErrRepoExists         = errors.New("hub: repo 已存在")
+	ErrRepoBusy           = errors.New("hub: repo 仍有活跃工作区或租约")
+	ErrInvalidName        = errors.New("hub: 非法 repo 名")
+	ErrInvalidPath        = errors.New("hub: 非法 repo 路径")
+	ErrRepoNotInitialized = errors.New("hub: repo 未初始化")
+	ErrRepoNameMismatch   = errors.New("hub: repo 名与 repo.json 不一致")
+	ErrRepoPathExists     = errors.New("hub: repo 路径或 id 已被注册")
+	ErrRepoIsMountpoint   = errors.New("hub: repo 路径是挂载点")
+	ErrRegistryBusy       = errors.New("hub: registry 忙")
+	ErrRepoLocked         = errors.New("hub: repo 锁被其它进程持有")
 )
+
+// BusyError 描述 unregister 被活跃工作区/租约挡住的具体原因。
+type BusyError struct {
+	Workspaces []string `json:"workspaces"`
+	Leases     []string `json:"leases"`
+}
+
+func (e *BusyError) Error() string {
+	return fmt.Sprintf("%v: %d 个工作区, %d 个租约", ErrRepoBusy, len(e.Workspaces), len(e.Leases))
+}
+
+// Is 让 errors.Is(err, ErrRepoBusy) 成立。
+func (e *BusyError) Is(target error) bool { return target == ErrRepoBusy }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
@@ -44,6 +65,10 @@ type Entry struct {
 	DeletedTS    int64  `json:"deleted_ts"`
 	Degraded     bool   `json:"degraded"`
 	DegradedMsg  string `json:"degraded_msg,omitempty"`
+	// Mounted/Available 是每次 List/Get 时按文件系统实时计算的观测字段，
+	// 不写入 registry，也不要求打开 repo。
+	Mounted   bool `json:"mounted"`
+	Available bool `json:"available"`
 }
 
 // Hub 管理多个仓库。
@@ -55,6 +80,9 @@ type Hub struct {
 	mu    sync.Mutex
 	repos map[string]*repo.Repo
 	locks map[string]*repolock.Lock
+
+	// mountProbe 可注入，单测不需要真实挂载点。默认使用 mountmgr.IsMountPoint。
+	mountProbe func(string) bool
 }
 
 // New 打开/创建 registry。root 通常是 /srv/repos。
@@ -95,9 +123,26 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(regPath, 0o600)
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)
-	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{}}
+	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{},
+		mountProbe: mountmgr.IsMountPoint}
 	h.recoverRegistry()
 	return h, nil
+}
+
+// SetMountPointProbe 注入挂载点判断（测试用）。nil 恢复默认实现。
+func (h *Hub) SetMountPointProbe(fn func(string) bool) {
+	if fn == nil {
+		fn = mountmgr.IsMountPoint
+	}
+	h.mountProbe = fn
+}
+
+func (h *Hub) isMountPoint(path string) bool {
+	fn := h.mountProbe
+	if fn == nil {
+		return mountmgr.IsMountPoint(path)
+	}
+	return fn(path)
 }
 
 // Root 返回多仓库根目录。
@@ -134,6 +179,11 @@ func (h *Hub) CreateEx(name, defaultLine, remoteKey, remotePrefix string) (*Entr
 	if e, err := h.lookupLocked(name); err == nil && e != nil {
 		return e, nil
 	}
+	// 同名 tombstone 会让 UNIQUE(name) 插入失败；显式创建新 repo 表示
+	// 用户要复用这个名字，清掉旧 tombstone（旧目录数据不会被删除）。
+	if err := h.deleteTombstoneLocked("name", name); err != nil {
+		return nil, err
+	}
 	id, err := NewID()
 	if err != nil {
 		return nil, err
@@ -149,27 +199,11 @@ func (h *Hub) CreateEx(name, defaultLine, remoteKey, remotePrefix string) (*Entr
 	if err != nil {
 		return nil, err
 	}
-	opt := h.cfg.RepoOptions()
-	opt.RemountWorkspaces = false
-	r, err := repo.Init(path, opt)
-	if err != nil {
+	if err := h.initRepoAt(path, id, name, defaultLine); err != nil {
 		_, _ = h.db.Exec(`DELETE FROM repo WHERE id=?`, id)
 		_ = os.RemoveAll(path)
 		return nil, err
 	}
-	if defaultLine != "main" {
-		head, _, _ := r.Head()
-		if _, err := r.CreateLine(defaultLine, head.String(), true); err == nil {
-			_ = r.DB.SetDefaultLine(defaultLine)
-			_ = r.DB.DeleteLine("main", time.Now().UnixMilli())
-		}
-	}
-	_ = r.Close()
-	_ = os.Chmod(path, 0o750)
-	_ = os.Chmod(filepath.Join(path, ".p37"), 0o700)
-	// 把根配置作为该 repo 的默认配置落盘，后续 repo.Open 才能保持一致。
-	_ = config.Save(path, h.cfg)
-	_ = writeRepoMeta(path, repoMeta{ID: id, Name: name, DefaultLine: defaultLine})
 	return h.lookupLocked(id)
 }
 
@@ -213,7 +247,11 @@ func (h *Hub) Get(ref string) (*Entry, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, ref)
 	}
-	return e, err
+	if err != nil {
+		return nil, err
+	}
+	h.enrichEntry(e)
+	return e, nil
 }
 
 // List 返回全部 repo。
@@ -225,15 +263,43 @@ func (h *Hub) List() ([]Entry, error) {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var out []Entry
+	out := make([]Entry, 0)
 	for rows.Next() {
 		e, err := scanEntry(rows)
 		if err != nil {
 			return nil, err
 		}
+		h.enrichEntry(e)
 		out = append(out, *e)
 	}
 	return out, rows.Err()
+}
+
+// enrichEntry 只做轻量 stat/mount 探测，绝不打开 repo。
+func (h *Hub) enrichEntry(e *Entry) {
+	if e == nil {
+		return
+	}
+	fi, err := os.Stat(e.Path)
+	e.Available = err == nil && fi.IsDir()
+	e.Mounted = e.Available && h.isMountPoint(e.Path)
+	if !e.Available {
+		e.Degraded = true
+		if e.DegradedMsg == "" {
+			if err != nil {
+				e.DegradedMsg = err.Error()
+			} else {
+				e.DegradedMsg = "path 不是目录"
+			}
+		}
+		return
+	}
+	if _, err := os.Stat(filepath.Join(e.Path, ".p37", "repo.json")); err != nil {
+		e.Degraded = true
+		if e.DegradedMsg == "" {
+			e.DegradedMsg = "缺少 .p37/repo.json"
+		}
+	}
 }
 
 func scanEntry(s interface{ Scan(...any) error }) (*Entry, error) {
@@ -253,6 +319,12 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	// 而不是第二个去抢 repolock 然后报「正被另一个进程持有」。
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.openLocked(ref, true)
+}
+
+// openLocked 在持有 h.mu 时打开 repo。remount 为 false 时只打开元数据，
+// 不恢复 workspace overlay 挂载（unregister 检查工作区时使用）。
+func (h *Hub) openLocked(ref string, remount bool) (*repo.Repo, error) {
 	if r := h.repos[ref]; r != nil {
 		return r, nil
 	}
@@ -262,6 +334,9 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if r := h.repos[e.ID]; r != nil {
+		return r, nil
 	}
 
 	_ = os.Chmod(e.Path, 0o750)
@@ -273,12 +348,12 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	lock, err := repolock.TryExclusive(filepath.Join(e.Path, ".p37", "lock"))
 	if err != nil {
 		if errors.Is(err, repolock.ErrBusy) {
-			return nil, fmt.Errorf("repo %s 正被另一个进程持有", e.Name)
+			return nil, fmt.Errorf("%w: repo %s", ErrRepoLocked, e.Name)
 		}
 		return nil, err
 	}
 	opt := cfg.RepoOptions()
-	opt.RemountWorkspaces = true
+	opt.RemountWorkspaces = remount
 	r, err := repo.Open(e.Path, opt)
 	if err != nil {
 		_ = lock.Release()
@@ -315,22 +390,36 @@ func (h *Hub) CloseRepo(ref string) error {
 	if err != nil {
 		return err
 	}
+	return h.dropCachedLocked(e)
+}
+
+// dropCachedLocked 关闭 repo 的 DB/overlay 引用并释放 per-repo flock。
+func (h *Hub) dropCachedLocked(e *Entry) error {
+	var firstErr error
 	if r := h.repos[e.ID]; r != nil {
-		_ = r.Close()
+		if err := r.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		delete(h.repos, e.ID)
 		delete(h.repos, e.Name)
 	}
 	if l := h.locks[e.ID]; l != nil {
-		_ = l.Release()
+		if err := l.Release(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		delete(h.locks, e.ID)
 	}
-	return nil
+	return firstErr
 }
 
 // Delete 删除一个 repo。默认硬删；有活跃工作区/租约时拒绝。
 func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 	e, err := h.Get(ref)
 	if err != nil {
+		return nil, err
+	}
+	// 挂载点绝不能 rename；应用卷请走 repo_unregister + guest umount。
+	if err := h.guardDeletePath(e.Path); err != nil {
 		return nil, err
 	}
 	r, err := h.Open(e.ID)
@@ -366,7 +455,12 @@ func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 // Close 关闭全部 repo 与 registry。
 func (h *Hub) Close() error {
 	h.mu.Lock()
-	for id, r := range h.repos {
+	seen := map[*repo.Repo]bool{}
+	for _, r := range h.repos {
+		if r == nil || seen[r] {
+			continue
+		}
+		seen[r] = true
 		if all, err := r.WS.List(); err == nil {
 			for i := range all {
 				w := &all[i]
@@ -376,8 +470,8 @@ func (h *Hub) Close() error {
 			}
 		}
 		_ = r.Close()
-		delete(h.repos, id)
 	}
+	h.repos = map[string]*repo.Repo{}
 	for id, l := range h.locks {
 		_ = l.Release()
 		delete(h.locks, id)

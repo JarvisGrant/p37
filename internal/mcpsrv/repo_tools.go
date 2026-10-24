@@ -87,6 +87,21 @@ func (s *Server) registerRepoLineRead() {
 	s.register("repo_info", "返回仓库详情。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var entry *hub.Entry
+			if s.Hub != nil {
+				e, err := s.Hub.Get(repoArg(raw))
+				if err != nil {
+					return nil, coded("repo_not_found", "仓库 %q 不存在", repoArg(raw))
+				}
+				entry = e
+				// 卷未挂载时返回 registry-only 信息，不 Open repo。
+				if !e.Available {
+					out := entryInfo(e)
+					out["root"] = e.Path
+					out["status"] = "unavailable"
+					return out, nil
+				}
+			}
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
@@ -126,14 +141,9 @@ func (s *Server) registerRepoLineRead() {
 					"backend": cfg.Remote.Backend, "remote_key": cfg.Remote.RemoteKey,
 					"prefix": cfg.Remote.Prefix, "remote_prefix": rp},
 			}
-			if s.Hub != nil {
-				if e, err := s.Hub.Get(repoArg(raw)); err == nil {
-					out["id"] = e.ID
-					out["name"] = e.Name
-					out["path"] = e.Path
-					out["remote_key"] = e.RemoteKey
-					out["remote_prefix"] = e.RemotePrefix
-					out["degraded"] = e.Degraded
+			if entry != nil {
+				for k, v := range entryInfo(entry) {
+					out[k] = v
 				}
 			}
 			return out, nil
@@ -599,6 +609,24 @@ func (s *Server) registerRepoLineRead() {
 			}
 			return res, nil
 		})
+}
+
+func entryInfo(e *hub.Entry) map[string]any {
+	out := map[string]any{
+		"id": e.ID, "name": e.Name, "path": e.Path,
+		"default_line": e.DefaultLine, "mounted": e.Mounted,
+		"available": e.Available, "degraded": e.Degraded,
+	}
+	if e.DegradedMsg != "" {
+		out["degraded_msg"] = e.DegradedMsg
+	}
+	if e.RemoteKey != "" {
+		out["remote_key"] = e.RemoteKey
+	}
+	if e.RemotePrefix != "" {
+		out["remote_prefix"] = e.RemotePrefix
+	}
+	return out
 }
 
 func versionSummaries(vs []repo.VersionSummary) []map[string]any {

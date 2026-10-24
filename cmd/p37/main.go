@@ -31,7 +31,7 @@ const usage = `p37 —— AI 原生版本控制系统
 
 用法：
   p37 <命令> [参数]
-  p37 --root <root> repo <list|create|info|delete> ...   多仓库维护
+  p37 --root <root> repo <list|create|info|delete|register|unregister|scan> ...   多仓库维护
   p37 --root <root> --repo <id|name> <命令> [参数]       对指定 repo 执行
 
 初始化与运维：
@@ -75,6 +75,9 @@ const usage = `p37 —— AI 原生版本控制系统
   p37 --root /srv/repos repo create <name> [--default-line main] [--json]
   p37 --root /srv/repos repo info <id|name> [--json]
   p37 --root /srv/repos repo delete <id|name> [--force]
+  p37 --root /srv/repos repo register <name> <path> [--init-if-missing] [--default-line main] [--json]
+  p37 --root /srv/repos repo unregister <id|name> [--force] [--json]
+  p37 --root /srv/repos repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--json]
 
 其它：
   version

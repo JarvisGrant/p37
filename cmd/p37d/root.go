@@ -38,10 +38,21 @@ func runRootDaemon(root string, serveHTTP bool) error {
 	if _, err := h.RegisterLegacy("/srv/repo"); err != nil {
 		fmt.Fprintf(os.Stderr, "p37d: 注册旧仓库 /srv/repo 失败: %v\n", err)
 	}
+	// 启动时按实际挂载的 repo 做一次轻量 reconcile：新挂上的应用卷会被
+	// 加入 registry；已注册但卷不在的只标记 degraded，不自动删除数据。
+	if res, err := h.Scan(hub.ScanOptions{Reconcile: true}); err != nil {
+		fmt.Fprintf(os.Stderr, "p37d: registry scan 失败: %v\n", err)
+	} else if len(res.Added)+len(res.Degraded)+len(res.Removed) > 0 {
+		fmt.Fprintf(os.Stderr, "p37d: registry reconciled added=%d degraded=%d removed=%d\n",
+			len(res.Added), len(res.Degraded), len(res.Removed))
+	}
 	// 启动时打开现有仓库：恢复 workspace 挂载，并让维护命令能看到
 	// per-repo flock。单个 repo 失败只标记 degraded，不影响其它 repo。
 	if es, err := h.List(); err == nil {
 		for i := range es {
+			if !es[i].Available {
+				continue
+			}
 			if _, err := h.Open(es[i].ID); err != nil {
 				fmt.Fprintf(os.Stderr, "p37d: 打开 repo %s 失败: %v\n", es[i].Name, err)
 			}

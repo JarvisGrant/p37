@@ -28,16 +28,134 @@
 
 | 工具 | 说明 |
 |---|---|
-| `repo_list` | 列出 registry 中的仓库 |
+| `repo_list` | 列出 registry 中的仓库；每项带 `path/mounted/available/degraded` |
 | `repo_create` | `name`, `default_line?`, `remote_key?`, `remote_prefix?`, `remote?` |
-| `repo_info` | id/name/path/default_line/lines/workspace_count/remote |
-| `repo_delete` | `force`, `delete_remote`；有活跃工作区/租约时返回 `repo_busy` |
+| `repo_register` | `repo`, `path`, `default_line?`, `init_if_missing?`, `force_rename?`；注册已挂载的应用卷 |
+| `repo_unregister` | `repo`, `force?`；卸载 workspace、关 DB、放锁后从 registry 隐藏（保留数据） |
+| `repo_scan` | `reconcile?`, `prune_missing?`, `dry_run?`；按实际挂载目录 reconcile registry |
+| `repo_info` | id/name/path/default_line/lines/workspace_count/remote；不可用时返回 registry-only 信息 |
+| `repo_delete` | `force`, `delete_remote`；有活跃工作区/租约时返回 `repo_busy`；挂载点返回 `repo_is_mountpoint` |
 | `repo_disk_usage` | 磁盘占用 |
 | `repo_import` | 空仓库导入目录为 v0 |
 | `repo_export` | 把 line/version 物化到目录；`async=true` 返回 `job_id` |
 | `repo_export_status` | 查询异步导出任务；任务只在当前 daemon 进程内有效 |
 | `repo_set_remote` | 更新 per-repo `[remote]`；凭证只从环境变量读 |
 | `ws_disk_usage` | 按工作区统计磁盘占用 |
+
+### 应用卷生命周期
+
+P36 把「每应用一个持久卷」挂到 guest 的 `/srv/repos/<app>`。p37d 看到的仍是
+本地 ext4；不需要 NFS 专用模式。卷在运行中 attach/detach 时使用：
+
+```text
+attach: 宿主热加 qcow2 → guest mount /srv/repos/<app>
+        → repo_register（或 repo_scan）
+detach: repo_unregister → guest umount → 宿主 remove-device
+删除卷: repo_unregister → guest umount → 宿主删卷（不要用 repo_delete）
+```
+
+所有 registry 写操作都由运行中的 p37d 执行（Hub mutex + SQLite 事务）。CLI
+在 daemon 运行时通过 unix socket 路由，不允许绕过 daemon 直接改 registry。
+
+#### repo_register
+
+```json
+{
+  "repo": "app-a",
+  "path": "/srv/repos/app-a",
+  "default_line": "main",
+  "init_if_missing": false,
+  "force_rename": false,
+  "idempotency_key": "optional"
+}
+```
+
+- `path` 必须是 root 下的绝对路径，且不能是 root 自身、root/.p37、symlink 或逃逸路径。
+- `path` 必须已经存在（应用卷应已挂载）；本工具不会创建目录。
+- 同名或同 path 已注册时幂等返回已有 Entry。
+- path 下没有 `.p37/p37.db`：
+  - `init_if_missing=false` → `repo_not_initialized`；
+  - `init_if_missing=true` → 使用 root 配置模板初始化，并写 `.p37/repo.json`。
+- 有 `.p37/p37.db` 但没有 `.p37/repo.json`：生成 `repo_<32hex>` 身份并落盘。
+- 已有 repo.json 时以其中的 id/name 为准；name 冲突返回 `repo_name_mismatch`，
+  只有显式 `force_rename=true` 才会改 repo.json 的 name。
+- 不移动目录、不复制数据。
+
+返回 Entry：
+
+```json
+{
+  "id": "repo_0123456789abcdef0123456789abcdef",
+  "name": "app-a",
+  "path": "/srv/repos/app-a",
+  "default_line": "main",
+  "mounted": true,
+  "available": true,
+  "degraded": false
+}
+```
+
+#### repo_unregister
+
+```json
+{ "repo": "app-a", "force": false, "idempotency_key": "optional" }
+```
+
+- 按 id 或 name 查 repo；不存在时幂等成功并返回 `already_unregistered=true`。
+- 关闭顺序：卸载该 repo 的 overlay workspace → 关闭 SQLite → 释放 per-repo
+  flock → 写 registry tombstone（`repo_list` 不再返回）。
+- 不删除 `.p37`、`workspaces` 或 repo 数据。
+- 有 active/conflicted/rebasing/integrating workspace 或 lease 且 `force=false`
+  → `repo_busy`，`error.details` 带 `workspaces`/`leases`。
+- `force=true` 会卸载 workspace 后注销，但仍不删数据。
+- 注销是 tombstone：daemon 重启或 `repo_scan` 不会自动复活；重新挂载后用
+  `repo_register` 显式恢复（id/name 保持不变）。
+- 失败时 registry 行保持可见，可直接重试。
+
+#### repo_scan
+
+```json
+{ "reconcile": true, "prune_missing": false, "dry_run": false }
+```
+
+- 只扫 root 的直接子目录；跳过隐藏目录、非目录、symlink。
+- 读取每个子目录的 `.p37/repo.json`；不打开 repo、不初始化、不做重操作。
+- registry 为空或非空都能工作；未注册但 repo.json 有效的目录会加入 registry。
+- 已注册但 path 不存在：
+  - `prune_missing=true` → 删除 registry 行（不删数据）；
+  - 否则标记 degraded。
+- 已注册但 repo.json 缺失 → 标记 degraded，不删除 registry 行或数据。
+- 已注销（tombstone）的 repo 不会自动加回；`skipped.reason=unregistered`。
+- `dry_run=true` 或 `reconcile=false` 只返回计划，不写 registry。
+
+返回：
+
+```json
+{
+  "added": [],
+  "removed": [],
+  "degraded": [],
+  "skipped": [{ "path": "/srv/repos/app-b", "reason": "unregistered" }],
+  "reconciled": true,
+  "dry_run": false
+}
+```
+
+#### repo_delete 与挂载点
+
+`repo_delete` 仍然只用于 p37 自己创建、由 p37 管理的目录。它在 rename 到
+root/.p37/trash 之前检查：
+
+- path 在 root 下、不是 root 自身、不是 root/.p37；
+- path 不是挂载点（`/proc/self/mountinfo` + `st_dev` 与父目录比较）。
+
+挂载点返回 `repo_is_mountpoint`，提示走：
+
+```text
+repo_unregister → guest umount → 宿主删除应用卷
+```
+
+不要对 `/srv/repos/<app>` 调用 `repo_delete`；它不会 rename 或删除应用卷。
 
 ## 命名线
 
@@ -182,6 +300,8 @@ repo_export(repo, ref, dest_dir, async=false)
 
 ```text
 repo_required repo_not_found repo_exists repo_busy repo_not_initialized
+repo_name_mismatch repo_path_exists repo_is_mountpoint already_unregistered
+registry_busy daemon_running
 line_not_found line_exists line_protected line_busy
 target_invalid target_moved source_moved target_not_ancestor
 parent_moved preview_expired preview_mismatch merge_expired merge_base_ambiguous

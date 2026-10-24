@@ -24,6 +24,7 @@ func (s *Server) registerAll() {
 	s.registerLand()
 	s.registerSync()
 	s.registerRepoLineRead()
+	s.registerRepoLifecycle()
 	s.registerVersionGraph()
 	s.registerSyncV2()
 	s.registerRepoExport()

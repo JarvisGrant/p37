@@ -22,9 +22,21 @@ func cmdRepo(root string, args []string, out, errw io.Writer) int {
 		return 2
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(errw, "用法: p37 --root <root> repo <list|create|info|delete> ...")
+		fmt.Fprintln(errw, "用法: p37 --root <root> repo <list|create|info|delete|register|unregister|scan> ...")
 		return 2
 	}
+
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "register":
+		return cmdRepoRegister(root, rest, out, errw)
+	case "unregister":
+		return cmdRepoUnregister(root, rest, out, errw)
+	case "scan":
+		return cmdRepoScan(root, rest, out, errw)
+	}
+
 	cfg, err := config.Load(root)
 	if err != nil {
 		return fail(errw, err)
@@ -35,8 +47,6 @@ func cmdRepo(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = h.Close() }()
 
-	sub := args[0]
-	rest := args[1:]
 	switch sub {
 	case "list":
 		jsonOut := hasFlag(rest, "--json")

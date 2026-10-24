@@ -1,7 +1,7 @@
 # P37 实现进度
 
 > 设计规格为内部资料，不随本仓库发布
-> 最近更新：2026-10-23
+> 最近更新：2026-10-24
 
 ## 当前状态
 
@@ -29,6 +29,27 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单、闭环、冲突、revert、错误码映射。
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
+
+## v0.3.2：多仓库应用卷生命周期（2026-10-24）
+
+P36 把「每应用一个持久卷」做成 qcow2 挂到 `/srv/repos/<app>`。本轮让 p37d
+支持运行中 attach/detach：不重启 daemon 注册/注销 repo，启动时按实际挂载
+reconcile registry。
+
+| 改动 | 落点 |
+|---|---|
+| 新增 `repo_register` | 校验 path 在 root 下、拒绝 `..`/root/symlink 逃逸；同名/同 path 幂等；支持 `init_if_missing` 和 repo.json 生成 |
+| 新增 `repo_unregister` | 卸载 overlay workspace、关闭 SQLite、释放 flock、写 tombstone；活跃 workspace/lease 返回 `repo_busy`，`force=true` 可强制注销但不删数据 |
+| 新增 `repo_scan` | 扫描 root 直接子目录，registry 空/非空都能 reconcile；支持 prune_missing/dry_run/reconcile=false |
+| 挂载点保护 | `repo_delete` 在 rename 前检查 mountinfo + st_dev，挂载点返回 `repo_is_mountpoint`；root 自身/root 外返回 `invalid_path` |
+| 可观测字段 | `repo_list`/`repo_info` 增加 `path/mounted/available/degraded/degraded_msg`，不为了列表打开 repo |
+| daemon 启动 reconcile | `p37d --root` 启动时做一次非破坏性 scan；不可用 repo 不 Open |
+| CLI | `repo register/unregister/scan`；daemon socket 可连接时通过 MCP 路由，不可连接时直连 registry |
+| 身份锚 | `.p37/repo.json` 缺失时 register 生成 `repo_<32hex>`；scan 对缺失 repo.json 只标 degraded |
+| tombstone | 注销后重启/scan 不会自动复活；重新挂载后显式 `repo_register` 恢复原 id |
+
+文档：`docs/mcp-contract.md`、`packaging/p36/README.md`。仓库格式仍为
+`format_ver=2`，SQLite/OverlayFS 存储引擎未改。
 
 ## v0.3.1：部署导出加固（2026-10-23）
 

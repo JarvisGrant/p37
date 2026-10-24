@@ -290,6 +290,28 @@ func classify(err error) (code, msg string, detail any) {
 		return "destination_not_empty", err.Error(), nil
 	case errors.Is(err, repo.ErrInvalidDest):
 		return "invalid_argument", err.Error(), nil
+	case errors.Is(err, hub.ErrInvalidPath):
+		return "invalid_path", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoNotInitialized):
+		return "repo_not_initialized", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoNameMismatch):
+		return "repo_name_mismatch", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoPathExists):
+		return "repo_path_exists", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoIsMountpoint):
+		return "repo_is_mountpoint", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoBusy):
+		var be *hub.BusyError
+		if errors.As(err, &be) {
+			return "repo_busy", be.Error(), map[string]any{
+				"workspaces": be.Workspaces, "leases": be.Leases,
+			}
+		}
+		return "repo_busy", err.Error(), nil
+	case errors.Is(err, hub.ErrRegistryBusy):
+		return "registry_busy", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoLocked):
+		return "repo_busy", err.Error(), nil
 	case errors.Is(err, repo.ErrNotInitialized):
 		return "repo_not_initialized", err.Error(), nil
 	case errors.Is(err, meta.ErrNotExist):

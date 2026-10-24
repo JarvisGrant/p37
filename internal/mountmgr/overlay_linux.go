@@ -3,12 +3,10 @@
 package mountmgr
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/chenyiwen/p37/internal/hash"
@@ -122,54 +120,6 @@ func (m *Manager) Relower(wsID string, newBase hash.ID, src ContentSource) error
 // 场景下 st_dev 会误导）。
 func (m *Manager) IsMounted(wsID string) bool {
 	return IsMountPoint(m.WorkspaceDir(wsID))
-}
-
-// IsMountPoint 报告 path 是否为挂载点。
-func IsMountPoint(path string) bool {
-	want, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	f, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		// 格式: id parent major:minor root mountpoint options...
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 5 {
-			continue
-		}
-		mp := unescapeMountField(fields[4])
-		if mp == want {
-			return true
-		}
-	}
-	return false
-}
-
-// unescapeMountField 还原 mountinfo 里的八进制转义（空格等）。
-func unescapeMountField(s string) string {
-	if !strings.Contains(s, `\`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+3 < len(s) {
-			var v int
-			if _, err := fmt.Sscanf(s[i+1:i+4], "%03o", &v); err == nil {
-				b.WriteByte(byte(v))
-				i += 3
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
 }
 
 // ProbeOverlay 尝试在 dir 下做一次真实的 OverlayFS 挂载，用于部署自检

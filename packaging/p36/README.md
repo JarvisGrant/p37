@@ -51,6 +51,79 @@ copy 模式每个工作区是一份完整树；默认 `max_active=8`、`max_hidd
 `warn_disk_bytes=8 GiB`，
 按实际仓库体积和 L2 容量调整。
 
+## 1.1 应用卷生命周期（热插拔）
+
+P36 可以把「每应用一个持久卷」做成 qcow2，作为额外 virtio-blk 热加给运行中的
+VM，guest 内格式化为 ext4 并挂到 `/srv/repos/<app>`。卷内就是 p37 的 repo 根
+（`.p37/`、`workspaces/` 等）。VM 可随时丢弃，应用卷是持久真相源；p37 看到的
+就是本地 ext4，不是 NFS。
+
+标准流程：
+
+```text
+attach:
+  宿主把 qcow2 作为 virtio-blk 热加给运行中的 VM
+  guest mount /dev/vdX /srv/repos/app-a
+  p37 --root /srv/repos repo register app-a /srv/repos/app-a [--init-if-missing]
+  # 或：p37 --root /srv/repos repo scan
+
+detach:
+  p37 --root /srv/repos repo unregister app-a
+  guest umount /srv/repos/app-a
+  宿主 remove-device（之后才可删除/回收 qcow2）
+
+删除应用卷:
+  repo unregister → guest umount → 宿主删卷
+  不要对挂载点调用 repo_delete
+```
+
+`repo_unregister` 会先卸载该 repo 的 overlay workspace、关闭 SQLite、释放
+per-repo flock，再写 registry tombstone；`.p37`、workspaces 和 repo 数据全部
+保留。卷重新挂载后执行 `repo_register` 即可恢复，id/name 不变。
+
+`repo_register` 不会创建目录，也不会移动/复制数据。它要求 path 已存在且位于
+`/srv/repos` 下。path 下没有 `.p37/p37.db` 时：
+
+- 默认返回 `repo_not_initialized`；
+- `--init-if-missing` 使用 `/srv/repos/.p37/config.toml` 模板初始化，并写
+  `.p37/repo.json`。
+
+`.p37/repo.json` 是仓库身份锚（`id` / `name` / `default_line`）：
+
+- 有 `.p37/p37.db` 但没有 repo.json：`repo_register` 会生成并写入；
+- repo.json 已存在：以其中的 id/name 为准，调用方 name 冲突返回
+  `repo_name_mismatch`；
+- 不要手工删除 repo.json。它缺失时 `repo_scan` 会把 registry 行标记为
+  degraded，但不会删数据。
+
+`repo_scan` 用于 daemon 启动后或卷变更后 reconcile：
+
+```bash
+p37 --root /srv/repos repo scan [--dry-run] [--prune-missing] [--json]
+```
+
+- 扫描 `/srv/repos` 的直接子目录，跳过隐藏目录、非目录和 symlink；
+- 未注册但 repo.json 有效的目录加入 registry；
+- 已注册但卷不在：默认标记 degraded，`--prune-missing` 才删除 registry 行；
+- 已注册但 repo.json 缺失：标记 degraded，不删数据；
+- 已注销（tombstone）的 repo 不会自动复活，必须显式 `repo register`。
+
+启动时 `p37d --root` 会自动做一次 `repo_scan`（不 prune、不删除），所以
+预先挂载好的应用卷不需要重启 daemon 就能出现在 `repo_list`。
+
+`repo_list` / `repo_info` 返回：
+
+- `path`：repo 根；
+- `available`：path 是否存在；
+- `mounted`：path 是否为挂载点；
+- `degraded` / `degraded_msg`：卷缺失或 repo.json 缺失等。
+
+这些字段只做轻量 stat/mount 探测，不会为了列表去打开 repo。
+
+CLI 在 `/srv/repos/.p37/p37d.sock` 可连接时必须通过 daemon 执行
+register/unregister/scan；socket 不存在或已失效时才直连 registry。socket 权限
+`0600`，CLI 必须以运行 p37d 的同一 uid（默认 `p36`）执行。
+
 ## 2. 构建与发布物
 
 p37 仓库：
@@ -233,6 +306,10 @@ auto 模式下 OverlayFS 不可用只产生 `WARN`，`ok` 仍为 true；正式�
 - HTTP 模式仍强制 `auth_token`；stdio 模式不引入 token，依赖 socket `0600`。
   因此 MCP 客户端进程必须与 p37d 同 uid（默认都是 `p36`）；换用户会连不上。
 - 没有自更新；不要试图在实例内替换 `/run/p37-payload` 下的文件。
+- `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前应由 P36
+  在上层确认应用空闲。活跃 workspace/lease 会被 `repo_busy` 挡住。
+- `repo_delete` 拒绝挂载点、root 自身和 root 外路径；应用卷删除只能走
+  `repo_unregister → guest umount → 宿主删卷`。
 - `p37d --check` 有写探测，不适合当作在线探针。
 - Ubuntu 26.04 非 root 下 OverlayFS 可能 `EPERM`（即使有 ambient
   `CAP_SYS_ADMIN`）。默认 auto 会回退 copy；copy 模式磁盘占用 ≈ 仓库树 ×
