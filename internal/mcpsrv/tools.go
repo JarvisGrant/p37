@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hash"
@@ -65,8 +66,10 @@ func (s *Server) registerRead() {
 					"last_land_ts":  st.LastLandTS,
 					"format_ver":    st.FormatVer,
 					"has_head":      st.HasHead,
+					"p37_version":   Version,
 				},
-				"leases": leases,
+				"leases":      leases,
+				"persistence": persistenceView(rr),
 			}
 			if a.Ws != "" {
 				info, err := rr.WS.Info(a.Ws)
@@ -303,7 +306,8 @@ func (s *Server) registerWorkspace() {
 		   "task":{"type":"string"},
 		   "task_desc":{"type":"string"},
 		   "leases":{"type":"array","items":{"type":"string"}},
-		   "materialize":{"type":"string","enum":["auto","overlay","copy"]}
+		   "materialize":{"type":"string","enum":["auto","overlay","copy"]},
+		   "idempotency_key":{"type":"string"}
 		 },"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
@@ -311,12 +315,13 @@ func (s *Server) registerWorkspace() {
 				return nil, err
 			}
 			var a struct {
-				Parent      json.RawMessage `json:"parent"`
-				Name        string          `json:"name"`
-				Task        string          `json:"task"`
-				TaskDesc    string          `json:"task_desc"`
-				Leases      []string        `json:"leases"`
-				Materialize string          `json:"materialize"`
+				Parent         json.RawMessage `json:"parent"`
+				Name           string          `json:"name"`
+				Task           string          `json:"task"`
+				TaskDesc       string          `json:"task_desc"`
+				Leases         []string        `json:"leases"`
+				Materialize    string          `json:"materialize"`
+				IdempotencyKey string          `json:"idempotency_key"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
@@ -329,41 +334,115 @@ func (s *Server) registerWorkspace() {
 			if task == "" {
 				task = a.Task
 			}
-			w, err := rr.WS.Open(workspace.OpenRequest{
+			out, err := rr.WS.OpenWithKey(workspace.OpenRequest{
 				Parent: parent, Name: a.Name, TaskDesc: task,
 				Leases: a.Leases, Mode: mountmgr.Mode(a.Materialize),
+				IdempotencyKey: a.IdempotencyKey,
 			})
 			if err != nil {
 				return nil, err
 			}
-			pk := w.ParentKind
-			if w.BaseLine != "" {
-				pk = "line"
+			if out.Workspace == nil {
+				life, lerr := rr.WSLifecycleOf(claimWSID(out))
+				if lerr != nil {
+					return nil, lerr
+				}
+				if life.State == repo.WSGoneLanded || life.State == repo.WSLanded {
+					return alreadyLandedData(rr, life), nil
+				}
+				return nil, wsGoneError(rr, claimWSID(out), life)
 			}
-			return map[string]any{
-				"ws_id": w.ID, "dir": rr.WS.Dir(w.ID),
-				"parent_kind": pk, "parent_id": w.ParentID,
-				"base_line": w.BaseLine, "base_version": w.BaseVersion.String(),
-				"materialize": w.Materialize, "state": w.State,
-			}, nil
+			return wsOpenView(rr, out.Workspace, out.Created, out.Reused, out.Replayed), nil
+		})
+
+	s.register("ws_ensure",
+		"按 name+parent 原子地打开或获取一个工作区；同名同 parent 始终返回同一个 ws_id。",
+		`{"type":"object","properties":{
+		   "repo":{"type":"string"},
+		   "name":{"type":"string"},
+		   "parent":{"type":["object","string"],"description":"{kind:version|line|workspace,id}；省略表示默认 line"},
+		   "task":{"type":"string"},
+		   "task_desc":{"type":"string"},
+		   "leases":{"type":"array","items":{"type":"string"}},
+		   "materialize":{"type":"string","enum":["auto","overlay","copy"]},
+		   "idempotency_key":{"type":"string"}
+		 },"required":["repo","name"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, err := s.repoFor(repoArg(raw))
+			if err != nil {
+				return nil, err
+			}
+			var a struct {
+				Parent         json.RawMessage `json:"parent"`
+				Name           string          `json:"name"`
+				Task           string          `json:"task"`
+				TaskDesc       string          `json:"task_desc"`
+				Leases         []string        `json:"leases"`
+				Materialize    string          `json:"materialize"`
+				IdempotencyKey string          `json:"idempotency_key"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			parent, err := parseParentArg(a.Parent)
+			if err != nil {
+				return nil, err
+			}
+			task := a.TaskDesc
+			if task == "" {
+				task = a.Task
+			}
+			out, err := rr.WS.Ensure(workspace.OpenRequest{
+				Parent: parent, Name: a.Name, TaskDesc: task,
+				Leases: a.Leases, Mode: mountmgr.Mode(a.Materialize),
+				IdempotencyKey: a.IdempotencyKey,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if out.Workspace == nil {
+				life, lerr := rr.WSLifecycleOf(claimWSID(out))
+				if lerr != nil {
+					return nil, lerr
+				}
+				if life.State == repo.WSGoneLanded || life.State == repo.WSLanded {
+					return alreadyLandedData(rr, life), nil
+				}
+				return nil, wsGoneError(rr, claimWSID(out), life)
+			}
+			return wsOpenView(rr, out.Workspace, out.Created, out.Reused, out.Replayed), nil
 		})
 
 	s.register("ws_list",
-		"列出全部工作区（默认不含隐藏 merge/preview 工作区）。",
-		`{"type":"object","properties":{"include_hidden":{"type":"boolean"}},"additionalProperties":false}`,
+		"列出全部工作区；可选包含隐藏工作区与最近回收记录（tombstone）。",
+		`{"type":"object","properties":{
+		   "include_hidden":{"type":"boolean"},
+		   "include_dropped":{"type":"boolean"},
+		   "include_recently_dropped":{"type":"boolean"},
+		   "dropped_within":{"type":"string"}
+		 },"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, rerr := s.repoFor(repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
 			var a struct {
-				IncludeHidden bool `json:"include_hidden"`
+				IncludeHidden  bool   `json:"include_hidden"`
+				IncludeDropped bool   `json:"include_dropped"`
+				IncludeRecent  bool   `json:"include_recently_dropped"`
+				DroppedWithin  string `json:"dropped_within"`
 			}
 			_ = json.Unmarshal(raw, &a)
 			all, err := rr.WS.List()
 			if err != nil {
 				return nil, err
 			}
+			leases, _ := rr.DB.ListLeases()
+			leaseCount := map[string]int{}
+			for _, l := range leases {
+				leaseCount[l.WsID]++
+			}
+			now := nowMS()
 			out := make([]map[string]any, 0, len(all))
 			for _, w := range all {
 				if w.Hidden && !a.IncludeHidden {
@@ -385,7 +464,40 @@ func (s *Server) registerWorkspace() {
 					"base_version": w.BaseVersion.String(), "base_line": w.BaseLine,
 					"captured_ops": n, "conflict_count": c,
 					"materialize": w.Materialize, "dir": rr.WS.Dir(w.ID),
+					"created_ts": w.CreatedTS, "updated_ts": w.UpdatedTS,
+					"age_ms": now - w.CreatedTS, "landed_ts": w.LandedTS,
+					"lease_count": leaseCount[w.ID],
 				})
+			}
+			if a.IncludeDropped || a.IncludeRecent {
+				since := int64(0)
+				if a.DroppedWithin != "" {
+					if d, err := time.ParseDuration(a.DroppedWithin); err == nil {
+						since = now - d.Milliseconds()
+					} else {
+						return nil, coded("invalid_argument", "dropped_within 解析失败: %v", err)
+					}
+				} else if a.IncludeRecent && !a.IncludeDropped {
+					since = now - int64(time.Hour/time.Millisecond)
+				}
+				ts, err := rr.DB.ListWSTombstones(since, now, 500)
+				if err != nil {
+					return nil, err
+				}
+				for _, t := range ts {
+					item := map[string]any{
+						"ws_id": t.WSID, "name": t.Name, "state": "tombstone",
+						"reason": t.Reason, "why": t.Why, "dropped_at": t.DroppedAt,
+						"parent_kind": t.ParentKind, "parent_id": t.ParentID,
+						"landed_version": t.LandedVersion, "target_kind": t.TargetKind,
+						"target_id": t.TargetID, "line": t.Line, "line_head": t.LineHead,
+						"dirty_ops": t.DirtyOps, "tombstone_expires_at": t.ExpiresAt,
+					}
+					if h := currentLineHead(rr, t.Line); h != "" {
+						item["current_line_head"] = h
+					}
+					out = append(out, item)
+				}
 			}
 			return out, nil
 		})
@@ -404,7 +516,18 @@ func (s *Server) registerWorkspace() {
 			if err != nil {
 				return nil, err
 			}
-			return rr.WS.Info(a.WsID)
+			life, view, err := wsLifecycleOrError(rr, a.WsID, true)
+			if err != nil {
+				return nil, err
+			}
+			if view != nil {
+				return view, nil
+			}
+			st, err := rr.WS.Info(life.Workspace.ID)
+			if err != nil {
+				return nil, err
+			}
+			return st, nil
 		})
 
 	s.register("ws_lease",
@@ -427,7 +550,7 @@ func (s *Server) registerWorkspace() {
 			if a.Mode == "" {
 				a.Mode = "shared"
 			}
-			if _, err := rr.WS.Get(a.WsID); err != nil {
+			if _, _, err := wsLifecycleOrError(rr, a.WsID, false); err != nil {
 				return nil, err
 			}
 			for _, p := range a.Add {
@@ -466,6 +589,16 @@ func (s *Server) registerWorkspace() {
 			}](raw)
 			if err != nil {
 				return nil, err
+			}
+			life, view, err := wsLifecycleOrError(rr, a.WsID, true)
+			if err != nil {
+				return nil, err
+			}
+			if view != nil {
+				return view, nil
+			}
+			if life.State != repo.WSLive {
+				return nil, coded("ws_busy", "工作区状态为 %s", life.State)
 			}
 			before, _ := rr.DB.CountOps(a.WsID)
 			if err := rr.WS.Sync(a.WsID); err != nil {
@@ -513,11 +646,24 @@ func (s *Server) registerWorkspace() {
 				cascade = *a.Cascade
 			}
 			n, _ := rr.DB.CountOps(a.WsID)
-			dropped, reparented, err := rr.WS.Drop(a.WsID, cascade, a.KeepDir)
+			dropped, reparented, err := rr.WS.DropWithOptions(a.WsID, workspace.DropOptions{
+				Cascade: cascade, KeepDir: a.KeepDir, Reason: "abandoned",
+			})
 			if err != nil {
 				if errors.Is(err, workspace.ErrNotFound) {
-					return map[string]any{"dropped": []string{a.WsID}, "already_dropped": true,
-						"reparented": []string{}, "conflicts": []any{}, "dirty_ops_discarded": 0}, nil
+					out := map[string]any{"dropped": []string{a.WsID}, "already_dropped": true,
+						"reparented": []string{}, "conflicts": []any{}, "dirty_ops_discarded": 0}
+					if life, _ := rr.WSLifecycleOf(a.WsID); life != nil && life.Tombstone != nil {
+						out["state"] = "tombstone"
+						out["reason"] = life.Tombstone.Reason
+						out["dropped_at"] = life.Tombstone.DroppedAt
+						out["line"] = life.Tombstone.Line
+						out["line_head"] = life.Tombstone.LineHead
+						if h := currentLineHead(rr, life.Tombstone.Line); h != "" {
+							out["current_line_head"] = h
+						}
+					}
+					return out, nil
 				}
 				// 元数据已删除、配额已回收；目录清理失败只是警告。
 				if errors.Is(err, workspace.ErrCleanupFailed) {
@@ -578,6 +724,9 @@ func (s *Server) registerWorkspace() {
 				case "workspace":
 					ref = "workspace:" + id
 				}
+			}
+			if _, _, err := wsLifecycleOrError(rr, a.WsID, false); err != nil {
+				return nil, err
 			}
 			return rr.WS.RebaseTo(a.WsID, ref)
 		})
@@ -738,12 +887,20 @@ func (s *Server) registerLand() {
 			if err != nil {
 				return nil, err
 			}
+			if _, view, lerr := wsLifecycleOrError(rr, a.WsID, true); lerr != nil {
+				return nil, lerr
+			} else if view != nil {
+				if m, ok := view.(map[string]any); ok && kind == "line" && id != "" {
+					m["line"] = id
+				}
+				return view, nil
+			}
 			if kind == "workspace" {
 				res, err := rr.PreviewInto(a.WsID, id)
 				if err != nil {
 					return nil, err
 				}
-				return landView2(res), nil
+				return landView2(rr, res), nil
 			}
 			line := id
 			if kind == "mainline" || line == "" {
@@ -756,7 +913,7 @@ func (s *Server) registerLand() {
 			if err != nil && res == nil {
 				return nil, err
 			}
-			return landView2(res), nil
+			return landView2(rr, res), nil
 		})
 
 	s.register("ws_land",
@@ -798,9 +955,12 @@ func (s *Server) registerLand() {
 				}
 				res, err := rr.LandInto(a.WsID, id, exp, a.PreviewID, a.IdempotencyKey)
 				if err != nil {
+					if view, ok, verr := landErrorView(rr, a.WsID, err); ok {
+						return view, verr
+					}
 					return nil, err
 				}
-				return landView2(res), nil
+				return landView2(rr, res), nil
 			}
 			line := id
 			if kind == "mainline" || line == "" {
@@ -814,14 +974,17 @@ func (s *Server) registerLand() {
 			})
 			if err != nil {
 				if errorsIsLandConflict(err) && res != nil {
-					return landView2(res), nil
+					return landView2(rr, res), nil
+				}
+				if view, ok, verr := landErrorView(rr, a.WsID, err); ok {
+					return view, verr
 				}
 				return nil, err
 			}
 			if cfg, err := config.Load(rr.Root); err == nil && cfg.Remote.AutoPush {
 				go func() { _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
 			}
-			return landView2(res), nil
+			return landView2(rr, res), nil
 		})
 
 	s.register("ws_land_into",
@@ -844,9 +1007,12 @@ func (s *Server) registerLand() {
 			}
 			res, err := rr.LandInto(a.WsID, a.ParentWsID, a.ExpectedParentTree, a.PreviewID, a.IdempotencyKey)
 			if err != nil {
+				if view, ok, verr := landErrorView(rr, a.WsID, err); ok {
+					return view, verr
+				}
 				return nil, err
 			}
-			return landView2(res), nil
+			return landView2(rr, res), nil
 		})
 
 	s.register("version_revert",

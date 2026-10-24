@@ -1,7 +1,7 @@
-# p37 MCP 契约（v0.3.3 / format_ver=2）
+# p37 MCP 契约（v0.4.0 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
-`internal/mcpsrv` 的注册为准；当前注册 61 个工具。
+`internal/mcpsrv` 的注册为准；当前注册 62 个工具。
 
 ## 统一信封
 
@@ -34,15 +34,19 @@
 
 ### 幂等参数
 
-只有以下工具的 `idempotency_key` 会写入/读取幂等缓存：
+以下工具的 `idempotency_key` 会写入/读取持久化幂等记录：
 
+- `ws_open`（同一 key 返回同一个 `ws_id`，即使该工作区后来已回收）
+- `ws_ensure`（同上；同时按 `name+parent` 做原子 open-or-get）
 - `ws_land`
+- `ws_land_into`
 - `line_merge`
 - `sync_push`
 
-`version_revert` 接受 `idempotency_key` 并写入版本元数据，但当前不做前置查重。
-其他工具即使 schema 接受 `idempotency_key`，目前也只是保留参数，不会做幂等
-去重。`ws_land_into` 的幂等只保证同一 VM 生命周期（restore 不恢复 workspace）。
+同一个 key 被用于不同的 `ws_id`/target 时返回 `idempotency_conflict`，不会静默
+返回首次结果。`version_revert` 接受 `idempotency_key` 并写入版本元数据，但当前
+不做前置查重。幂等/回收记录是本地仓库数据，`sync_restore` 不恢复；跨 VM 恢复
+后应按 name/line 重新 `ws_ensure`。
 
 ## 工具总览
 
@@ -52,7 +56,7 @@
 | 仓库管理 | `repo_create` `repo_delete` `repo_import` `repo_export` `repo_export_status` `repo_set_remote` |
 | 应用卷生命周期 | `repo_register` `repo_unregister` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
-| 工作区 | `ws_open` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
+| 工作区 | `ws_open` `ws_ensure` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
 | 整合 | `land_preview` `ws_land` `ws_land_into` |
 | 冲突 | `conflict_list` `conflict_show` `conflict_resolve` `conflict_resolve_all` |
 | 历史读取 | `version_log` `version_show` `version_diff` `version_tree` `version_file` `version_archive` `version_compare` `version_graph` `version_revert` `blame` |
@@ -83,6 +87,27 @@
 ```
 
 这些字段只做轻量 stat/mount 探测；列表不会为了展示去打开 repo。
+`mounted=false` 只表示该目录不是独立 mount point，不代表数据丢失；看
+`available`/`degraded`。
+
+`repo_info` / `repo_status` 还返回：
+
+```json
+{
+  "p37_version": "0.4.0",
+  "persistence": {
+    "truth_source": "local_repo",
+    "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
+    "remote": {"configured": true, "remote_key": "rk_...", "last_push_ts": 0,
+               "remote_head": "", "last_package_id": ""},
+    "durable": false,
+    "durable_scope": "local_only"
+  }
+}
+```
+
+本地 DB+CAS 是在线语义真相源；`sync_push` 成功后才可能 `durable=true`。
+
 
 ## 仓库管理
 
@@ -244,8 +269,33 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
 | `ws_drop` | `ws_id`, `cascade?`, `keep_dir?` | 幂等；`cascade=true` 把子工作区重挂到祖父，不是递归删除 |
 | `ws_lease` | `ws_id`, `add?`, `release?`, `mode?` | 登记/解除路径租约；`mode` = shared/exclusive |
 | `lease_query` | `paths?` | 查询若干路径上的租约 |
-| `ws_reap` | `older_than?`, `state?`, `include_orphan_dirs?`, `dry_run?` | 默认 dry-run；有 lease/active 不删；隐藏 TTL 24h |
+| `ws_reap` | `older_than?`, `state?`, `include_orphan_dirs?`, `dry_run?` | 默认 dry-run；返回 `candidates[]/skipped[]`，有 lease/active 不删；隐藏 TTL 24h |
 | `ws_disk_usage` | — | 按工作区统计磁盘占用 |
+
+### ws_info / ws_sync / land_preview 对已回收工作区
+
+- 已落地并被回收（`reason=landed_and_dropped`）：返回 `ok=true`，
+  `state="already_landed"`、`already_landed=true`，带 `version_id/line/line_head`。
+- 显式 drop / 过期回收：返回 `ws_gone` 错误，`detail` 带
+  `repo/name/ws_id/reason/dropped_at/line/line_head`。
+- 完全未知的 id：仍是 `ws_not_found`，`detail.reason=never_opened_or_tombstone_expired`。
+- 存储/挂载异常：`ws_broken` / `ws_not_mounted`，不会伪装成 gone。
+
+### ws_list tombstone 项
+
+```json
+{
+  "ws_id": "ws_...", "name": "root-turn-1", "state": "tombstone",
+  "reason": "landed_and_dropped", "dropped_at": 1792831200000,
+  "line": "p34/session/s1", "line_head": "v...",
+  "landed_version": "v...", "target_kind": "line",
+  "target_id": "p34/session/s1", "tombstone_expires_at": 1793436000000
+}
+```
+
+`reason` 枚举：`landed_and_dropped | expired | abandoned | unknown`。
+默认保留 7 天（`[workspace] tombstone_ttl = "168h"`）；`include_recently_dropped`
+默认只看最近 1 小时。
 
 ### ws_sync 返回
 
@@ -276,13 +326,18 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
   "max_depth": 32,
   "max_fanout": 16,
   "landed": 0,
-  "broken": 0
+  "broken": 0,
+  "workspaces": [
+    {"ws_id": "ws_...", "name": "root-1", "state": "active", "dirty": true,
+     "ops": 3, "age_ms": 120000, "leases": 0, "counts_to_quota": true}
+  ]
 }
 ```
 
 `max_active` 只统计 `active/conflicted/rebasing`；`landed`、`integrating`、
 `hidden`、`broken` 不占额度。`hidden_limit` 是隐藏 merge/preview 的上限
-（默认 32）。
+（默认 32）。`workspaces[]` 逐项给出 `ws_id/name/state/ops/dirty/age_ms/leases`，
+便于上层提示“是谁占着配额”。
 
 ### ws_drop 返回
 
@@ -432,8 +487,8 @@ registry_busy
 line_not_found line_exists line_protected
 target_invalid target_moved source_moved target_not_ancestor
 merge_base_ambiguous merge_expired preview_expired
-ws_not_found ws_not_mounted ws_broken ws_busy ws_has_active_children
-ws_cleanup_warning ws_exists quota_exceeded
+ws_not_found ws_gone ws_not_mounted ws_broken ws_busy ws_has_active_children
+ws_cleanup_warning ws_exists quota_exceeded ws_open_in_progress idempotency_conflict
 not_dirty conflict land_queue_full invalid_path
 destination_not_empty path_not_found
 overlay_unavailable path_case_conflict
@@ -455,3 +510,11 @@ invalid_argument internal not_found
   `blocked_by_children`。
 - `ws_drop` 的目录清理失败不返回错误，而是在成功结果里带
   `dir_cleanup_warning`；land 路径把同类问题放在 `warnings[]`。
+- 所有 `ws_*` / `repo_*` / `line_*` 错误的 `detail` 至少带 `repo`、标识符
+  （`ws_id` 或 `name`）和 `reason`；需要时附 `line/line_head`。
+- `ws_gone` 的 `detail.legacy_code="ws_not_found"`，便于旧调用方兜底。
+- `ws_open_in_progress` 表示并发创建正在物化，`detail.retry_after_ms` 可重试。
+- `already_landed` / `already_dropped` 是成功结果里的布尔字段，不是错误码。
+- `ws_land` / `ws_land_into` 返回 `durable=false` 与
+  `durability.local_committed=true`：本地真相源已提交，但跨 VM 仍需
+  `sync_push`（`durable=true`）。

@@ -40,6 +40,21 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.0：工作区协议补齐幂等与“消失语义”（2026-10-25）
+
+本版只加协议能力，不改仓库格式（仍 `format_ver=2`）：
+
+| 改动 | 落点 |
+|---|---|
+| `ws_open` 幂等键 | 持久化 claim 在 `idempotency_result`；同 key 返回同 `ws_id` |
+| 新增 `ws_ensure` | 按 `name+parent` 原子 open-or-get；name claim 回收后自动释放 |
+| `ws_gone` / `already_landed` | 已落地并回收的 ws 对 info/sync/preview/land 幂等；显式回收返回结构化 gone |
+| 回收记录 | tombstone 默认 7 天；`ws_list include_dropped/include_recently_dropped` |
+| 错误上下文 | 统一补 `repo`、标识符、`reason`、`line/head`；新增 `ws_open_in_progress` / `idempotency_conflict` |
+| 可观测 | `ws_quota.workspaces[]`、`ws_reap.candidates[]/skipped[]` |
+| 持久性声明 | `ws_land.durable/durability`、`repo_info.p37_version/persistence` |
+| 并发 | SQLite `_txlock=immediate` + busy_timeout 15s，支持多进程 CLI 并发 |
+
 ## v0.3.3：文档对齐与 ws_land epoch 校验（2026-10-25）
 
 本版不改变仓库格式、存储布局和 MCP 工具面，重点是让文档与 v0.3.x 的实际行为
@@ -630,7 +645,7 @@ PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约�
 | `internal/mountmgr` | `overlay`（Linux，含 `ProbeOverlay` 自检）与 `copy`（跨平台）两种物化、基底 LRU、大小写冲突检测、标记文件在被跟踪树之外 |
 | `internal/repo` | init / import / **land 流水线**（可恢复的三段提交协议）/ revert / 状态 / 冲突视图 / 租约违规检测 |
 | `internal/meta` | stat_cache / workspace / op / conflict / resolution / journal 的读写；`CommitLand` / `FinishLand` / `RollbackLand` / `ReconcileLand` |
-| `internal/mcpsrv` | 61 个 MCP 工具 + 统一信封 + 错误码映射 |
+| `internal/mcpsrv` | 62 个 MCP 工具 + 统一信封 + 错误码映射 |
 | `internal/config` | 附录 B 的配置与默认值 |
 | `cmd/p37` | 运维 CLI（init/import/status/doctor/fsck/gc/migrate/ignore-check + 调试用版本操作） |
 | `cmd/p37d` | 常驻 daemon：flock、unix socket、可选 HTTP（强制 token）、优雅退出 |

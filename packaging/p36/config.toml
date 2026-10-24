@@ -27,6 +27,8 @@ max_active = 8
 max_hidden = 32
 # copy 模式磁盘占用更高；剩余空间低于 8 GiB 就告警。
 warn_disk_bytes = 8589934592
+# 工作区回收记录（ws_list include_dropped）保留窗口。
+tombstone_ttl = "168h"
 scan_interval = "30s"
 debounce = "500ms"
 

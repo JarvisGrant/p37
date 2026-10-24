@@ -1,4 +1,4 @@
-# 当前状态（v0.3.3）
+# 当前状态（v0.4.0）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,9 +7,9 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.3.3` |
+| 发布版本 | `v0.4.0` |
 | 仓库格式 | `format_ver = 2` |
-| MCP 工具 | 61 个（以 `internal/mcpsrv` 注册为准） |
+| MCP 工具 | 62 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
 | 测试 | `go test ./...` 全绿；`make cross` 通过 |
 
@@ -56,7 +56,7 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 | 在线 GC | 未实现 | 维护窗口停 daemon 后执行 `p37 gc --prune --pack`；daemon 持锁时 `p37 gc` 会拒绝 |
 | 写时打包 / repack 压实 | 未实现 | 只有离线 `p37 gc --pack`；pack 内对象全部不可达才整包删除 |
 | 多 line push | 使用全量 checkpoint | 单 line 可增量；大仓库建议按会话保留 VM |
-| `sync_restore` | 不恢复 workspace / lease | 恢复后由 P34 重新 `ws_open` |
+| `sync_restore` | 不恢复 workspace / lease / tombstone / 幂等记录 | 恢复后由 P34 重新 `ws_ensure`；旧 ws_id 跨 VM 不保证可重放 |
 | `remote_prefix` 单写者 | 同一前缀只允许一个写者 | P34 需串行化同一 app 的 push |
 | `line_reset` 旧版本 grace | 由 GC 的 reset 日志保留 7 天 | 尚无独立后台清理任务 |
 | `p37d --check --root` | 只做 registry / DB / line 链检查 | 完整 ext4/写探测/OverlayFS/inotify/磁盘检查用 `--check --repo <root>` |

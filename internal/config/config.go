@@ -65,6 +65,8 @@ type WorkspaceConfig struct {
 	MaxHidden       int    `toml:"max_hidden"`
 	InotifyFallback bool   `toml:"inotify_fallback"`
 	WarnDiskBytes   int64  `toml:"warn_disk_bytes"`
+	// TombstoneTTL 是 ws_list include_dropped 的保留窗口，默认 168h。
+	TombstoneTTL string `toml:"tombstone_ttl"`
 }
 
 // MergeConfig 对应 [merge]。
@@ -155,6 +157,7 @@ func Default() Config {
 			MaxDepth:       32,
 			MaxFanout:      16,
 			WarnDiskBytes:  12 << 30,
+			TombstoneTTL:   "168h",
 		},
 		Merge: MergeConfig{
 			ContextLines:   tree.DefaultContextLines,
@@ -313,6 +316,7 @@ func (c Config) RepoOptions() repo.Options {
 		MaxFanout:      c.Workspace.MaxFanout,
 		MaxHidden:      c.Workspace.MaxHidden,
 		MaxMatches:     c.Merge.MaxMatches,
+		TombstoneTTL:   Duration(c.Workspace.TombstoneTTL, 168*time.Hour),
 		GC: repo.GCOptions{
 			KeepVersions: c.Retention.KeepVersions,
 			KeepEpochs:   c.Retention.KeepEpochs,

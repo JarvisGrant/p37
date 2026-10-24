@@ -114,7 +114,7 @@ sync_restore(repo, remote_prefix, name?, remote?, force?)
 
 ## 每回合删 VM 的约束
 
-- 本地 repo 是缓存；S3 是唯一真相源。
+- 本地 repo 的 DB+CAS 是在线语义真相源；S3 是跨 VM 灾备真相源。
 - `sync_push` 必须在删 VM 前成功；失败不得删 VM。
 - 建议 checkpoint 周期：每 N 个版本或 N 字节；远端保留最新 checkpoint + 后续
   delta。

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -49,7 +50,10 @@ const usage = `p37 —— AI 原生版本控制系统
 
 调试用版本操作（产品路径是 MCP）：
   ws-open <root> <task> [--materialize auto|overlay|copy] [--parent <id>]
-  ws-list <root>
+          [--name <name>] [--idempotency-key <key>] [--json]
+  ws-ensure <root> --name <name> [--parent <id>] [--task <desc>]
+            [--materialize auto|overlay|copy] [--idempotency-key <key>] [--json]
+  ws-list <root> [--include-dropped] [--include-recently-dropped] [--json]
   ws-info <root> <ws_id>
   ws-sync <root> <ws_id>
   ws-diff <root> <ws_id>          预览将落地的改动
@@ -213,8 +217,10 @@ func dispatch(cmd, root string, args []string, out, errw io.Writer) int {
 		return cmdIgnoreCheck(root, args[0], out, errw)
 	case "ws-open":
 		return cmdWSOpen(root, args, out, errw)
+	case "ws-ensure":
+		return cmdWSEnsure(root, args, out, errw)
 	case "ws-list":
-		return cmdWSList(root, out, errw)
+		return cmdWSList(root, args, out, errw)
 	case "ws-info":
 		return cmdWSInfo(root, args, out, errw)
 	case "ws-sync":
@@ -832,9 +838,8 @@ func cmdIgnoreCheck(root, p string, out, errw io.Writer) int {
 // --- 调试用版本操作 -----------------------------------------------------
 
 func cmdWSOpen(root string, args []string, out, errw io.Writer) int {
-	task := ""
-	parent := ""
-	mode := "auto"
+	task, parent, mode, name, key := "", "", "auto", "", ""
+	asJSON := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--parent":
@@ -847,6 +852,18 @@ func cmdWSOpen(root string, args []string, out, errw io.Writer) int {
 				mode = args[i+1]
 				i++
 			}
+		case "--name":
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
+		case "--idempotency-key":
+			if i+1 < len(args) {
+				key = args[i+1]
+				i++
+			}
+		case "--json":
+			asJSON = true
 		default:
 			if task == "" {
 				task = args[i]
@@ -858,19 +875,136 @@ func cmdWSOpen(root string, args []string, out, errw io.Writer) int {
 		return fail(errw, err)
 	}
 	defer func() { _ = r.Close() }()
-
-	w, err := r.WS.Open(workspace.OpenRequest{
-		Parent: parent, TaskDesc: task, Mode: mountmgr.Mode(mode),
+	res, err := r.WS.OpenWithKey(workspace.OpenRequest{
+		Parent: parent, Name: name, TaskDesc: task, Mode: mountmgr.Mode(mode),
+		IdempotencyKey: key,
 	})
 	if err != nil {
 		return fail(errw, err)
 	}
+	if res.Workspace == nil {
+		if asJSON {
+			return printJSON(out, errw, wsLifecycleCLI(r, res.WSID))
+		}
+		fmt.Fprintf(out, "ws_id       %s\n状态        已回收/已落地\n", res.WSID)
+		return 0
+	}
+	if asJSON {
+		return printJSON(out, errw, map[string]any{
+			"ws_id": res.Workspace.ID, "dir": r.WS.Dir(res.Workspace.ID),
+			"name": res.Workspace.Name, "materialize": res.Workspace.Materialize,
+			"state": res.Workspace.State, "created": res.Created,
+			"reused": res.Reused, "idempotent_replay": res.Replayed,
+		})
+	}
+	w := res.Workspace
 	fmt.Fprintf(out, "ws_id       %s\n目录        %s\n物化模式    %s\n父          %s:%s\n",
 		w.ID, r.WS.Dir(w.ID), w.Materialize, w.ParentKind, short(w.ParentID))
 	return 0
 }
 
-func cmdWSList(root string, out, errw io.Writer) int {
+func wsLifecycleCLI(r *repo.Repo, wsID string) map[string]any {
+	life, err := r.WSLifecycleOf(wsID)
+	if err != nil {
+		return map[string]any{"ws_id": wsID, "state": "unknown", "error": err.Error()}
+	}
+	out := map[string]any{"ws_id": wsID, "state": string(life.State)}
+	if life.Tombstone != nil {
+		out["reason"] = life.Tombstone.Reason
+		out["dropped_at"] = life.Tombstone.DroppedAt
+		out["line"] = life.Tombstone.Line
+		out["line_head"] = life.Tombstone.LineHead
+		out["landed_version"] = life.Tombstone.LandedVersion
+	}
+	if life.CurrentLineHead != "" {
+		out["current_line_head"] = life.CurrentLineHead
+	}
+	return out
+}
+
+func cmdWSEnsure(root string, args []string, out, errw io.Writer) int {
+	name, parent, task, mode, key := "", "", "", "auto", ""
+	asJSON := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name":
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
+		case "--parent":
+			if i+1 < len(args) {
+				parent = args[i+1]
+				i++
+			}
+		case "--task":
+			if i+1 < len(args) {
+				task = args[i+1]
+				i++
+			}
+		case "--materialize":
+			if i+1 < len(args) {
+				mode = args[i+1]
+				i++
+			}
+		case "--idempotency-key":
+			if i+1 < len(args) {
+				key = args[i+1]
+				i++
+			}
+		case "--json":
+			asJSON = true
+		}
+	}
+	if name == "" {
+		fmt.Fprintln(errw, "ws-ensure 需要 --name")
+		return 2
+	}
+	r, err := openRepo(root)
+	if err != nil {
+		return fail(errw, err)
+	}
+	defer func() { _ = r.Close() }()
+	res, err := r.WS.Ensure(workspace.OpenRequest{
+		Parent: parent, Name: name, TaskDesc: task, Mode: mountmgr.Mode(mode),
+		IdempotencyKey: key,
+	})
+	if err != nil {
+		return fail(errw, err)
+	}
+	if res.Workspace == nil {
+		if asJSON {
+			return printJSON(out, errw, wsLifecycleCLI(r, res.WSID))
+		}
+		fmt.Fprintf(out, "ws_id       %s\n状态        已回收/已落地\n", res.WSID)
+		return 0
+	}
+	if asJSON {
+		return printJSON(out, errw, map[string]any{
+			"ws_id": res.Workspace.ID, "dir": r.WS.Dir(res.Workspace.ID),
+			"name": res.Workspace.Name, "materialize": res.Workspace.Materialize,
+			"state": res.Workspace.State, "created": res.Created,
+			"reused": res.Reused, "idempotent_replay": res.Replayed,
+		})
+	}
+	w := res.Workspace
+	fmt.Fprintf(out, "ws_id       %s\n目录        %s\n物化模式    %s\n父          %s:%s\n创建        %v\n",
+		w.ID, r.WS.Dir(w.ID), w.Materialize, w.ParentKind, short(w.ParentID), res.Created)
+	return 0
+}
+
+func cmdWSList(root string, args []string, out, errw io.Writer) int {
+	includeDropped, includeRecent, asJSON := false, false, false
+	for _, a := range args {
+		switch a {
+		case "--include-dropped":
+			includeDropped = true
+		case "--include-recently-dropped":
+			includeRecent = true
+		case "--json":
+			asJSON = true
+		}
+	}
 	r, err := openRepo(root)
 	if err != nil {
 		return fail(errw, err)
@@ -880,15 +1014,72 @@ func cmdWSList(root string, out, errw io.Writer) int {
 	if err != nil {
 		return fail(errw, err)
 	}
-	if len(all) == 0 {
+	now := time.Now().UnixMilli()
+	items := make([]map[string]any, 0, len(all))
+	for _, w := range all {
+		n, _ := r.DB.CountOps(w.ID)
+		state := w.State
+		if w.LandedTS != 0 {
+			state = "landed"
+		}
+		items = append(items, map[string]any{
+			"ws_id": w.ID, "name": w.Name, "state": state,
+			"materialize": w.Materialize, "captured_ops": n,
+			"task": w.TaskDesc, "dir": r.WS.Dir(w.ID),
+			"created_ts": w.CreatedTS, "updated_ts": w.UpdatedTS,
+			"age_ms": now - w.CreatedTS, "landed_ts": w.LandedTS,
+		})
+	}
+	if includeDropped || includeRecent {
+		since := int64(0)
+		if includeRecent && !includeDropped {
+			since = now - int64(time.Hour/time.Millisecond)
+		}
+		ts, err := r.DB.ListWSTombstones(since, now, 500)
+		if err != nil {
+			return fail(errw, err)
+		}
+		for _, t := range ts {
+			items = append(items, map[string]any{
+				"ws_id": t.WSID, "name": t.Name, "state": "tombstone",
+				"reason": t.Reason, "why": t.Why, "dropped_at": t.DroppedAt,
+				"line": t.Line, "line_head": t.LineHead,
+				"landed_version": t.LandedVersion, "target_kind": t.TargetKind,
+				"target_id": t.TargetID, "dirty_ops": t.DirtyOps,
+			})
+		}
+	}
+	if asJSON {
+		return printJSON(out, errw, items)
+	}
+	if len(items) == 0 {
 		fmt.Fprintln(out, "（无工作区）")
 		return 0
 	}
 	fmt.Fprintf(out, "%-24s %-12s %-10s %-6s %s\n", "WS_ID", "STATE", "MATERIAL", "OPS", "TASK")
-	for _, w := range all {
-		n, _ := r.DB.CountOps(w.ID)
-		fmt.Fprintf(out, "%-24s %-12s %-10s %-6d %s\n", w.ID, w.State, w.Materialize, n, w.TaskDesc)
+	for _, it := range items {
+		ops, _ := it["captured_ops"].(int64)
+		if ops == 0 {
+			if v, ok := it["captured_ops"].(int); ok {
+				ops = int64(v)
+			}
+		}
+		task, _ := it["task"].(string)
+		if it["state"] == "tombstone" {
+			task = "reason=" + fmt.Sprint(it["reason"])
+		}
+		fmt.Fprintf(out, "%-24v %-12v %-10v %-6d %s\n",
+			it["ws_id"], it["state"], it["materialize"], ops, task)
 	}
+	return 0
+}
+
+func printJSON(out, errw io.Writer, v any) int {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fail(errw, err)
+	}
+	fmt.Fprintln(out, string(b))
 	return 0
 }
 

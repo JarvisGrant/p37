@@ -76,7 +76,24 @@ var (
 	// ErrInvalidDest 表示 repo_export 的目标目录非法（相对路径、仓库内、
 	// 符号链接或越过 export_root）。
 	ErrInvalidDest = errors.New("repo: 非法导出目录")
+	// ErrIdemConflict 表示同一个幂等键被用于不同的 land 请求。
+	ErrIdemConflict = errors.New("repo: 幂等键被用于不同请求")
 )
+
+// IdemConflictError 带出首次请求与本次请求的差异。
+type IdemConflictError struct {
+	Key       string
+	Field     string
+	Existing  string
+	Requested string
+}
+
+func (e *IdemConflictError) Error() string {
+	return "repo: 幂等键被用于不同请求: key=" + e.Key + " " + e.Field +
+		" existing=" + e.Existing + " requested=" + e.Requested
+}
+
+func (e *IdemConflictError) Unwrap() error { return ErrIdemConflict }
 
 // Options 配置打开仓库。
 type Options struct {
@@ -115,6 +132,8 @@ type Options struct {
 	// RedactTaskDesc 为真时血缘不写任务描述原文
 	// （附录 B 的 journal.redact_task_desc）。
 	RedactTaskDesc bool
+	// TombstoneTTL 是工作区回收记录保留窗口；<=0 取 7 天。
+	TombstoneTTL time.Duration
 }
 
 // GCOptions 是保留与回收的参数（§10.3、§10.4）。
@@ -163,6 +182,7 @@ func Open(root string, opt Options) (*Repo, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	db.SetTombstoneTTL(opt.TombstoneTTL)
 
 	bs, err := cas.NewLocalFS(p37)
 	if err != nil {
@@ -282,6 +302,12 @@ func Open(root string, opt Options) (*Repo, error) {
 		} else if len(reaped) > 0 {
 			log.Printf("p37: 已清理过期隐藏工作区 %d 个: %v", len(reaped), reaped)
 		}
+		if n, err := ws.SweepClaims(); err != nil {
+			log.Printf("p37: 工作区 claim 清理有失败项: %v", err)
+		} else if n > 0 {
+			log.Printf("p37: 已清理工作区 claim %d 条", n)
+		}
+		_, _ = db.DeleteExpiredKV(time.Now().UnixMilli())
 	}
 	return r, nil
 }

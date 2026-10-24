@@ -34,6 +34,8 @@ max_fanout = 16
 # max_hidden = 32
 # inotify_fallback = false
 warn_disk_bytes = 12884901888
+# 工作区回收记录保留窗口（ws_list include_dropped）。
+tombstone_ttl = "168h"
 
 [merge]
 context_lines = 3
@@ -107,6 +109,7 @@ max_package_bytes = 536870912
 | `workspace.max_hidden` | `32` | 隐藏 merge/preview 上限；代码里 0 表示取 32 |
 | `workspace.inotify_fallback` | `false` | inotify 额度不足时是否降级为只监听根目录 |
 | `workspace.warn_disk_bytes` | 12 GiB | 剩余空间告警阈值；P36 模板改为 8 GiB |
+| `workspace.tombstone_ttl` | `168h` | 工作区回收记录保留窗口；`include_recently_dropped` 默认 1h |
 | `merge.context_lines` | `3` | hunk 上下文行数 |
 | `merge.move_similarity` | `0.6` | 块移动相似度阈值 |
 | `merge.max_matches` | `64` | place 匹配上限 |
@@ -166,3 +169,9 @@ max_package_bytes = 536870912
   配置里改 `daemon.socket`，否则 `p37d --stdio` 可能连接到不同路径。
 - `auth_token` 不要写进随镜像分发的配置；由实例侧注入。
 - 配置里的相对路径（`outbox` 等）相对 repo 根解析。
+
+
+## workspace.tombstone_ttl
+
+工作区回收记录（tombstone）保留窗口，默认 `168h`。`ws_list include_dropped`
+只返回窗口内的记录；`include_recently_dropped` 默认只看最近 1 小时。

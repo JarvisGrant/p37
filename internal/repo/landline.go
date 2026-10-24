@@ -111,10 +111,29 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 		return nil, err
 	}
 	if opt.IdempotencyKey != "" {
+		req := map[string]string{
+			"idempotency_key": opt.IdempotencyKey, "ws_id": wsID,
+			"target": opt.Line, "fold": opt.Fold,
+		}
+		if storedReq, res, ok := r.getLandIdem("ws_land", opt.IdempotencyKey); ok {
+			if err := checkLandIdem(req, storedReq); err != nil {
+				return nil, err
+			}
+			if res == nil {
+				res = &LandResult{}
+			}
+			res.AlreadyLanded, res.Replayed, res.State = true, true, "already_landed"
+			res.Line = opt.Line
+			if head, err := r.DB.LineHead(opt.Line); err == nil {
+				res.CurrentLineHead = head
+			}
+			return res, nil
+		}
 		if v, _ := r.DB.FindVersionByIdempotency("ws_land", opt.IdempotencyKey, time.Now().UnixMilli()); v != nil {
 			head, _ := r.DB.LineHead(opt.Line)
 			return &LandResult{CanLand: true, AlreadyLanded: true, VersionID: v.ID(),
-				TargetHead: head, State: "already_landed"}, nil
+				LandedVersion: v.ID(), TargetHead: head, CurrentLineHead: head,
+				State: "already_landed", Line: opt.Line}, nil
 		}
 	}
 	// 幂等：工作区已 land 过直接返回原版本（即使工作区已被销毁）。
@@ -123,7 +142,8 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 	} else if landed {
 		id, _ := hash.Parse(vid)
 		return &LandResult{CanLand: true, AlreadyLanded: true, VersionID: id,
-			TargetHead: line.Head, State: "already_landed"}, nil
+			LandedVersion: id, TargetHead: line.Head, CurrentLineHead: line.Head,
+			State: "already_landed", Line: opt.Line}, nil
 	}
 	w, err := r.WS.Get(wsID)
 	if err != nil {
@@ -296,11 +316,20 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 		if err := r.DB.FinishLand(foldIDs); err != nil {
 			return nil, err
 		}
+		for _, id := range foldIDs {
+			r.WS.ReleaseNameClaims(id)
+		}
 	} else {
 		for _, fw := range fold {
 			_ = r.WS.MarkLanded(fw.ID)
 		}
 	}
+	res.LandedVersion = v.ID()
+	res.Line = opt.Line
+	r.putLandIdem("ws_land", opt.IdempotencyKey, map[string]string{
+		"idempotency_key": opt.IdempotencyKey, "ws_id": wsID,
+		"target": opt.Line, "fold": opt.Fold,
+	}, res)
 	return res, nil
 }
 
@@ -315,9 +344,24 @@ func (r *Repo) PreviewInto(wsID, parentWsID string) (*LandResult, error) {
 
 // LandInto 把 child 的变更并入直接父工作区，不产生版本。
 func (r *Repo) LandInto(wsID, parentWsID, expectedParentTree, previewID, idemKey string) (*LandResult, error) {
-	if vid, landed, err := r.DB.GetLandedWS(wsID); err == nil && landed {
-		id, _ := hash.Parse(vid)
+	if idemKey != "" {
+		req := map[string]string{"idempotency_key": idemKey, "ws_id": wsID, "parent_ws_id": parentWsID}
+		if storedReq, res, ok := r.getLandIdem("ws_land_into", idemKey); ok {
+			if err := checkLandIdem(req, storedReq); err != nil {
+				return nil, err
+			}
+			if res == nil {
+				res = &LandResult{}
+			}
+			res.AlreadyLanded, res.Replayed, res.State = true, true, "already_landed"
+			res.ParentWSID = parentWsID
+			return res, nil
+		}
+	}
+	if info, landed, err := r.DB.GetLandedWSInfo(wsID); err == nil && landed {
+		id, _ := hash.Parse(info.VersionID)
 		return &LandResult{CanLand: true, AlreadyLanded: true, TargetHead: id,
+			WSTree: id, PreviewID: wsID, ParentWSID: parentWsID,
 			State: "already_landed"}, nil
 	}
 	release, err := r.enterLand()
@@ -441,7 +485,8 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	}
 	res.TargetHead = replayed.Tree.ID()
 	res.State = "done"
-	if err := r.DB.InsertLandedWS(wsID, replayed.Tree.ID().String(), time.Now().UnixMilli()); err != nil {
+	if err := r.DB.InsertLandedWSWithTarget(wsID, replayed.Tree.ID().String(),
+		"workspace", parentWsID, time.Now().UnixMilli()); err != nil {
 		return nil, err
 	}
 	_ = r.DB.ClearConflicts(wsID)
@@ -458,9 +503,10 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 		_ = r.DB.ClearConflicts(previewID)
 		r.dropAfterLand(res, previewID, true)
 	}
-	if idemKey != "" {
-		r.putIdem("ws_land_into", idemKey, res)
-	}
+	res.ParentWSID = parentWsID
+	r.putLandIdem("ws_land_into", idemKey, map[string]string{
+		"idempotency_key": idemKey, "ws_id": wsID, "parent_ws_id": parentWsID,
+	}, res)
 	return res, nil
 }
 

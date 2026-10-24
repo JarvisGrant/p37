@@ -71,6 +71,12 @@ active / conflicted / rebasing / integrating / landed / merging / reaping / brok
   限制，TTL 24h。
 - `max_active` 只统计 `active/conflicted/rebasing`；`landed`、`integrating`、
   `hidden`、`broken` 不占额度。
+- `ws_open` 支持 `idempotency_key`；`ws_ensure` 按 `(name, parent)` 原子
+  open-or-get。claim 持久化在 `idempotency_result`，不依赖进程内锁。
+- 回收写 tombstone（`landed_and_dropped | expired | abandoned | unknown`），
+  默认保留 7 天；`ws_list include_dropped` 可查。
+- 已落地并回收的 ws 对 `ws_info/ws_sync/land_preview/ws_land` 返回
+  `already_landed`；显式回收返回结构化 `ws_gone`。
 - `ws_drop` 先删元数据（配额立即回收），目录清理失败只返回
   `dir_cleanup_warning`。
 - `ws_reap` 默认 dry-run，不删除有 lease 的工作区。
@@ -129,7 +135,14 @@ detach: repo_unregister → guest umount → 宿主 remove-device
 id/name。`repo_delete` 只用于 p37 自己创建的目录，并拒绝挂载点、root 自身和
 root 外路径。
 
-## 8. 同步
+## 8. 持久性真相源
+
+本地 repo 的 `.p37/p37.db` + `.p37/objects` + `.p37/packs` 是 line/version/
+对象的语义真相源；`.p37/workspaces`、op、stat_cache 是派生数据。S3 远端是
+跨 VM 灾备真相，不是在线语义真相。`ws_land` 默认 `durable=false`（仅本地已提交），
+`sync_push` 成功后才 `durable=true`。P36 负责卷/字节是否真的留在盘上。
+
+## 9. 同步
 
 同步单位是增量包：
 
@@ -144,7 +157,7 @@ delta；多 line 仓库当前每次生成全量 checkpoint。包先落本地 `ou
 `sync_push` 才上传并条件更新 ref。`fetch` 不移动 head；`pull` 只快进，分叉保留
 本地。详见 [`sync-contract.md`](sync-contract.md)。
 
-## 9. 关键不变量
+## 10. 关键不变量
 
 1. version id 永不改写；压缩/回收只作用于对象和版本行。
 2. `version_parent` 是 DAG 真相；`version.parent` 只是 first parent 兼容字段。

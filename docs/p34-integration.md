@@ -25,12 +25,18 @@ P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 
 ## 3. 每回合 root workspace
 
+推荐用 `ws_ensure`（原子 open-or-get），而不是“先 ws_list 再 ws_open”：
+
 ```json
-{ "repo": "my-app", "task": "...",
-  "parent": { "kind": "line", "id": "p34/session/<sessionID>" } }
+{ "repo": "my-app", "name": "root-<turn>",
+  "parent": { "kind": "line", "id": "p34/session/<sessionID>" },
+  "task_desc": "...",
+  "idempotency_key": "<session>/<turn>/ws" }
 ```
 
-返回 `ws_id`、`dir`、`base_line`、`base_version`、`materialize`。
+同名同 parent 的并发调用只产生一个工作区；同一 key 重放返回同一个 `ws_id`。
+返回 `ws_id/dir/base_line/base_version/materialize/state/created/reused`。
+`ws_open` 仍可用，并新增 `idempotency_key`；不传 key 时保持旧语义。
 
 agent 直接读写 `dir`。不要调用 `line_write_file`。
 
@@ -49,10 +55,13 @@ ws_land(repo, ws_id,
         expected_ws_tree=<ws_tree>,
         expected_ws_ops_epoch=<ws_ops_epoch>,
         drop_workspace=true,
-        idempotency_key=<turn-id>)
+        idempotency_key=<session>/<turn>/land)
 ```
 
-下回合重新 `ws_open(parent=session line)`。
+下回合用新的 turn key 调 `ws_ensure`；不要复用上一回合的 land key。
+
+`ws_land` 返回 `durable=false` + `durability.local_committed=true`：本地真相源
+已提交；只有同步 `sync_push` 成功后才 `durable=true`，此时才可删 VM。
 
 ## 5. 子任务
 
@@ -71,6 +80,7 @@ r = ws_land_into(child, parent.ws_id, idempotency_key=<child-task-id>)
 #                preview_id=r.preview_id, idempotency_key=<同一个 key>)
 ```
 
+- 子工作区也建议用 `ws_ensure(name=..., parent={workspace:parentId})`。
 - 冲突挂在子工作区上，`preview_id` 等于子工作区 id；不要再为每次重试新建子工作区。
 - 解决记录按冲突 key 保存，key 含工作区 id；同一子工作区重试才会命中。
 - 子工作区默认销毁；父保留。`ws_land_into` 只允许直接父，不产生版本。
@@ -166,6 +176,27 @@ finally: rm -rf dest_dir
   任务只在当前 daemon 进程内有效。
 - 如果必须用 workspace，固定 `parent={kind:"version",id:head}`，构建后
   `ws_drop`，**绝不调用 `ws_land`**；但 watcher 仍会采集未忽略文件。
+
+## 工作区“消失”的兜底
+
+```text
+ws_info/ws_sync/land_preview 对已落地并回收的 ws → ok=true, state=already_landed
+                                                    + version_id/line/line_head
+显式 drop / 过期回收 → error.code=ws_gone
+                        detail.reason=abandoned|expired|landed_and_dropped|unknown
+完全未知 id → ws_not_found
+目录/挂载异常 → ws_broken / ws_not_mounted（不是 gone）
+```
+
+P34 的会话级缓存建议保存 `{repo,name,parent,key,wsId}`：
+
+```text
+on ws_gone(reason=landed_and_dropped): 视为成功，刷新 line_head
+on ws_gone(reason=expired|abandoned): ForgetWorkspace() → ws_ensure(新 key)
+on ws_not_found: 最多重试一次（新 key），仍失败则上报
+```
+
+不要循环 `ws_open`，也不要用重试次数赌状态。
 
 ## 注意
 

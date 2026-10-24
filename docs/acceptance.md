@@ -1,4 +1,4 @@
-# 验收清单（v0.3.3 / format_ver=2）
+# 验收清单（v0.4.0 / format_ver=2）
 
 ## 自动化
 
@@ -54,6 +54,16 @@ P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
 | 20 | `repo_scan` 空/非空 registry、dry-run、prune_missing、跳过隐藏/symlink | `TestScanNonEmptyRegistryAndPrune`、`TestScanDryRunAndTombstone`、`TestScanSkipsHiddenAndSymlink` |
 | 21 | `repo_delete` 挂载点/root 自身/root 外路径保护 | `TestDeleteMountpointGuard`、`TestDeleteRejectsOutsideAndRoot`、`TestRepoDeleteMountpointMCP` |
 | 22 | `repo_export` 同步/异步、流式写入、export_root、目录非空、大文件 | `internal/repo/export_test.go`、`internal/mcpsrv/export_test.go` |
+
+## v0.4.0 工作区协议验收
+
+```bash
+go test ./internal/mcpsrv -run 'TestWS(EnsureConcurrent|OpenIdempotencyConcurrent|GoneLandReplay|GoneAbandonedAndTombstoneList|LandDurability|PersistenceReopen|QuotaAndReapObservability|ErrorContext)' -count=1 -v
+P37_BIN=./p37 bash packaging/p36/ci/ws-contract.sh
+```
+
+脚本用 5 个独立进程并发 `ws-ensure`，断言只产生 1 个工作区、5 个响应
+`ws_id` 相同；再并发 ensure 不变；drop 后 tombstone 可查。
 
 ## v0.3.x 真机补充（建议在 P36 上手工走一遍）
 

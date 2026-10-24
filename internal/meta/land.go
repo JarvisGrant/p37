@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/version"
@@ -70,6 +71,9 @@ func (d *DB) CommitLand(v *version.Version, j JournalEntry, foldWsIDs []string) 
 func (d *DB) FinishLand(foldWsIDs []string) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		for _, wsID := range foldWsIDs {
+			if err := d.insertLandTombstoneTx(tx, wsID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(`DELETE FROM stat_cache WHERE ws_id = ?`, wsID); err != nil {
 				return err
 			}
@@ -95,6 +99,57 @@ func (d *DB) FinishLand(foldWsIDs []string) error {
 		}
 		return nil
 	})
+}
+
+// insertLandTombstoneTx 在 FinishLand 的同一事务里写回收记录。
+//
+// landed_ws 行是落地的真相；line head 已经推进，所以 reason 恒为
+// landed_and_dropped。line/line_head 取首次落地版本，便于 P34 幂等重放。
+func (d *DB) insertLandTombstoneTx(tx *sql.Tx, wsID string) error {
+	var (
+		name, parentKind, parentID, state string
+		createdTS                         int64
+	)
+	err := tx.QueryRow(
+		`SELECT name, parent_kind, parent_id, state, created_ts
+		   FROM workspace WHERE id=?`, wsID).
+		Scan(&name, &parentKind, &parentID, &state, &createdTS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // 已经被别的路径删掉，幂等
+	}
+	if err != nil {
+		return err
+	}
+	var landedVID, targetKind, targetID string
+	var landedTS int64
+	lerr := tx.QueryRow(
+		`SELECT version_id, target_kind, target_id, ts FROM landed_ws WHERE ws_id=?`, wsID).
+		Scan(&landedVID, &targetKind, &targetID, &landedTS)
+	if errors.Is(lerr, sql.ErrNoRows) {
+		return nil // 不是 land 路径（理论上不会走到 FinishLand）
+	}
+	if lerr != nil {
+		return lerr
+	}
+	var ops int64
+	_ = tx.QueryRow(`SELECT COUNT(*) FROM op WHERE ws_id=?`, wsID).Scan(&ops)
+	line, lineHead := "", landedVID
+	if targetKind == "line" {
+		line = targetID
+		// line head 可能已被后续 land 推进；tombstone 保留首次落地版本，
+		// 同时把当前 head 留给调用方通过 line 查询。
+	}
+	t := WSTombstone{
+		WSID: wsID, Name: name, ParentKind: parentKind, ParentID: parentID,
+		Reason: "landed_and_dropped", Why: "land", StateBefore: state,
+		DroppedAt: time.Now().UnixMilli(), CreatedTS: createdTS,
+		LandedVersion: landedVID, TargetKind: targetKind, TargetID: targetID,
+		Line: line, LineHead: lineHead, DirtyOps: ops,
+	}
+	if landedTS > 0 && t.DroppedAt == 0 {
+		t.DroppedAt = landedTS
+	}
+	return d.insertTombstoneTx(tx, t)
 }
 
 // RollbackLand 撤销一次未完成的 land（head 未推进的情形）。

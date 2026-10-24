@@ -70,14 +70,21 @@ Repo.syncMu（同步工具）
 - `ws_reap` 不删除有 lease 的工作区；用户 active 工作区不自动回收；隐藏
   merge/preview TTL 24h；`landed` 可在 24h 后回收；显式 `state=broken` 可回收
   broken 工作区；`include_orphan_dirs=true` 顺带清理孤儿目录。
+- dry-run 返回 `candidates[]`（name/ops/dirty/age/reason/will_drop）与
+  `skipped[]`（lease_held/not_old_enough），解释“为什么回收/为什么不动”。
 
 ## 5. 幂等
 
-- `ws_land` / `line_merge` 的 key 写入 version（`idempotency_key/tool/ts`）。
-- 无版本结果（FF merge / no-op）写入 `idempotency_result`。
-- `sync_push` 也有 `idempotency_result`；重复调用返回原结果。
-- 幂等记录 7 天 TTL；只有未过期记录引用的版本进入 GC 根。
-- `ws_land_into` 只保证同一 VM 生命周期（restore 不恢复 workspace/lease）。
+- `ws_open` / `ws_ensure` 用 `idempotency_result` 做持久化 claim：name claim
+  按 `(name, parent)` 唯一，idem claim 按调用方 key 唯一；并发 / 多进程都安全。
+- pending claim 租约 15 分钟；loser 最多等 30 秒，超时返回
+  `ws_open_in_progress`（可重试）。daemon 启动会清理过期 claim。
+- `ws_land` / `ws_land_into` 的 key 写 `idempotency_result`（30 天），同时按
+  `ws_id` 保留 `landed_ws` 兜底；工作区已 drop 后仍能返回首次落地结果。
+- 同一个 key 用于不同 `ws_id`/target 返回 `idempotency_conflict`。
+- `line_merge` / `sync_push` 继续使用 7 天 TTL。
+- 回收记录（tombstone）存 `idempotency_result` 的内部命名空间，默认 7 天，
+  `sync_restore` 不恢复；跨 VM 后按 name/line 重新 `ws_ensure`。
 
 ## 6. 已知边界
 

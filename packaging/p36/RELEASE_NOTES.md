@@ -1,4 +1,4 @@
-# p37 @VERSION@ — 文档对齐与 land 乐观并发修复
+# p37 @VERSION@ — 工作区协议幂等与消失语义
 
 ## 发布物
 
@@ -19,7 +19,22 @@
 }
 ```
 
-## 本版重点（v0.3.3）
+## 本版重点（v0.4.0）
+
+- **工作区协议补齐幂等与消失语义**：`ws_open` 支持 `idempotency_key`；新增
+  `ws_ensure`（按 name+parent 原子 open-or-get）；并发/重试不再产生同名工作区。
+- **`ws_gone` / `already_landed`**：已落地并回收的 ws 对 `ws_info/ws_sync/
+  land_preview/ws_land` 幂等返回 `already_landed`；显式 drop/过期返回结构化
+  `ws_gone`，并区分 `ws_broken/ws_not_mounted`（存储/挂载异常）。
+- **回收记录**：`ws_list include_dropped/include_recently_dropped` 可查
+  tombstone（默认 7 天），带 reason/line/line_head。
+- **错误上下文**：ws/repo/line 错误统一带 `repo`、标识符、`reason`。
+- **可观测**：`ws_quota.workspaces[]`、`ws_reap.candidates[]/skipped[]`。
+- **持久性声明**：`ws_land` 返回 `durable/durability`；`repo_info` 增加
+  `p37_version` 与 `persistence`。仅 `sync_push(durable=true)` 可宣称跨 VM 持久。
+- 仓库格式仍为 `format_ver=2`，无需迁移；老二进制可打开新仓库。
+
+## 上一版（v0.3.3）
 
 本版是 **v0.3.2 的文档/契约收口 + 一个乐观并发修复**，不改变仓库格式、存储
 布局和 MCP 工具面。

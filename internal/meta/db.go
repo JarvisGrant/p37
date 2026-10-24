@@ -34,6 +34,10 @@ type DB struct {
 
 	wmu    chan struct{} // 容量 1 的写锁
 	closed atomic.Bool
+
+	// tombstoneTTL 是工作区回收记录默认保留窗口。repo.Open 根据配置注入；
+	// 未注入时使用 DefaultTombstoneTTL（7 天）。
+	tombstoneTTL time.Duration
 }
 
 // Open 打开（或创建）仓库的元数据库。
@@ -46,8 +50,12 @@ func openPath(path string) (*DB, error) {
 	dsn := "file:" + path +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=busy_timeout(5000)" +
-		"&_pragma=foreign_keys(ON)"
+		"&_pragma=busy_timeout(15000)" +
+		"&_pragma=foreign_keys(ON)" +
+		// 所有写事务一开始就取写锁：多进程 CLI / 多副本同时 ensure 时，
+		// deferred 事务的“读后升级写锁”会直接 SQLITE_BUSY(517)，busy_timeout
+		// 也救不了；immediate 会把等待交给 busy_timeout。
+		"&_txlock=immediate"
 
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -58,7 +66,8 @@ func openPath(path string) (*DB, error) {
 	sdb.SetMaxIdleConns(4)
 	sdb.SetConnMaxLifetime(0)
 
-	db := &DB{sql: sdb, path: path, wmu: make(chan struct{}, 1)}
+	db := &DB{sql: sdb, path: path, wmu: make(chan struct{}, 1),
+		tombstoneTTL: DefaultTombstoneTTL}
 	db.wmu <- struct{}{}
 
 	if err := sdb.Ping(); err != nil {
@@ -79,6 +88,14 @@ func openPath(path string) (*DB, error) {
 
 // Path 返回数据库文件路径。
 func (d *DB) Path() string { return d.path }
+
+// SetTombstoneTTL 设置工作区回收记录保留窗口（<=0 取默认 7 天）。
+func (d *DB) SetTombstoneTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = DefaultTombstoneTTL
+	}
+	d.tombstoneTTL = ttl
+}
 
 // Close 关闭数据库。
 func (d *DB) Close() error {

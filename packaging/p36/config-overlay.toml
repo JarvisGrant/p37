@@ -22,6 +22,8 @@ max_active = 8
 # 隐藏 merge/preview 工作区上限（不占 max_active）。
 max_hidden = 32
 warn_disk_bytes = 12884901888
+# 工作区回收记录（ws_list include_dropped）保留窗口。
+tombstone_ttl = "168h"
 scan_interval = "30s"
 debounce = "500ms"
 

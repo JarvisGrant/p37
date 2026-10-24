@@ -99,6 +99,12 @@ func (s *Server) registerRepoLineRead() {
 					out := entryInfo(e)
 					out["root"] = e.Path
 					out["status"] = "unavailable"
+					out["p37_version"] = Version
+					out["persistence"] = map[string]any{
+						"truth_source": "local_repo",
+						"local":        map[string]any{"root": e.Path, "available": false},
+						"durable":      false, "durable_scope": "local_only",
+					}
 					return out, nil
 				}
 			}
@@ -136,7 +142,9 @@ func (s *Server) registerRepoLineRead() {
 				"root": st.Root, "default_line": def, "mainline_head": st.MainlineHead.String(),
 				"version_count": st.VersionCount, "epoch": st.Epoch,
 				"workspace_count": visible, "format_ver": st.FormatVer,
-				"lines": lines,
+				"p37_version": Version,
+				"lines":       lines,
+				"persistence": persistenceView(rr),
 				"remote": map[string]any{"enabled": cfg.Remote.Enabled,
 					"backend": cfg.Remote.Backend, "remote_key": cfg.Remote.RemoteKey,
 					"prefix": cfg.Remote.Prefix, "remote_prefix": rp},
@@ -144,6 +152,13 @@ func (s *Server) registerRepoLineRead() {
 			if entry != nil {
 				for k, v := range entryInfo(entry) {
 					out[k] = v
+				}
+				if pm, ok := out["persistence"].(map[string]any); ok {
+					if lm, ok := pm["local"].(map[string]any); ok {
+						lm["mount_point"] = entry.Mounted
+						lm["available"] = entry.Available
+						lm["degraded"] = entry.Degraded
+					}
 				}
 			}
 			return out, nil
@@ -663,7 +678,7 @@ func mergeView(res *repo.MergeResult) map[string]any {
 	return out
 }
 
-func landView2(res *repo.LandResult) map[string]any {
+func landView2(rr *repo.Repo, res *repo.LandResult) map[string]any {
 	conflicts := make([]map[string]any, 0, len(res.Conflicts))
 	for i := range res.Conflicts {
 		c := &res.Conflicts[i]
@@ -695,6 +710,31 @@ func landView2(res *repo.LandResult) map[string]any {
 	if len(res.Warnings) > 0 {
 		out["warnings"] = res.Warnings
 	}
+	if res.Line != "" {
+		out["line"] = res.Line
+	}
+	if res.ParentWSID != "" {
+		out["parent_ws_id"] = res.ParentWSID
+	}
+	if !res.LandedVersion.IsZero() {
+		out["landed_version"] = res.LandedVersion.String()
+	}
+	if !res.CurrentLineHead.IsZero() {
+		out["current_line_head"] = res.CurrentLineHead.String()
+	}
+	if res.Replayed {
+		out["replayed"] = true
+	}
+	if res.Reason != "" {
+		out["reason"] = res.Reason
+	}
+	if res.DroppedAt != 0 {
+		out["dropped_at"] = res.DroppedAt
+	}
+	if rr != nil {
+		out["durable"] = false
+		out["durability"] = durabilityView(rr)
+	}
 	return out
 }
 
@@ -721,6 +761,11 @@ func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string
 	if err != nil {
 		return nil, err
 	}
+	leases, _ := r.DB.ListLeases()
+	leaseCount := map[string]int{}
+	for _, l := range leases {
+		leaseCount[l.WsID]++
+	}
 	now := time.Now()
 	cutoff := int64(0)
 	if olderThan != "" {
@@ -731,6 +776,8 @@ func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string
 		cutoff = now.Add(-d).UnixMilli()
 	}
 	var out []string
+	var candidates []map[string]any
+	var skipped []map[string]any
 	failed := map[string]string{}
 	for i := range all {
 		w := &all[i]
@@ -743,31 +790,63 @@ func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string
 		if w.LandedTS == 0 && !w.Hidden && !explicitBroken {
 			continue // 用户活跃工作区绝不自动回收
 		}
-		if w.Hidden && cutoff == 0 {
-			cutoff = now.Add(-24 * time.Hour).UnixMilli()
+		reason, why := "unknown", "reap"
+		if w.LandedTS != 0 {
+			reason, why = "landed_and_dropped", "landed"
+		} else if w.Hidden {
+			reason, why = "expired", "hidden_ttl"
+		} else if explicitBroken {
+			reason, why = "unknown", "broken"
 		}
-		if cutoff > 0 && w.UpdatedTS > cutoff {
+		effectiveCutoff := cutoff
+		if w.Hidden && effectiveCutoff == 0 {
+			effectiveCutoff = now.Add(-24 * time.Hour).UnixMilli()
+		}
+		if effectiveCutoff > 0 && w.UpdatedTS > effectiveCutoff {
+			skipped = append(skipped, map[string]any{
+				"ws_id": w.ID, "name": w.Name, "reason": "not_old_enough",
+				"age_ms": now.UnixMilli() - w.CreatedTS,
+			})
 			continue
 		}
-		leases, _ := r.DB.ListLeases()
-		busy := false
-		for _, l := range leases {
-			if l.WsID == w.ID {
-				busy = true
+		if leaseCount[w.ID] > 0 {
+			skipped = append(skipped, map[string]any{
+				"ws_id": w.ID, "name": w.Name, "reason": "lease_held",
+				"leases": leaseCount[w.ID],
+			})
+			continue
+		}
+		ops, _ := r.DB.CountOps(w.ID)
+		line, lineHead := "", ""
+		if info, ok, _ := r.DB.GetLandedWSInfo(w.ID); ok {
+			if info.TargetKind == "line" {
+				line = info.TargetID
+				lineHead = info.VersionID
+			}
+			if lineHead == "" {
+				lineHead = info.VersionID
 			}
 		}
-		if busy {
-			continue
-		}
+		candidates = append(candidates, map[string]any{
+			"ws_id": w.ID, "name": w.Name, "state": w.State,
+			"reason": reason, "why": why,
+			"age_ms": now.UnixMilli() - w.CreatedTS, "ops": ops,
+			"dirty": ops > 0, "landed": w.LandedTS != 0,
+			"line": line, "line_head": lineHead,
+			"leases": leaseCount[w.ID], "will_drop": true,
+		})
 		out = append(out, w.ID)
 		if !dry {
-			if _, _, err := r.WS.Drop(w.ID, true, false); err != nil &&
-				!errors.Is(err, workspace.ErrNotFound) {
+			if _, _, err := r.WS.DropWithOptions(w.ID, workspace.DropOptions{
+				Cascade: true, Reason: reason, Why: why,
+				Line: line, LineHead: lineHead,
+			}); err != nil && !errors.Is(err, workspace.ErrNotFound) {
 				failed[w.ID] = err.Error()
 			}
 		}
 	}
-	res := map[string]any{"dry_run": dry, "workspaces": out, "count": len(out)}
+	res := map[string]any{"dry_run": dry, "workspaces": out, "count": len(out),
+		"candidates": candidates, "skipped": skipped}
 	if len(failed) > 0 {
 		res["failed"] = failed
 	}

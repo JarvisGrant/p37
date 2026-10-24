@@ -33,17 +33,24 @@ type LandResult struct {
 	// AutoMerged 是被 §6.3 规则自动合并（不产生冲突）的 hunk 数。
 	// 用于让调用方知道「本来会冲突的地方被确定性规则消化掉了多少」。
 	AutoMerged int     `json:"auto_merged"`
-	VersionID  hash.ID `json:"-"`
+	VersionID  hash.ID `json:"version_id,omitempty"`
 
-	TargetHead    hash.ID `json:"-"`
-	WSTree        hash.ID `json:"-"`
-	WSOpsEpoch    int64   `json:"-"`
-	PreviewID     string  `json:"-"`
-	AlreadyLanded bool    `json:"-"`
-	State         string  `json:"-"`
+	TargetHead      hash.ID `json:"target_head,omitempty"`
+	WSTree          hash.ID `json:"ws_tree,omitempty"`
+	WSOpsEpoch      int64   `json:"ws_ops_epoch,omitempty"`
+	PreviewID       string  `json:"preview_id,omitempty"`
+	AlreadyLanded   bool    `json:"already_landed,omitempty"`
+	Replayed        bool    `json:"replayed,omitempty"`
+	State           string  `json:"state,omitempty"`
+	Line            string  `json:"line,omitempty"`
+	ParentWSID      string  `json:"parent_ws_id,omitempty"`
+	LandedVersion   hash.ID `json:"landed_version,omitempty"`
+	CurrentLineHead hash.ID `json:"current_line_head,omitempty"`
+	DroppedAt       int64   `json:"dropped_at,omitempty"`
+	Reason          string  `json:"reason,omitempty"`
 	// Warnings 是「land 已成功，但清理/收尾有非致命问题」的说明。
 	// 典型场景：工作区元数据已释放，但 overlay 目录 umount 忙（EBUSY）。
-	Warnings []string `json:"-"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ConflictsJSON 返回面向 MCP 的冲突列表（带 key）。
@@ -280,6 +287,9 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	}
 	if err := r.DB.FinishLand(foldIDs); err != nil {
 		return nil, err
+	}
+	for _, id := range foldIDs {
+		r.WS.ReleaseNameClaims(id)
 	}
 	return out, nil
 }

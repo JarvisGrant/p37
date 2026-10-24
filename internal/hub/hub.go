@@ -99,7 +99,8 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(ctl, 0o700)
 	regPath := filepath.Join(ctl, "registry.db")
 	db, err := sql.Open("sqlite", "file:"+regPath+
-		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)")
+		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"+
+		"&_pragma=busy_timeout(15000)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}

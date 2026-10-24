@@ -57,7 +57,39 @@ var (
 	// 调用方应把它当作**警告**而不是失败：工作区已经不可见、也不再占用
 	// max_active；残留目录由孤儿目录清理兜底。
 	ErrCleanupFailed = errors.New("workspace: 工作区已释放，但目录清理失败")
+	// ErrOpenInProgress 表示同一幂等键/同名工作区正在被另一个调用创建。
+	ErrOpenInProgress = errors.New("workspace: 工作区正在创建")
+	// ErrIdempotencyConflict 表示同一个幂等键被用于不同的创建请求。
+	ErrIdempotencyConflict = errors.New("workspace: 幂等键被用于不同请求")
 )
+
+// OpenInProgressError 让调用方拿到可重试的 ws_id。
+type OpenInProgressError struct {
+	WSID         string
+	RetryAfterMS int64
+}
+
+func (e *OpenInProgressError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrOpenInProgress, e.WSID)
+}
+
+func (e *OpenInProgressError) Unwrap() error { return ErrOpenInProgress }
+
+// IdemConflictError 带出已有工作区，便于调用方修正请求。
+type IdemConflictError struct {
+	Key       string
+	WSID      string
+	Field     string
+	Existing  string
+	Requested string
+}
+
+func (e *IdemConflictError) Error() string {
+	return fmt.Sprintf("%s: key=%s ws=%s %s existing=%q requested=%q",
+		ErrIdempotencyConflict, e.Key, e.WSID, e.Field, e.Existing, e.Requested)
+}
+
+func (e *IdemConflictError) Unwrap() error { return ErrIdempotencyConflict }
 
 // 上限作用域（quota_exceeded 的 detail.scope）。
 const (
@@ -93,6 +125,28 @@ func (e *LimitError) Error() string {
 // Unwrap 让 errors.Is(err, ErrLimitExceeded) 继续成立。
 func (e *LimitError) Unwrap() error { return ErrLimitExceeded }
 
+// WorkspaceUsage 是 ws_quota 里“谁占着配额”的可观测项。
+type WorkspaceUsage struct {
+	WSID          string `json:"ws_id"`
+	Name          string `json:"name"`
+	State         string `json:"state"`
+	Dirty         bool   `json:"dirty"`
+	Ops           int64  `json:"ops"`
+	AgeMS         int64  `json:"age_ms"`
+	CreatedTS     int64  `json:"created_ts"`
+	UpdatedTS     int64  `json:"updated_ts"`
+	Landed        bool   `json:"landed"`
+	LandedTS      int64  `json:"landed_ts,omitempty"`
+	Hidden        bool   `json:"hidden"`
+	Leases        int    `json:"leases"`
+	ParentKind    string `json:"parent_kind"`
+	ParentID      string `json:"parent_id"`
+	BaseLine      string `json:"base_line,omitempty"`
+	CountsToQuota bool   `json:"counts_to_quota"`
+	NeedsRepair   bool   `json:"needs_repair,omitempty"`
+	BrokenReason  string `json:"broken_reason,omitempty"`
+}
+
 // Quota 是 ws_quota 的返回（字段名遵循附录 K 的 snake_case 约定）。
 type Quota struct {
 	MaxActive       int `json:"max_active"`
@@ -104,6 +158,8 @@ type Quota struct {
 	MaxFanout       int `json:"max_fanout"`
 	Landed          int `json:"landed"`
 	Broken          int `json:"broken"`
+	// Workspaces 让上层能直接告诉用户“是谁占着配额”。
+	Workspaces []WorkspaceUsage `json:"workspaces"`
 }
 
 // Options 配置 Manager。
@@ -182,12 +238,68 @@ func (m *Manager) Quota() (*Quota, error) {
 	if avail < 0 {
 		avail = 0
 	}
+	usage, err := m.usage()
+	if err != nil {
+		return nil, err
+	}
 	return &Quota{
 		MaxActive: active, ActiveUsed: used, ActiveAvailable: avail,
 		MaxHidden: m.hiddenLimit(), HiddenUsed: hidden,
 		MaxDepth: depth, MaxFanout: fanout,
-		Landed: landed, Broken: broken,
+		Landed: landed, Broken: broken, Workspaces: usage,
 	}, nil
+}
+
+// usage 返回每个工作区的配额/占用详情。
+func (m *Manager) usage() ([]WorkspaceUsage, error) {
+	all, err := m.db.ListWorkspaces()
+	if err != nil {
+		return nil, err
+	}
+	leases, _ := m.db.ListLeases()
+	leaseCount := map[string]int{}
+	for _, l := range leases {
+		leaseCount[l.WsID]++
+	}
+	now := m.now()
+	out := make([]WorkspaceUsage, 0, len(all))
+	for i := range all {
+		w := &all[i]
+		ops, _ := m.db.CountOps(w.ID)
+		state := w.State
+		if w.LandedTS != 0 {
+			state = "landed"
+		}
+		needsRepair, brokenReason := m.repairState(w)
+		out = append(out, WorkspaceUsage{
+			WSID: w.ID, Name: w.Name, State: state, Dirty: ops > 0, Ops: ops,
+			AgeMS: now - w.CreatedTS, CreatedTS: w.CreatedTS, UpdatedTS: w.UpdatedTS,
+			Landed: w.LandedTS != 0, LandedTS: w.LandedTS, Hidden: w.Hidden,
+			Leases: leaseCount[w.ID], ParentKind: w.ParentKind, ParentID: w.ParentID,
+			BaseLine: w.BaseLine,
+			CountsToQuota: !w.Hidden && w.LandedTS == 0 &&
+				(w.State == meta.StateActive || w.State == meta.StateConflicted || w.State == meta.StateRebasing),
+			NeedsRepair: needsRepair, BrokenReason: brokenReason,
+		})
+	}
+	return out, nil
+}
+
+// repairState 判断工作区是否处于“行在、目录/挂载不对”的需修复状态。
+func (m *Manager) repairState(w *meta.Workspace) (bool, string) {
+	if w.Hidden || w.Kind == "merge" {
+		return false, ""
+	}
+	if !dirExists(m.mm.WorkspaceDir(w.ID)) {
+		return true, "dir_missing"
+	}
+	if w.Materialize == meta.MaterializeOverlay && !m.mm.IsMounted(w.ID) {
+		return true, "overlay_not_mounted"
+	}
+	if w.State == meta.StateBroken {
+		return true, "state_broken"
+	}
+	return false, ""
 }
 
 // clampLimit 把配置值钳到 [1, hard]；非法值取 hard。
@@ -252,6 +364,19 @@ type OpenRequest struct {
 	TaskDesc string
 	Leases   []string
 	Mode     mountmgr.Mode
+	// IdempotencyKey 只由 OpenWithKey 使用；直接调用 Open 时忽略。
+	IdempotencyKey string
+	// ReservedID 只由 Ensure/OpenWithKey 在 claim 后预分配，直接调用时留空。
+	ReservedID string
+}
+
+// OpenOutcome 是幂等 open/ensure 的返回。
+type OpenOutcome struct {
+	Workspace *meta.Workspace
+	WSID      string
+	Created   bool
+	Reused    bool
+	Replayed  bool
 }
 
 // Open 打开一个工作区并物化（§4.1、§4.6、§11.4）。
@@ -278,9 +403,12 @@ func (m *Manager) Open(req OpenRequest) (*meta.Workspace, error) {
 		return nil, err
 	}
 
-	wsID, err := newID("ws")
-	if err != nil {
-		return nil, err
+	wsID := req.ReservedID
+	if wsID == "" {
+		wsID, err = newID("ws")
+		if err != nil {
+			return nil, err
+		}
 	}
 	now := m.now()
 
@@ -755,6 +883,7 @@ func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
 // Status 是 ws_info 的返回（字段名遵循附录 K 的 snake_case 约定）。
 type Status struct {
 	ID            string  `json:"ws_id"`
+	Name          string  `json:"name"`
 	ParentKind    string  `json:"parent_kind"`
 	ParentID      string  `json:"parent_id"`
 	BaseVersion   hash.ID `json:"base_version"`
@@ -770,6 +899,12 @@ type Status struct {
 	LandedTS      int64   `json:"landed_ts,omitempty"`
 	BaseStale     bool    `json:"base_stale,omitempty"`
 	DiskBytes     int64   `json:"disk_bytes"`
+	AgeMS         int64   `json:"age_ms"`
+	CreatedTS     int64   `json:"created_ts"`
+	UpdatedTS     int64   `json:"updated_ts"`
+	LeaseCount    int     `json:"lease_count"`
+	NeedsRepair   bool    `json:"needs_repair,omitempty"`
+	BrokenReason  string  `json:"broken_reason,omitempty"`
 }
 
 // Info 返回工作区状态。
@@ -794,8 +929,18 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 	if w.BaseLine != "" {
 		pk, pid = "line", w.BaseLine
 	}
+	leases, _ := m.db.ListLeases()
+	leaseCount := 0
+	for _, l := range leases {
+		if l.WsID == w.ID {
+			leaseCount++
+		}
+	}
+	needsRepair, brokenReason := m.repairState(w)
+	now := m.now()
 	st := &Status{
 		ID:            w.ID,
+		Name:          w.Name,
 		ParentKind:    pk,
 		ParentID:      pid,
 		BaseVersion:   w.BaseVersion,
@@ -809,6 +954,12 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 		Hidden:        w.Hidden,
 		Kind:          w.Kind,
 		LandedTS:      w.LandedTS,
+		AgeMS:         now - w.CreatedTS,
+		CreatedTS:     w.CreatedTS,
+		UpdatedTS:     w.UpdatedTS,
+		LeaseCount:    leaseCount,
+		NeedsRepair:   needsRepair,
+		BrokenReason:  brokenReason,
 	}
 	if dir := m.mm.WorkspaceDir(wsID); dirExists(dir) {
 		_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
@@ -834,13 +985,32 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 	return st, nil
 }
 
-// Drop 放弃工作区（§11.4）。
+// DropOptions 让回收路径带上可解释的 reason / 落地目标。
+type DropOptions struct {
+	Cascade       bool
+	KeepDir       bool
+	Reason        string // abandoned | expired | unknown | landed_and_dropped
+	Why           string
+	Line          string
+	LineHead      string
+	TargetKind    string
+	TargetID      string
+	LandedVersion string
+}
+
+// Drop 放弃工作区（默认 reason=abandoned，兼容旧调用）。
+func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented []string, err error) {
+	return m.DropWithOptions(wsID, DropOptions{Cascade: cascade, KeepDir: keepDir, Reason: "abandoned"})
+}
+
+// DropWithOptions 放弃工作区（§11.4）。
 //
 // **配额优先**：只要元数据删除成功，max_active 名额立即回收；目录/挂载清理
 // 失败只返回 ErrCleanupFailed 警告，不再让工作区行残留。历史实现把 Close
 // 放在 DeleteWorkspace 之前并直接 return，overlay umount 遇到 EBUSY（P34 的
 // exec 还留着进程/工作目录）时行会永久残留，配额随时间单调衰减。
-func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented []string, err error) {
+func (m *Manager) DropWithOptions(wsID string, opt DropOptions) (dropped, reparented []string, err error) {
+	cascade, keepDir := opt.Cascade, opt.KeepDir
 	w, err := m.Get(wsID)
 	if err != nil {
 		return nil, nil, err
@@ -865,9 +1035,45 @@ func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented 
 	overlay := w.Materialize == meta.MaterializeOverlay
 	dir := m.mm.WorkspaceDir(wsID)
 	closeErr := m.mm.Close(wsID, keepDir, overlay)
-	if err := m.db.DeleteWorkspace(wsID); err != nil {
+
+	// 回收记录必须和删行在同一个事务里：崩溃后要么行还在，要么 tombstone 在。
+	ops, _ := m.db.CountOps(wsID)
+	t := meta.WSTombstone{
+		WSID: w.ID, Name: w.Name, ParentKind: w.ParentKind, ParentID: w.ParentID,
+		Reason: opt.Reason, Why: opt.Why, StateBefore: w.State,
+		DroppedAt: m.now(), CreatedTS: w.CreatedTS,
+		LandedVersion: opt.LandedVersion, TargetKind: opt.TargetKind,
+		TargetID: opt.TargetID, Line: opt.Line, LineHead: opt.LineHead,
+		DirtyOps: ops,
+	}
+	// 已落地工作区即使调用方传了 abandoned，也应以 landed_and_dropped 解释。
+	if landed, ok, _ := m.db.GetLandedWSInfo(wsID); ok {
+		t.Reason = "landed_and_dropped"
+		if t.LandedVersion == "" {
+			t.LandedVersion = landed.VersionID
+		}
+		if t.TargetKind == "" {
+			t.TargetKind = landed.TargetKind
+		}
+		if t.TargetID == "" {
+			t.TargetID = landed.TargetID
+		}
+		if t.Line == "" && landed.TargetKind == "line" {
+			t.Line = landed.TargetID
+		}
+		if t.LineHead == "" {
+			t.LineHead = landed.VersionID
+		}
+	}
+	if t.Reason == "" {
+		t.Reason = "abandoned"
+	}
+	if err := m.db.DeleteWorkspaceWithTombstone(wsID, t); err != nil {
 		return nil, nil, err
 	}
+	// 同名 claim 只在工作区“活着”时有效；回收后释放，下一次 ws_ensure 可以
+	// 用同一个 name 创建新一代工作区（旧 ws_id 仍由 tombstone 解释）。
+	_ = m.releaseNameClaims(wsID)
 	if closeErr != nil {
 		return []string{wsID}, reparented,
 			fmt.Errorf("%w: %s: %v", ErrCleanupFailed, dir, closeErr)
@@ -936,7 +1142,9 @@ func (m *Manager) ReapStaleHidden(ttl time.Duration) ([]string, error) {
 		if !w.Hidden || w.UpdatedTS > cutoff {
 			continue
 		}
-		if _, _, err := m.Drop(w.ID, true, false); err != nil && !errors.Is(err, ErrNotFound) {
+		if _, _, err := m.DropWithOptions(w.ID, DropOptions{
+			Cascade: true, Reason: "expired", Why: "hidden_ttl",
+		}); err != nil && !errors.Is(err, ErrNotFound) {
 			errs = append(errs, err)
 			continue
 		}

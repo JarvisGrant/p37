@@ -202,6 +202,15 @@ func (d *DB) UpdateWorkspaceBase(id string, baseTree, baseVersion hash.ID, ts in
 
 // DeleteWorkspace 删除工作区（级联清理 op/lease/stat_cache/conflict/resolution）。
 func (d *DB) DeleteWorkspace(id string) error {
+	return d.deleteWorkspaceTx(id, nil)
+}
+
+// DeleteWorkspaceWithTombstone 在同一事务里删除工作区并写回收记录。
+func (d *DB) DeleteWorkspaceWithTombstone(id string, t WSTombstone) error {
+	return d.deleteWorkspaceTx(id, &t)
+}
+
+func (d *DB) deleteWorkspaceTx(id string, t *WSTombstone) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM stat_cache WHERE ws_id = ?`, id); err != nil {
 			return err
@@ -224,9 +233,66 @@ func (d *DB) DeleteWorkspace(id string) error {
 		if _, err := tx.Exec(`DELETE FROM resolution WHERE ws_id = ?`, id); err != nil {
 			return err
 		}
+		if t != nil {
+			if err := d.insertTombstoneTx(tx, *t); err != nil {
+				return err
+			}
+		}
 		_, err := tx.Exec(`DELETE FROM workspace WHERE id = ?`, id)
 		return err
 	})
+}
+
+// FindLiveWorkspaceByNameParent 按 (name, canonical parent) 查一个仍可写入的
+// 工作区。line parent 存的是 base_line（workspace.parent_id 是当时的 version），
+// version/workspace parent 用 parent_kind+parent_id 精确匹配。
+func (d *DB) FindLiveWorkspaceByNameParent(name, kind, id string) (*Workspace, error) {
+	base := `SELECT id, name, parent_kind, parent_id, base_tree, base_version, base_line,
+	                task_desc, state, materialize, mounted, hidden, kind, landed_ts,
+	                created_ts, updated_ts, materialized_ts
+	           FROM workspace
+	          WHERE name=? AND hidden=0 AND landed_ts=0
+	            AND state IN ('active','conflicted','rebasing')`
+	var row *sql.Row
+	switch kind {
+	case "line":
+		row = d.sql.QueryRow(base+` AND base_line=? ORDER BY created_ts LIMIT 1`, name, id)
+	case "version":
+		row = d.sql.QueryRow(base+` AND parent_kind='version' AND parent_id=? AND base_line=''
+		                          ORDER BY created_ts LIMIT 1`, name, id)
+	case "workspace":
+		row = d.sql.QueryRow(base+` AND parent_kind='workspace' AND parent_id=?
+		                          ORDER BY created_ts LIMIT 1`, name, id)
+	default:
+		row = d.sql.QueryRow(base+` ORDER BY created_ts LIMIT 1`, name)
+	}
+	var (
+		w           Workspace
+		baseTreeStr string
+		baseVerStr  string
+		mounted     int
+		hidden      int64
+		landed      int64
+	)
+	err := row.Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &baseTreeStr, &baseVerStr,
+		&w.BaseLine, &w.TaskDesc, &w.State, &w.Materialize, &mounted, &hidden, &w.Kind,
+		&landed, &w.CreatedTS, &w.UpdatedTS, &w.MaterializedTS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	w.Mounted = mounted != 0
+	w.Hidden = hidden != 0
+	w.LandedTS = landed
+	if w.BaseTree, err = hash.Parse(baseTreeStr); err != nil {
+		return nil, err
+	}
+	if w.BaseVersion, err = hash.Parse(baseVerStr); err != nil {
+		return nil, err
+	}
+	return &w, nil
 }
 
 // Children 返回某个工作区的子工作区。
@@ -246,28 +312,55 @@ func (d *DB) Children(id string) ([]Workspace, error) {
 
 // --- landed_ws（幂等，§11.6） ------------------------------------------
 
+// LandedWSInfo 是 landed_ws 的完整视图。
+type LandedWSInfo struct {
+	WSID       string
+	VersionID  string
+	TargetKind string
+	TargetID   string
+	TS         int64
+}
+
 // InsertLandedWS 记录一个已落地的工作区。
 func (d *DB) InsertLandedWS(wsID, versionID string, ts int64) error {
+	return d.InsertLandedWSWithTarget(wsID, versionID, "", "", ts)
+}
+
+// InsertLandedWSWithTarget 记录落地版本与目标（line / workspace）。
+func (d *DB) InsertLandedWSWithTarget(wsID, versionID, targetKind, targetID string, ts int64) error {
 	return d.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`INSERT INTO landed_ws(ws_id, version_id, ts) VALUES(?,?,?)
-			 ON CONFLICT(ws_id) DO UPDATE SET version_id=excluded.version_id, ts=excluded.ts`,
-			wsID, versionID, ts)
+			`INSERT INTO landed_ws(ws_id, version_id, target_kind, target_id, ts) VALUES(?,?,?,?,?)
+			 ON CONFLICT(ws_id) DO UPDATE SET version_id=excluded.version_id,
+			   target_kind=excluded.target_kind, target_id=excluded.target_id, ts=excluded.ts`,
+			wsID, versionID, targetKind, targetID, ts)
 		return err
 	})
 }
 
 // GetLandedWS 查询工作区是否已落地及其版本。
 func (d *DB) GetLandedWS(wsID string) (string, bool, error) {
-	var vid string
-	err := d.sql.QueryRow(`SELECT version_id FROM landed_ws WHERE ws_id = ?`, wsID).Scan(&vid)
+	info, ok, err := d.GetLandedWSInfo(wsID)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	return info.VersionID, true, nil
+}
+
+// GetLandedWSInfo 查询落地版本与目标。
+func (d *DB) GetLandedWSInfo(wsID string) (*LandedWSInfo, bool, error) {
+	var info LandedWSInfo
+	err := d.sql.QueryRow(
+		`SELECT ws_id, version_id, target_kind, target_id, ts
+		   FROM landed_ws WHERE ws_id = ?`, wsID).
+		Scan(&info.WSID, &info.VersionID, &info.TargetKind, &info.TargetID, &info.TS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return nil, false, err
 	}
-	return vid, true, nil
+	return &info, true, nil
 }
 
 // --- 有效树缓存（§4.9.1） ----------------------------------------------

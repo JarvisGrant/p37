@@ -197,7 +197,7 @@ func (s *Server) register(name, desc, schema string, fn toolFunc) {
 
 		data, err := fn(ctx, raw)
 		if err != nil {
-			return envelopeErr(err), nil
+			return envelopeErrCtx(s, raw, err), nil
 		}
 		return envelopeOK(data), nil
 	})
@@ -212,6 +212,96 @@ func envelopeErr(err error) *mcp.CallToolResult {
 	code, msg, detail := classify(err)
 	env := Envelope{OK: false, Data: nil, Error: &ErrObj{Code: code, Message: msg, Detail: detail}}
 	return jsonResult(env, true)
+}
+
+// envelopeErrCtx 在统一出口补齐错误上下文：code + repo + 标识符 + reason。
+// 这里不依赖各 handler 记得填 detail，避免 P34 只能退化成“操作失败”。
+func envelopeErrCtx(s *Server, raw json.RawMessage, err error) *mcp.CallToolResult {
+	code, msg, detail := classify(err)
+	m := map[string]any{}
+	if dm, ok := detail.(map[string]any); ok {
+		for k, v := range dm {
+			m[k] = v
+		}
+	}
+	var args map[string]any
+	if json.Unmarshal(raw, &args) == nil {
+		for _, k := range []string{"repo", "ws_id", "name", "line", "ref", "version_id",
+			"target", "parent", "parent_ws_id", "source", "idempotency_key"} {
+			if v, ok := args[k]; ok && v != nil && v != "" {
+				if _, exists := m[k]; !exists {
+					m[k] = v
+				}
+			}
+		}
+	}
+	if _, ok := m["repo"]; !ok {
+		if ref, _ := args["repo"].(string); ref != "" {
+			m["repo"] = ref
+		} else if s != nil && s.R != nil {
+			m["repo"] = repoLabel(s.R)
+		}
+	}
+	if _, ok := m["reason"]; !ok {
+		m["reason"] = reasonForCode(code)
+	}
+	switch code {
+	case "ws_gone":
+		if _, ok := m["legacy_code"]; !ok {
+			m["legacy_code"] = "ws_not_found"
+		}
+	case "ws_open_in_progress":
+		if _, ok := m["legacy_code"]; !ok {
+			m["legacy_code"] = "ws_busy"
+		}
+	case "idempotency_conflict":
+		if _, ok := m["legacy_code"]; !ok {
+			m["legacy_code"] = "invalid_argument"
+		}
+	}
+	if _, ok := m["retryable"]; !ok {
+		m["retryable"] = code == "ws_open_in_progress" || code == "sync_in_progress" ||
+			code == "land_queue_full"
+	}
+	env := Envelope{OK: false, Data: nil, Error: &ErrObj{Code: code, Message: msg, Detail: m}}
+	return jsonResult(env, true)
+}
+
+func reasonForCode(code string) string {
+	switch code {
+	case "ws_not_found":
+		return "never_opened_or_tombstone_expired"
+	case "ws_gone":
+		return "unknown"
+	case "line_not_found":
+		return "line_absent"
+	case "repo_not_found":
+		return "repo_absent_or_unregistered"
+	case "repo_not_initialized":
+		return "repo_db_missing_or_corrupt"
+	case "quota_exceeded":
+		return "quota_exceeded"
+	case "repo_busy":
+		return "active_workspaces_or_leases"
+	case "ws_busy":
+		return "state_not_allowed"
+	case "ws_broken":
+		return "dir_missing_or_io_error"
+	case "ws_not_mounted":
+		return "overlay_mount_lost"
+	case "target_moved":
+		return "expected_head_or_tree_mismatch"
+	case "sync_in_progress":
+		return "sync_running"
+	case "land_queue_full":
+		return "land_queue_full"
+	case "ws_open_in_progress":
+		return "claim_in_progress"
+	case "idempotency_conflict":
+		return "key_reused_with_different_request"
+	default:
+		return code
+	}
 }
 
 // classify 把内部错误映射为附录 E 的错误码。
@@ -252,6 +342,30 @@ func classify(err error) (code, msg string, detail any) {
 		return "ws_has_active_children", err.Error(), nil
 	case errors.Is(err, workspace.ErrNotFound):
 		return "ws_not_found", err.Error(), nil
+	case errors.Is(err, workspace.ErrOpenInProgress):
+		var oe *workspace.OpenInProgressError
+		if errors.As(err, &oe) {
+			return "ws_open_in_progress", err.Error(), map[string]any{
+				"ws_id": oe.WSID, "retry_after_ms": oe.RetryAfterMS,
+			}
+		}
+		return "ws_open_in_progress", err.Error(), nil
+	case errors.Is(err, workspace.ErrIdempotencyConflict), errors.Is(err, repo.ErrIdemConflict):
+		var ic *workspace.IdemConflictError
+		if errors.As(err, &ic) {
+			return "idempotency_conflict", err.Error(), map[string]any{
+				"idempotency_key": ic.Key, "ws_id": ic.WSID,
+				"field": ic.Field, "existing": ic.Existing, "requested": ic.Requested,
+			}
+		}
+		var rc *repo.IdemConflictError
+		if errors.As(err, &rc) {
+			return "idempotency_conflict", err.Error(), map[string]any{
+				"idempotency_key": rc.Key, "field": rc.Field,
+				"existing": rc.Existing, "requested": rc.Requested,
+			}
+		}
+		return "idempotency_conflict", err.Error(), nil
 	case errors.Is(err, workspace.ErrCleanupFailed):
 		return "ws_cleanup_warning", err.Error(), nil
 	case errors.Is(err, workspace.ErrLimitExceeded):

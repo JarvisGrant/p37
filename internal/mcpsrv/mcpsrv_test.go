@@ -134,7 +134,7 @@ func TestToolsListed(t *testing.T) {
 	want := []string{
 		"repo_status", "version_log", "version_show", "version_diff",
 		"lease_query", "blame",
-		"ws_open", "ws_list", "ws_info", "ws_lease", "ws_sync", "ws_drop", "ws_rebase",
+		"ws_open", "ws_ensure", "ws_list", "ws_info", "ws_lease", "ws_sync", "ws_drop", "ws_rebase",
 		"ws_quota",
 		"conflict_list", "conflict_show", "conflict_resolve", "conflict_resolve_all",
 		"land_preview", "ws_land", "version_revert",
@@ -227,8 +227,11 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("version_log 只有 %d 条", len(arr))
 	}
 
-	// ws_info 应报不存在
-	h.mustFail("ws_info", "ws_not_found", map[string]any{"ws_id": wsID})
+	// ws_info 对已落地并回收的工作区应返回 already_landed，而不是硬错误
+	info := h.mustOK("ws_info", map[string]any{"ws_id": wsID})
+	if info["already_landed"] != true || info["state"] != "already_landed" {
+		t.Fatalf("ws_info after land = %v", info)
+	}
 }
 
 // TestConflictOverMCP 覆盖冲突经 MCP 暴露与解决（§14.3.2）。
