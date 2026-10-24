@@ -23,7 +23,7 @@
 | **多仓库 / 命名线** | ✅ 完成 | `--root`、registry、line、DAG、多 line 同步与恢复 |
 | **应用卷生命周期** | ✅ 完成 | `repo_register` / `repo_unregister` / `repo_scan`、挂载点保护、tombstone |
 
-测试：`go test ./...` 全绿；当前约 283 个可列出测试、4.2 万行 Go（含测试）。
+测试：`go test ./...` 全绿；当前约 289 个可列出测试、4.2 万行 Go（含测试）。
 交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
 具体数字会随代码变化，以实际命令输出为准。
 
@@ -39,6 +39,24 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单、闭环、冲突、revert、错误码映射。
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
+
+## v0.3.3：文档对齐与 ws_land epoch 校验（2026-10-25）
+
+本版不改变仓库格式、存储布局和 MCP 工具面，重点是让文档与 v0.3.x 的实际行为
+一致，并修掉一个“文档承诺、实现未做”的乐观并发参数。
+
+| 改动 | 落点 |
+|---|---|
+| README / 状态 / 验收 / VERIFY / P36 文档对齐 v0.3.x | `README.md`、`docs/status.md`、`docs/acceptance.md`、`VERIFY.md`、`packaging/p36/README.md` |
+| MCP 契约重写 | `docs/mcp-contract.md`：61 个工具、参数/返回、`detail`（单数）、45 个实际错误码 |
+| 并发文档改为实际锁模型 | `docs/concurrency.md`：`Hub.mu`、per-repo flock、`landMu`、`landSem`、`syncMu`、`DB.wmu` |
+| 新增文档 | `docs/README.md`、`docs/architecture.md`、`docs/cli.md`、`docs/config.md`、`docs/operations.md`、`CONTRIBUTING.md` |
+| 文档防漂移 | `internal/mcpsrv/docs_test.go`、`internal/buildinfo/buildinfo_test.go` |
+| `ws_land` 乐观并发 | `expected_ws_ops_epoch` 现在真正校验；过期返回 `target_moved`，并补 `TestLandExpectedOpsEpoch` |
+| 版本收口 | `Makefile` / `buildinfo` / README / 发布说明统一到 0.3.3 |
+
+兼容性：`format_ver` 仍为 2，无需迁移；普通客户端不传
+`expected_ws_ops_epoch` 时行为不变。这是 v0.3.3 唯一有意的行为收紧。
 
 ## v0.3.2：多仓库应用卷生命周期（2026-10-24）
 

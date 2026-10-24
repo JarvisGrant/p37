@@ -1,4 +1,4 @@
-# p37 @VERSION@ — 应用卷生命周期（热插拔）
+# p37 @VERSION@ — 文档对齐与 land 乐观并发修复
 
 ## 发布物
 
@@ -19,69 +19,46 @@
 }
 ```
 
-## 本版重点（v0.3.2）
+## 本版重点（v0.3.3）
 
-P36 把「每应用一个持久卷」做成 qcow2 挂到 `/srv/repos/<app>`。本版让 p37d
-支持运行中 attach/detach，不需要重启 daemon。
+本版是 **v0.3.2 的文档/契约收口 + 一个乐观并发修复**，不改变仓库格式、存储
+布局和 MCP 工具面。
 
-- **`repo_register`**：把已挂载的目录注册为 repo。校验 root 内路径、拒绝
-  `..`/root 自身/root `.p37`/symlink 逃逸；同名或同 path 幂等；
-  `init_if_missing=true` 时用 root 配置模板初始化；有 DB 但缺
-  `.p37/repo.json` 时生成 `repo_<32hex>` 身份。
-- **`repo_unregister`**：卸载 overlay workspace、关闭 SQLite、释放 per-repo
-  flock，然后从 registry 隐藏（tombstone）。不删除 `.p37`、workspaces 或
-  repo 数据。有活跃 workspace/lease 返回 `repo_busy`；`force=true` 可强制
-  注销。失败时不写 tombstone，可直接重试。
-- **`repo_scan`**：扫描 `/srv/repos` 直接子目录，registry 空或非空都能
-  reconcile。未注册但 repo.json 有效 → 加入；已注册但卷不在 → degraded
-  （`prune_missing=true` 才删行）；repo.json 缺失 → degraded；`dry_run` 不写。
-- **挂载点保护**：`repo_delete` 在 rename 到 trash 前检查
-  `/proc/self/mountinfo` + `st_dev`。挂载点返回 `repo_is_mountpoint`，root
-  自身/root 外返回 `invalid_path`。应用卷删除改走
-  `repo_unregister → guest umount → 宿主删卷`。
-- **可观测字段**：`repo_list` / `repo_info` 增加
-  `path` / `mounted` / `available` / `degraded` / `degraded_msg`，且不会为了
-  列表去 Open repo。
-- **启动 reconcile**：`p37d --root` 启动时做一次非破坏性 scan；不可用的 repo
-  只标记 degraded，不阻止 daemon 启动。
-- **CLI**：新增 `repo register/unregister/scan`。daemon socket 可连接时必须
-  通过 daemon 执行；daemon 不在时才直连 registry。
-- **身份与恢复**：`.p37/repo.json` 是 repo 身份锚。注销后 daemon 重启或
-  `repo_scan` 不会自动复活；卷重新挂载后显式 `repo_register` 恢复原 id/name。
+- **文档对齐当前实现**：README、MCP 契约、状态、并发、同步、验收、VERIFY 和
+  P36 部署说明全部按 v0.3.x 的实际行为重写；修正了错误的版本号、
+  `format_ver`、`/srv/repo` 路径、错误码和错误信封字段名。
+- **MCP 契约补全**：覆盖全部 61 个工具；错误字段统一为 `detail`（单数）；
+  错误码表与代码实际返回的 45 个码对齐。
+- **`ws_land.expected_ws_ops_epoch` 真正生效**：此前参数被解析但未校验。
+  现在传过期 epoch 会返回 `target_moved`；不传或传当前 epoch 不受影响。
+  这是本版唯一有意的行为收紧，符合 `docs/p34-integration.md` 的原有示例。
+- **文档防漂移**：新增测试校验 MCP 工具覆盖、错误码、错误字段、相对链接，
+  以及 `Makefile` / `buildinfo` / README 的版本一致性。
+- **文档结构**：新增文档索引、当前状态、架构、CLI、配置、运维手册和贡献指南；
+  `PROGRESS.md` 明确为历史记录，当前状态改由 `docs/status.md` 维护。
 
 ## 接口变化
 
+MCP 工具名、参数 Schema、返回字段没有变化。只有一个行为变化：
+
 ```text
-repo_register(repo, path, default_line?, init_if_missing?, force_rename?)
-→ { id, name, path, default_line, mounted, available, degraded, degraded_msg? }
-
-repo_unregister(repo, force?)
-→ { unregistered, already_unregistered, id?, name?, path? }
-
-repo_scan(reconcile?, prune_missing?, dry_run?)
-→ { added[], removed[], degraded[], skipped[], reconciled, dry_run }
+ws_land(expected_ws_ops_epoch = <旧值>)  → target_moved
 ```
 
-CLI：
+`expected_ws_ops_epoch` 省略或为 0 时不校验；传当前值正常 land。这样调用方可以
+真正用 `land_preview` 返回的 `ws_ops_epoch` 做乐观并发保护。
 
-```bash
-p37 --root /srv/repos repo register app-a /srv/repos/app-a --init-if-missing --json
-p37 --root /srv/repos repo unregister app-a --json
-p37 --root /srv/repos repo scan --dry-run --json
-```
-
-新增错误码：`repo_name_mismatch`、`repo_path_exists`、`repo_is_mountpoint`、
-`already_unregistered`、`registry_busy`、`daemon_running`。复用
-`repo_not_initialized`、`repo_busy`、`invalid_path`。
+`expected_ws_tree`、`expected_head`、`expected_parent_tree` 的语义不变。
 
 ## 兼容性
 
 - 仓库格式仍为 `format_ver=2`，无需迁移。
-- SQLite / OverlayFS 存储引擎未改；没有 NFS 专用 DB 模式。
-- 单仓库模式 `p37d --repo <root>` 行为不变。
-- 现有 `repo_create/info/delete/list` 仍可用；`repo_delete` 现在额外拒绝
-  挂载点、root 自身和 root 外路径。
-- v0.3.1 的 `repo_export` 流式化、`export_root` 护栏与异步任务保留。
+- SQLite / OverlayFS / CAS / pack 格式未改。
+- 已有仓库、工作区、同步包可直接使用。
+- 普通 MCP 客户端（不传 `expected_ws_ops_epoch`）行为不变。
+- 传了过期 `expected_ws_ops_epoch` 的客户端会开始得到 `target_moved`；这是
+  有意的并发保护，不是回归。
+- 单仓库模式 `p37d --repo <root>` 与多仓库模式 `p37d --root <root>` 均不变。
 
 ## P36 集成要点
 
@@ -94,19 +71,24 @@ p37 --root /srv/repos repo scan --dry-run --json
 - 应用卷：guest 挂到 `/srv/repos/<app>`，卷内就是 p37 repo 根。
   attach → `repo register`；detach → `repo unregister` → guest umount →
   宿主 remove-device。
-- MCP 客户端使用 `/usr/local/bin/p37-mcp`（内部 `p37d --stdio --root /srv/repos`）。
+- MCP 客户端使用 `/usr/local/bin/p37-mcp`（内部
+  `p37d --stdio --root /srv/repos`）。
+- `p37d --check --repo <root>` 是完整健康检查；`p37d --check --root <dir>` 是
+  registry/DB/line 链检查。`p37-run` 启动前调用非 strict 的 `--check --root`。
 
 部署细节与验收步骤见仓库 `packaging/p36/README.md` 与 `VERIFY.md`。
 
 ## 已知限制
 
-- `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前应由 P36
-  确认应用空闲。活跃 workspace/lease 会被 `repo_busy` 挡住。
-- 注销使用 tombstone；`repo_scan` 不会自动复活已注销 repo，必须显式
-  `repo_register`。
-- `repo_register` 不自动创建 path 目录（避免卷未挂载时写根盘）。
 - 在线 GC 未实现；`p37 gc` 在 daemon 运行时拒绝，需维护窗口。
-- copy 模式下 `p37 doctor` 仍会把 OverlayFS 标成 `FAIL`；正式门禁用
-  `p37d --check --strict`。
+- 写时打包与 repack 压实未实现；只有离线 `p37 gc --prune --pack`。
+- 多 line push 当前每次生成全量 checkpoint；单 line 可增量。
+- `sync_restore` 不恢复 workspace/lease；P34 重新 `ws_open`。
+- 同一 `remote_prefix` 只支持单写者；P34 需串行化同一 app 的 push。
+- `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前由上层确认
+  应用空闲。
+- `p37d --check --repo` 有写探测，不适合在线高频探针；`--check --root` 只做
+  registry/DB/line 检查，也不应高频轮询。
+- copy 模式下 `p37 doctor` 仍会把 OverlayFS 标成 `FAIL`；完整部署门禁用
+  `p37d --check --strict --repo <root>`。
 - payload 换盘需要重启实例；服务级 restart 不保证换盘。
-- `p37d --check` 有少量写探测，适合启动前检查，不建议作为在线高频探针。
