@@ -263,8 +263,29 @@ func envelopeErrCtx(s *Server, raw json.RawMessage, err error) *mcp.CallToolResu
 		m["retryable"] = code == "ws_open_in_progress" || code == "sync_in_progress" ||
 			code == "land_queue_full"
 	}
+	if _, ok := m["retry_after_ms"]; !ok {
+		switch code {
+		case "ws_open_in_progress", "land_queue_full":
+			m["retry_after_ms"] = int64(250)
+		case "sync_in_progress":
+			m["retry_after_ms"] = int64(5000)
+		}
+	}
 	env := Envelope{OK: false, Data: nil, Error: &ErrObj{Code: code, Message: msg, Detail: m}}
 	return jsonResult(env, true)
+}
+
+func quotaRetry(scope string) (bool, int64, string) {
+	switch scope {
+	case workspace.ScopeActive:
+		return true, 5000, "retry_or_reclaim"
+	case workspace.ScopeHidden:
+		return true, 60000, "ws_reap"
+	case workspace.ScopeDepth, workspace.ScopeFanout:
+		return false, 0, "restructure"
+	default:
+		return false, 0, "inspect_quota"
+	}
 }
 
 func reasonForCode(code string) string {
@@ -371,8 +392,10 @@ func classify(err error) (code, msg string, detail any) {
 	case errors.Is(err, workspace.ErrLimitExceeded):
 		var le *workspace.LimitError
 		if errors.As(err, &le) {
+			retry, retryMS, action := quotaRetry(le.Scope)
 			return "quota_exceeded", err.Error(), map[string]any{
 				"scope": le.Scope, "used": le.Used, "limit": le.Limit,
+				"retryable": retry, "retry_after_ms": retryMS, "next_action": action,
 			}
 		}
 		return "quota_exceeded", err.Error(), nil
@@ -412,6 +435,16 @@ func classify(err error) (code, msg string, detail any) {
 		return "repo_name_mismatch", err.Error(), nil
 	case errors.Is(err, hub.ErrRepoPathExists):
 		return "repo_path_exists", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoPathMismatch):
+		var pe *hub.PathMismatchError
+		if errors.As(err, &pe) {
+			return "repo_path_mismatch", err.Error(), map[string]any{
+				"repo": pe.Name, "existing_id": pe.ExistingID,
+				"existing_path": pe.ExistingPath, "requested_path": pe.RequestedPath,
+				"reason": pe.Reason, "retryable": false,
+			}
+		}
+		return "repo_path_mismatch", err.Error(), nil
 	case errors.Is(err, hub.ErrRepoIsMountpoint):
 		return "repo_is_mountpoint", err.Error(), nil
 	case errors.Is(err, hub.ErrRepoBusy):

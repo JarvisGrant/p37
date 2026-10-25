@@ -1,4 +1,4 @@
-# p37 @VERSION@ — 工作区协议幂等与消失语义
+# p37 @VERSION@ — 应用卷迁移安全与自检聚合
 
 ## 发布物
 
@@ -19,7 +19,22 @@
 }
 ```
 
-## 本版重点（v0.4.0）
+## 本版重点（v0.4.1）
+
+- **repo 路径不一致保护**：同名 repo 已注册在旧路径时，`repo_register` 返回
+  `repo_path_mismatch`，不再静默继续用旧路径；`rebind=true` 才改 registry 指针。
+- **repo.root 自愈**：repo 目录迁移/应用卷重挂后，打开 repo 时自动把
+  `p37.db` 里的 `repo.root` 修到实际路径。
+- **registry 重建更安全**：同名多候选优先选择目录名 == repo name 的路径，并把
+  冲突写入启动日志；`repo_scan` 的 skipped 也会打印。
+- **quota_exceeded 按 scope 区分**：`workspace_active/hidden` 可重试并带
+  `retry_after_ms/next_action`；depth/fanout 不可重试。
+- **`ws_diff` 对已回收 ws**：返回 `ok=true,state=already_landed,items=[]`。
+- **`ws_reap name_prefix`**：按会话前缀过滤 eligible 候选。
+- **新增 `repo_health`**：一次返回 repo/quota/sync/workspace/line/persistence。
+- 文档明确 `name` 会话级稳定、`idempotency_key` turn 级。
+
+## 上一版（v0.4.0）
 
 - **工作区协议补齐幂等与消失语义**：`ws_open` 支持 `idempotency_key`；新增
   `ws_ensure`（按 name+parent 原子 open-or-get）；并发/重试不再产生同名工作区。

@@ -30,6 +30,7 @@ func (s *Server) registerAll() {
 	s.registerSyncV2()
 	s.registerRepoExport()
 	s.registerWSDiskUsage()
+	s.registerRepoHealth()
 }
 
 // --- 只读 ---------------------------------------------------------------

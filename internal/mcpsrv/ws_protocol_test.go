@@ -278,6 +278,42 @@ func TestWSGoneAbandonedAndTombstoneList(t *testing.T) {
 	}
 }
 
+func TestWSDiffAlreadyLandedAndRepoHealth(t *testing.T) {
+	h := newHarness(t)
+	h.seed("a.txt", "A\n")
+	if _, err := h.r.Import(h.srcDir); err != nil {
+		t.Fatal(err)
+	}
+	w := h.mustOK("ws_ensure", map[string]any{"name": "diff-health"})
+	dir := w["dir"].(string)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.mustOK("ws_land", map[string]any{"ws_id": w["ws_id"].(string)})
+
+	d := h.mustOK("ws_diff", map[string]any{"ws_id": w["ws_id"].(string)})
+	if d["already_landed"] != true || d["state"] != "already_landed" {
+		t.Fatalf("ws_diff=%v", d)
+	}
+	if items, _ := d["items"].([]any); items == nil || len(items) != 0 {
+		t.Fatalf("ws_diff items=%v", d["items"])
+	}
+
+	hh := h.mustOK("repo_health", map[string]any{})
+	for _, k := range []string{"repo", "p37_version", "format_ver", "persistence",
+		"quota", "workspaces", "lines", "warnings"} {
+		if hh[k] == nil {
+			t.Fatalf("repo_health 缺少 %s: %v", k, hh)
+		}
+	}
+	if hh["p37_version"] == "" {
+		t.Fatalf("p37_version 为空")
+	}
+	if _, ok := hh["persistence"].(map[string]any)["pending_packages"]; !ok {
+		t.Fatalf("persistence 缺少 pending_packages: %v", hh["persistence"])
+	}
+}
+
 func TestWSLandDurability(t *testing.T) {
 	h := newHarness(t)
 	h.seed("a.txt", "A\n")
@@ -388,6 +424,28 @@ func TestWSQuotaAndReapObservability(t *testing.T) {
 	}
 }
 
+func TestWSReapNamePrefix(t *testing.T) {
+	h := newHarness(t)
+	h.seed("a.txt", "A\n")
+	if _, err := h.r.Import(h.srcDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"p34s-a", "p34s-b"} {
+		w := h.mustOK("ws_ensure", map[string]any{"name": name})
+		dir := w["dir"].(string)
+		if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		h.mustOK("ws_sync", map[string]any{"ws_id": w["ws_id"].(string)})
+		h.mustOK("ws_land", map[string]any{"ws_id": w["ws_id"].(string), "drop_workspace": false})
+	}
+	res := h.mustOK("ws_reap", map[string]any{"dry_run": true, "name_prefix": "p34s-a"})
+	cands, _ := res["candidates"].([]any)
+	if len(cands) != 1 || cands[0].(map[string]any)["name"] != "p34s-a" {
+		t.Fatalf("name_prefix candidates=%v", res)
+	}
+}
+
 func TestWSErrorContext(t *testing.T) {
 	h := newHarnessOpt(t, repo.Options{Materialize: mountmgr.ModeAuto, MaxActive: 1})
 	h.seed("a.txt", "A\n")
@@ -411,9 +469,13 @@ func TestWSErrorContext(t *testing.T) {
 	h.mustOK("ws_open", map[string]any{"task": "one"})
 	e = h.mustFail("ws_open", "quota_exceeded", map[string]any{"task": "two"})
 	detail = e["detail"].(map[string]any)
-	for _, k := range []string{"repo", "reason", "scope", "used", "limit"} {
+	for _, k := range []string{"repo", "reason", "scope", "used", "limit",
+		"retryable", "retry_after_ms", "next_action"} {
 		if detail[k] == nil {
 			t.Fatalf("quota detail 缺少 %s: %v", k, detail)
 		}
+	}
+	if detail["retryable"] != true || detail["next_action"] != "retry_or_reclaim" {
+		t.Fatalf("quota retry 语义=%v", detail)
 	}
 }

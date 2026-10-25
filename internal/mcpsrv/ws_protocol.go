@@ -35,6 +35,24 @@ func repoLabel(rr *repo.Repo) string {
 	return filepath.Base(rr.Root)
 }
 
+// repoID 返回 repo.json 里的稳定 id（缺省为空）。
+func repoID(rr *repo.Repo) string {
+	if rr == nil {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(rr.Root, ".p37", "repo.json"))
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(b, &m) == nil {
+		return m.ID
+	}
+	return ""
+}
+
 // durabilityView 声明本地真相源与远端持久性。ws_land 默认 durable=false：
 // 只有同步 sync_push 成功覆盖后才算跨 VM durable。
 func durabilityView(rr *repo.Repo) map[string]any {

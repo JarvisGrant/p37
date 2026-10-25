@@ -1,4 +1,4 @@
-# 验收清单（v0.4.0 / format_ver=2）
+# 验收清单（v0.4.1 / format_ver=2）
 
 ## 自动化
 
@@ -55,7 +55,7 @@ P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
 | 21 | `repo_delete` 挂载点/root 自身/root 外路径保护 | `TestDeleteMountpointGuard`、`TestDeleteRejectsOutsideAndRoot`、`TestRepoDeleteMountpointMCP` |
 | 22 | `repo_export` 同步/异步、流式写入、export_root、目录非空、大文件 | `internal/repo/export_test.go`、`internal/mcpsrv/export_test.go` |
 
-## v0.4.0 工作区协议验收
+## v0.4.1 工作区协议验收
 
 ```bash
 go test ./internal/mcpsrv -run 'TestWS(EnsureConcurrent|OpenIdempotencyConcurrent|GoneLandReplay|GoneAbandonedAndTombstoneList|LandDurability|PersistenceReopen|QuotaAndReapObservability|ErrorContext)' -count=1 -v

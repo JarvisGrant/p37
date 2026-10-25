@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 工作区协议验收（v0.4.0）。
+# 工作区协议验收（v0.4.1）。
 #
 # 用法（P36 VM 或任意 Linux/macOS 开发机）：
 #   P37_BIN=/usr/local/bin/p37 bash packaging/p36/ci/ws-contract.sh
@@ -29,7 +29,7 @@ say() { echo "==> $*"; }
 
 say "5 个独立进程并发 ws-ensure 同名工作区"
 for i in 1 2 3 4 5; do
-  "$P37_BIN" ws-ensure "$ROOT" --name root-turn-1 --task t --json \
+  "$P37_BIN" ws-ensure "$ROOT" --name p34s-sess-42 --task t --json \
     > "$WORK/out.$i" 2> "$WORK/err.$i" &
 done
 wait
@@ -47,7 +47,7 @@ echo "WS_LIST_COUNT=$WS_COUNT"
 
 say "再次并发 ensure，ws_id 不变"
 for i in 1 2 3 4 5; do
-  "$P37_BIN" ws-ensure "$ROOT" --name root-turn-1 --json > "$WORK/again.$i" &
+  "$P37_BIN" ws-ensure "$ROOT" --name p34s-sess-42 --json > "$WORK/again.$i" &
 done
 wait
 jq -r '.ws_id' "$WORK"/again.* | sort -u | grep -qx "$WS" \

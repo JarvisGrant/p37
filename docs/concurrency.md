@@ -69,7 +69,8 @@ Repo.syncMu（同步工具）
   `dir_cleanup_warning`；daemon 启动会清掉没有行引用的孤儿目录。
 - `ws_reap` 不删除有 lease 的工作区；用户 active 工作区不自动回收；隐藏
   merge/preview TTL 24h；`landed` 可在 24h 后回收；显式 `state=broken` 可回收
-  broken 工作区；`include_orphan_dirs=true` 顺带清理孤儿目录。
+  broken 工作区；`include_orphan_dirs=true` 顺带清理孤儿目录；`name_prefix`
+  只过滤已符合回收条件的候选，不扩大回收范围。
 - dry-run 返回 `candidates[]`（name/ops/dirty/age/reason/will_drop）与
   `skipped[]`（lease_held/not_old_enough），解释“为什么回收/为什么不动”。
 

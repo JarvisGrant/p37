@@ -1,4 +1,4 @@
-# 当前状态（v0.4.0）
+# 当前状态（v0.4.1）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,9 +7,9 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.0` |
+| 发布版本 | `v0.4.1` |
 | 仓库格式 | `format_ver = 2` |
-| MCP 工具 | 62 个（以 `internal/mcpsrv` 注册为准） |
+| MCP 工具 | 63 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
 | 测试 | `go test ./...` 全绿；`make cross` 通过 |
 

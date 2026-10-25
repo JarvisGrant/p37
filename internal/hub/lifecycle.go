@@ -24,6 +24,9 @@ type RegisterOptions struct {
 	// ForceRename 允许调用方用新 name 覆盖已有 .p37/repo.json 里的 name。
 	// 默认 false：repo.json 是仓库身份锚，不能被静默改名。
 	ForceRename bool
+	// Rebind 允许在“同名已注册到旧路径”时把 registry 指针改到新路径。
+	// 只改控制面，不搬数据；目标路径必须已有同一 repo 身份（repo.json 或 DB）。
+	Rebind bool
 }
 
 // UnregisterResult 是 repo_unregister 的结果。
@@ -102,9 +105,46 @@ func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, erro
 
 	// 已注册：同 name 或同 path 幂等返回已有 Entry。
 	if e, _ := h.entryByFieldLocked("name", name, false); e != nil {
-		if err := h.ensureRepoMeta(e.Path, e, hasMeta); err != nil {
+		if filepath.Clean(e.Path) == filepath.Clean(abs) {
+			if err := h.ensureRepoMeta(e.Path, e, hasMeta); err != nil {
+				return nil, err
+			}
+			h.enrichEntry(e)
+			return e, nil
+		}
+		// 同名不同路径：绝不能静默复用旧 Entry。旧版本会把新挂载的卷忽略，
+		// 继续把数据写到即将被销毁的 L2 路径。
+		if !opt.Rebind {
+			return nil, &PathMismatchError{Name: name, ExistingID: e.ID,
+				ExistingPath: e.Path, RequestedPath: abs,
+				Reason: "use_rebind_or_unregister_then_register"}
+		}
+		if h.repos[e.ID] != nil || h.repos[e.Name] != nil {
+			return nil, fmt.Errorf("%w: repo %s 正在运行，先 unregister 或重启 daemon 再 rebind",
+				ErrRepoBusy, e.Name)
+		}
+		hasDB := fileExists(filepath.Join(abs, ".p37", "p37.db"))
+		if !hasMeta && !hasDB {
+			return nil, fmt.Errorf("%w: rebind 目标 %s 缺少 .p37/repo.json 与 p37.db（P37 不搬数据）",
+				ErrRepoNotInitialized, abs)
+		}
+		if hasMeta && metaInfo.ID != "" && e.ID != "" && metaInfo.ID != e.ID {
+			return nil, &PathMismatchError{Name: name, ExistingID: e.ID,
+				ExistingPath: e.Path, RequestedPath: abs,
+				Reason: "target_repo_id_mismatch"}
+		}
+		if err := h.rebindPathLocked(e, abs); err != nil {
 			return nil, err
 		}
+		e.Path = abs
+		if hasMeta && metaInfo.DefaultLine != "" {
+			e.DefaultLine = metaInfo.DefaultLine
+		}
+		if err := h.ensureRepoMeta(abs, e, hasMeta); err != nil {
+			return nil, err
+		}
+		// 目标 repo 的 DB 自愈 repo.root。
+		_ = updateRepoRootFile(abs)
 		h.enrichEntry(e)
 		return e, nil
 	}
@@ -229,6 +269,36 @@ func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, erro
 	}
 	h.enrichEntry(e2)
 	return e2, nil
+}
+
+// rebindPathLocked 只更新 registry 指针，不移动任何数据。
+func (h *Hub) rebindPathLocked(e *Entry, abs string) error {
+	return h.registryTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE repo SET path=?, deleted_ts=0, degraded=0, degraded_msg=''
+			   WHERE id=? AND deleted_ts=0`, abs, e.ID)
+		if err != nil {
+			return wrapRegistryErr(err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: %s", ErrRepoNotFound, e.Name)
+		}
+		return nil
+	})
+}
+
+// updateRepoRootFile 把 repo.db 内的 root 修到新路径；DB 不存在则跳过。
+func updateRepoRootFile(path string) error {
+	dbPath := filepath.Join(path, ".p37", "p37.db")
+	if !fileExists(dbPath) {
+		return nil
+	}
+	db, err := meta.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	return db.UpdateRepoRoot(path)
 }
 
 // ensureRepoMeta 在已注册 repo 缺 repo.json 时补写（不覆盖已有文件）。

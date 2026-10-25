@@ -1,7 +1,7 @@
-# p37 MCP 契约（v0.4.0 / format_ver=2）
+# p37 MCP 契约（v0.4.1 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
-`internal/mcpsrv` 的注册为准；当前注册 62 个工具。
+`internal/mcpsrv` 的注册为准；当前注册 63 个工具。
 
 ## 统一信封
 
@@ -52,7 +52,7 @@
 
 | 分类 | 工具 |
 |---|---|
-| 仓库只读 | `repo_status` `repo_list` `repo_info` `repo_disk_usage` |
+| 仓库只读 | `repo_status` `repo_list` `repo_info` `repo_disk_usage` `repo_health` |
 | 仓库管理 | `repo_create` `repo_delete` `repo_import` `repo_export` `repo_export_status` `repo_set_remote` |
 | 应用卷生命周期 | `repo_register` `repo_unregister` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
@@ -94,7 +94,7 @@
 
 ```json
 {
-  "p37_version": "0.4.0",
+  "p37_version": "0.4.1",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -165,14 +165,18 @@ daemon socket 可连接时通过 MCP 路由 register/unregister/scan。
   "path": "/srv/repos/app-a",
   "default_line": "main",
   "init_if_missing": false,
-  "force_rename": false
+  "force_rename": false,
+  "rebind": false
 }
 ```
 
 - `path` 必须是 root 下的绝对路径，且不能是 root 自身、root/.p37、symlink 或
   逃逸路径。
 - `path` 必须已经存在（应用卷应已挂载）；本工具不会创建目录。
-- 同名或同 path 已注册时幂等返回已有 Entry。
+- 同 path 已注册时幂等返回已有 Entry。
+- 同名但已注册在**不同路径**：默认返回 `repo_path_mismatch`，不会静默复用旧
+  路径；只有显式 `rebind=true` 才把 registry 指针改到 `path`。`rebind` 只改控制
+  面，不搬数据，目标路径必须已有同一 repo 身份（`.p37/repo.json` 或 `p37.db`）。
 - path 下没有 `.p37/p37.db`：
   - `init_if_missing=false` → `repo_not_initialized`；
   - `init_if_missing=true` → 使用 root 配置模板初始化，并写 `.p37/repo.json`。
@@ -263,13 +267,13 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
 | `ws_list` | `include_hidden?` | 默认不含隐藏 merge/preview |
 | `ws_info` | `ws_id` | base_line/base_version/parent/dirty/ops/conflicts/disk/state/base_stale |
 | `ws_sync` | `ws_id` | 采集磁盘变更；见下方返回字段 |
-| `ws_diff` | `ws_id` | 文件级 A/M/D/R/C |
+| `ws_diff` | `ws_id` | 文件级 A/M/D/R/C；已 land 返回 `ok=true,state=already_landed,items=[]` |
 | `ws_rebase` | `ws_id`, `to?` | `to` = version/line/workspace；默认父 |
 | `ws_quota` | — | 配额用量；见下方 |
 | `ws_drop` | `ws_id`, `cascade?`, `keep_dir?` | 幂等；`cascade=true` 把子工作区重挂到祖父，不是递归删除 |
 | `ws_lease` | `ws_id`, `add?`, `release?`, `mode?` | 登记/解除路径租约；`mode` = shared/exclusive |
 | `lease_query` | `paths?` | 查询若干路径上的租约 |
-| `ws_reap` | `older_than?`, `state?`, `include_orphan_dirs?`, `dry_run?` | 默认 dry-run；返回 `candidates[]/skipped[]`，有 lease/active 不删；隐藏 TTL 24h |
+| `ws_reap` | `older_than?`, `state?`, `name_prefix?`, `include_orphan_dirs?`, `dry_run?` | 默认 dry-run；返回 `candidates[]/skipped[]`，有 lease/active 不删；`name_prefix` 只过滤 eligible 候选 |
 | `ws_disk_usage` | — | 按工作区统计磁盘占用 |
 
 ### ws_info / ws_sync / land_preview 对已回收工作区
@@ -285,7 +289,7 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
 
 ```json
 {
-  "ws_id": "ws_...", "name": "root-turn-1", "state": "tombstone",
+  "ws_id": "ws_...", "name": "p34s-sess-42", "state": "tombstone",
   "reason": "landed_and_dropped", "dropped_at": 1792831200000,
   "line": "p34/session/s1", "line_head": "v...",
   "landed_version": "v...", "target_kind": "line",
@@ -431,6 +435,29 @@ if r.state == "conflict" or !r.can_land:
 `[{"ws_id":"ws_child","state":"conflicted"}]`。此时必须显式解决冲突或
 `ws_drop(child)`，不要无限重试。
 
+## 启动自检
+
+`repo_health(repo)` 只读聚合 `repo_info + ws_quota + sync_status + ws_list`：
+
+```json
+{
+  "repo": {"id":"repo_...","name":"my-app","path":"/srv/repos/my-app",
+           "available":true,"degraded":false,"mount_point":true},
+  "p37_version": "0.4.1",
+  "format_ver": 2,
+  "persistence": {"durable": false, "durable_scope": "local_only",
+                  "pending_packages": 0, "ahead": 0, "behind": 0, "diverged": false},
+  "quota": {"max_active":8,"active_used":2,"active_available":6,
+            "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
+            "landed":0,"broken":0,"workspaces":[]},
+  "workspaces": {"total":2,"active":2,"conflicted":0,"landed":0,
+                 "broken":0,"hidden":0,"tombstones":1},
+  "lines": {"count":2,"default_line":"main","heads":{"main":"v..."}},
+  "last_land_ts": 1792831200000,
+  "warnings": []
+}
+```
+
 ## 历史读取
 
 | 工具 | 参数 | 说明 |
@@ -488,6 +515,7 @@ line_not_found line_exists line_protected
 target_invalid target_moved source_moved target_not_ancestor
 merge_base_ambiguous merge_expired preview_expired
 ws_not_found ws_gone ws_not_mounted ws_broken ws_busy ws_has_active_children
+repo_path_mismatch
 ws_cleanup_warning ws_exists quota_exceeded ws_open_in_progress idempotency_conflict
 not_dirty conflict land_queue_full invalid_path
 destination_not_empty path_not_found
@@ -504,6 +532,15 @@ invalid_argument internal not_found
 - `already_landed`、`already_merged`、`already_dropped`、`already_deleted`、
   `already_unregistered` 是返回体里的布尔字段，不是错误码。
 - `repo_busy` 的 `detail` 带 `workspaces`/`leases`。
+- `repo_path_mismatch` 表示同名 repo 已在旧路径；`detail` 带
+  `existing_path/requested_path/reason`。迁移时先 unregister 旧路径，或显式
+  `repo_register(rebind=true)`（只改 registry，不搬数据）。
+- `quota_exceeded` 现在按 scope 给出 `retryable/retry_after_ms/next_action`：
+  `workspace_active` → 可重试、`retry_or_reclaim`；
+  `workspace_hidden` → 可重试、`ws_reap`；
+  `workspace_depth/fanout` → 不可重试、`restructure`。
+- `ws_diff` 对已落地/已回收工作区返回 `ok=true`（`already_landed`，空 items）；
+  对 abandoned/expired 返回 `ws_gone`。
 - `quota_exceeded` 的 `detail` 带 `scope/used/limit`，`scope` ∈
   `workspace_active|workspace_hidden|workspace_depth|workspace_fanout`。
 - `ws_has_active_children` 的 `detail` 带 `ws_id` 和

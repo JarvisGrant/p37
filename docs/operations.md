@@ -8,9 +8,9 @@ systemd / L1 胶水细节见 [`../packaging/p36/README.md`](../packaging/p36/REA
 ### 1.1 发布物
 
 ```bash
-make release VERSION=0.4.0
-# dist/p37-linux-amd64-0.4.0.tar.gz
-# dist/p37-linux-amd64-0.4.0.tar.gz.sha256
+make release VERSION=0.4.1
+# dist/p37-linux-amd64-0.4.1.tar.gz
+# dist/p37-linux-amd64-0.4.1.tar.gz.sha256
 make p36-bootstrap
 # dist/p36-bootstrap/...
 ```
@@ -164,3 +164,45 @@ auth_token = "<token>"
 - `land_queue_max` 是排队上限，不是并发执行数；land 本身由 `landMu` 串行。
 - 多 line 仓库 push 当前是全量 checkpoint；大仓库建议按会话保留 VM，减少
   restore 次数。
+
+## 应用卷迁移：把旧 L2 repo 收养到 /srv/repos/<name>
+
+`repo_create` 的历史行为会把 repo 建在 `/srv/repos/repo_<hash>`；P36 保留的
+应用卷路径是 `/srv/repos/<name>`。如果同名 repo 已注册在旧路径，
+`repo_register` 默认返回 `repo_path_mismatch`，不会静默继续用旧路径。
+
+### 保留历史
+
+```bash
+systemctl stop p37d
+mountpoint -q /srv/repos/<name>
+cp -a /srv/repos/repo_<hash> /srv/repos/.p37/trash/<name>-backup-$(date +%s)
+rsync -aHAX --delete /srv/repos/repo_<hash>/ /srv/repos/<name>/
+sqlite3 /srv/repos/<name>/.p37/p37.db "UPDATE repo SET root='/srv/repos/<name>' WHERE id=1;"
+p37 --root /srv/repos repo unregister <name> --force
+p37 --root /srv/repos repo register <name> /srv/repos/<name>
+p37 --root /srv/repos repo info <name> --json
+p37d --check --strict --root /srv/repos
+systemctl start p37d
+```
+
+### 不保留旧历史
+
+```bash
+systemctl stop p37d
+p37 --root /srv/repos repo unregister <name> --force
+p37 --root /srv/repos repo register <name> /srv/repos/<name> --init-if-missing
+systemctl start p37d
+```
+
+### 跨 VM
+
+旧 VM 删机前先 `sync_push(async=false)` 并确认 `durable=true`；新 VM 用
+`sync_restore` 恢复。`sync_restore` 不恢复 workspace/tombstone/idempotency，
+恢复后用 `ws_ensure` 重新开回合。
+
+注意：
+- `p37 init` 是单 repo 初始化，不重建多仓库 registry；多仓库 registry 由
+  `p37d --root` 启动或 `repo scan` 重建。
+- 不要同时保留 `/srv/repos/p34-50` 和 `/srv/repos/repo_<hash>` 两个有效
+  `.p37/repo.json`；先 unregister/移走旧目录，再启动。

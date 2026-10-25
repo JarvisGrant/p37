@@ -25,6 +25,14 @@ type Repo struct {
 	Epoch        uint64
 }
 
+// UpdateRepoRoot 把 repo.root 修到实际打开路径（目录迁移/应用卷重挂后自愈）。
+func (d *DB) UpdateRepoRoot(root string) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE repo SET root=? WHERE id=1`, root)
+		return err
+	})
+}
+
 // GetRepo 读取仓库单行。
 func (d *DB) GetRepo() (Repo, error) {
 	var (

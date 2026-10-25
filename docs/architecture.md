@@ -137,8 +137,8 @@ root 外路径。
 
 ## 8. 持久性真相源
 
-本地 repo 的 `.p37/p37.db` + `.p37/objects` + `.p37/packs` 是 line/version/
-对象的语义真相源；`.p37/workspaces`、op、stat_cache 是派生数据。S3 远端是
+本地 repo 的 `<repo>/.p37/p37.db` + `.p37/objects` + `.p37/packs` 是 line/version/
+对象的语义真相源（`/srv/repos/.p37/registry.db` 只是控制面，可从 repo.json 重建）；`.p37/workspaces`、op、stat_cache 是派生数据。S3 远端是
 跨 VM 灾备真相，不是在线语义真相。`ws_land` 默认 `durable=false`（仅本地已提交），
 `sync_push` 成功后才 `durable=true`。P36 负责卷/字节是否真的留在盘上。
 

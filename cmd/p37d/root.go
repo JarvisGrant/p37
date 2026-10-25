@@ -33,6 +33,9 @@ func runRootDaemon(root string, serveHTTP bool) error {
 		return err
 	}
 	defer func() { _ = h.Close() }()
+	for _, w := range h.RecoverWarnings() {
+		fmt.Fprintf(os.Stderr, "p37d: registry 重建警告: %s\n", w)
+	}
 
 	// 旧单仓库原地注册为 default（不移动目录）。
 	if _, err := h.RegisterLegacy("/srv/repo"); err != nil {
@@ -42,9 +45,14 @@ func runRootDaemon(root string, serveHTTP bool) error {
 	// 加入 registry；已注册但卷不在的只标记 degraded，不自动删除数据。
 	if res, err := h.Scan(hub.ScanOptions{Reconcile: true}); err != nil {
 		fmt.Fprintf(os.Stderr, "p37d: registry scan 失败: %v\n", err)
-	} else if len(res.Added)+len(res.Degraded)+len(res.Removed) > 0 {
-		fmt.Fprintf(os.Stderr, "p37d: registry reconciled added=%d degraded=%d removed=%d\n",
-			len(res.Added), len(res.Degraded), len(res.Removed))
+	} else {
+		if len(res.Added)+len(res.Degraded)+len(res.Removed) > 0 {
+			fmt.Fprintf(os.Stderr, "p37d: registry reconciled added=%d degraded=%d removed=%d\n",
+				len(res.Added), len(res.Degraded), len(res.Removed))
+		}
+		for _, sk := range res.Skipped {
+			fmt.Fprintf(os.Stderr, "p37d: registry 跳过 %s（%s）\n", sk.Path, sk.Reason)
+		}
 	}
 	// 启动时打开现有仓库：恢复 workspace 挂载，并让维护命令能看到
 	// per-repo flock。单个 repo 失败只标记 degraded，不影响其它 repo。

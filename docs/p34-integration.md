@@ -28,7 +28,7 @@ P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 推荐用 `ws_ensure`（原子 open-or-get），而不是“先 ws_list 再 ws_open”：
 
 ```json
-{ "repo": "my-app", "name": "root-<turn>",
+{ "repo": "my-app", "name": "p34s-<sessionID>",
   "parent": { "kind": "line", "id": "p34/session/<sessionID>" },
   "task_desc": "...",
   "idempotency_key": "<session>/<turn>/ws" }
@@ -37,6 +37,13 @@ P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 同名同 parent 的并发调用只产生一个工作区；同一 key 重放返回同一个 `ws_id`。
 返回 `ws_id/dir/base_line/base_version/materialize/state/created/reused`。
 `ws_open` 仍可用，并新增 `idempotency_key`；不传 key 时保持旧语义。
+
+**命名规则：**
+- `name` 是**会话级稳定**，例如 `p34s-<sessionID>`，不要带 turn 编号。
+- `idempotency_key` 是 **turn 级**，例如 `<sessionID>/<turn>/ws`、`<sessionID>/<turn>/land`。
+- 上一 turn 未 land 的 live ws 会被同 name+parent 的新 key 复用；land+drop 后
+  新 key 会创建新一代。
+- 把 turn 编号放进 name 会让上一 turn 的 ws 永远命中不了，导致配额泄漏。
 
 agent 直接读写 `dir`。不要调用 `line_write_file`。
 
@@ -66,8 +73,9 @@ ws_land(repo, ws_id,
 ## 5. 子任务
 
 ```text
-parent = ws_open(parent=session line)
-child  = ws_open(parent={kind:"workspace", id:parent.ws_id})
+parent = ws_ensure(name="p34s-<sessionID>", parent=session line)
+child  = ws_ensure(name="p34s-<sessionID>-task-1",
+                   parent={kind:"workspace", id:parent.ws_id})
 ... worker 改文件 ...
 
 r = ws_land_into(child, parent.ws_id, idempotency_key=<child-task-id>)
@@ -197,6 +205,16 @@ on ws_not_found: 最多重试一次（新 key），仍失败则上报
 ```
 
 不要循环 `ws_open`，也不要用重试次数赌状态。
+
+## 启动自检
+
+会话/VM 启动时优先调用一次 `repo_health(repo)`，它聚合 repo 路径/挂载、
+`persistence`、`quota`、workspace 计数、line heads 与 warnings；比
+`repo_info + ws_quota + sync_status + ws_list` 少 3~4 次往返。
+
+应用卷迁移（旧 `repo_<hash>` → `/srv/repos/<name>`）见
+[`operations.md`](operations.md) 的“应用卷迁移”章节；`repo_register` 对同名
+旧路径默认返回 `repo_path_mismatch`，使用 `rebind=true` 或先 unregister。
 
 ## 注意
 

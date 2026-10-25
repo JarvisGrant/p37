@@ -588,11 +588,22 @@ func (s *Server) registerRepoLineRead() {
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
+			_, view, err := wsLifecycleOrError(rr, a.WsID, true)
+			if err != nil {
+				return nil, err
+			}
+			if view != nil {
+				if m, ok := view.(map[string]any); ok {
+					m["items"] = []any{}
+					m["files"] = []any{}
+				}
+				return view, nil
+			}
 			return rr.WSDiff(a.WsID)
 		})
 
 	s.register("ws_reap", "清理过期/孤儿工作区，默认 dry-run。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"older_than":{"type":"string"},"state":{"type":"string"},"include_orphan_dirs":{"type":"boolean"},"dry_run":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
+		`{"type":"object","properties":{"repo":{"type":"string"},"older_than":{"type":"string"},"state":{"type":"string"},"name_prefix":{"type":"string","description":"只过滤已符合回收条件的候选，不扩大回收范围"},"include_orphan_dirs":{"type":"boolean"},"dry_run":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
@@ -601,6 +612,7 @@ func (s *Server) registerRepoLineRead() {
 			var a struct {
 				OlderThan        string `json:"older_than"`
 				State            string `json:"state"`
+				NamePrefix       string `json:"name_prefix"`
 				IncludeOrphanDir bool   `json:"include_orphan_dirs"`
 				DryRun           *bool  `json:"dry_run"`
 			}
@@ -611,7 +623,7 @@ func (s *Server) registerRepoLineRead() {
 			if a.DryRun != nil {
 				dry = *a.DryRun
 			}
-			res, err := reapWorkspaces(rr, a.OlderThan, a.State, dry)
+			res, err := reapWorkspaces(rr, a.OlderThan, a.State, a.NamePrefix, dry)
 			if err != nil {
 				return nil, err
 			}
@@ -756,7 +768,7 @@ func dirSize(root string) (int64, error) {
 	return total, err
 }
 
-func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string]any, error) {
+func reapWorkspaces(r *repo.Repo, olderThan, state, namePrefix string, dry bool) (map[string]any, error) {
 	all, err := r.WS.List()
 	if err != nil {
 		return nil, err
@@ -782,6 +794,9 @@ func reapWorkspaces(r *repo.Repo, olderThan, state string, dry bool) (map[string
 	for i := range all {
 		w := &all[i]
 		if state != "" && w.State != state {
+			continue
+		}
+		if namePrefix != "" && !strings.HasPrefix(w.Name, namePrefix) {
 			continue
 		}
 		// 默认只回收已落地/隐藏的工作区；broken 是显式 state=broken 时的例外，

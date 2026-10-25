@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ var (
 	ErrRepoNotInitialized = errors.New("hub: repo 未初始化")
 	ErrRepoNameMismatch   = errors.New("hub: repo 名与 repo.json 不一致")
 	ErrRepoPathExists     = errors.New("hub: repo 路径或 id 已被注册")
+	ErrRepoPathMismatch   = errors.New("hub: repo 名已注册在旧路径")
 	ErrRepoIsMountpoint   = errors.New("hub: repo 路径是挂载点")
 	ErrRegistryBusy       = errors.New("hub: registry 忙")
 	ErrRepoLocked         = errors.New("hub: repo 锁被其它进程持有")
@@ -50,6 +52,22 @@ func (e *BusyError) Error() string {
 
 // Is 让 errors.Is(err, ErrRepoBusy) 成立。
 func (e *BusyError) Is(target error) bool { return target == ErrRepoBusy }
+
+// PathMismatchError 说明同名 repo 已经注册在另一个路径。
+type PathMismatchError struct {
+	Name          string `json:"name"`
+	ExistingID    string `json:"existing_id"`
+	ExistingPath  string `json:"existing_path"`
+	RequestedPath string `json:"requested_path"`
+	Reason        string `json:"reason"`
+}
+
+func (e *PathMismatchError) Error() string {
+	return fmt.Sprintf("%v: name=%s existing=%s requested=%s", ErrRepoPathMismatch,
+		e.Name, e.ExistingPath, e.RequestedPath)
+}
+
+func (e *PathMismatchError) Is(target error) bool { return target == ErrRepoPathMismatch }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
@@ -83,6 +101,9 @@ type Hub struct {
 
 	// mountProbe 可注入，单测不需要真实挂载点。默认使用 mountmgr.IsMountPoint。
 	mountProbe func(string) bool
+
+	// recoverWarnings 记录 registry 重建时的多候选选择，供启动日志展示。
+	recoverWarnings []string
 }
 
 // New 打开/创建 registry。root 通常是 /srv/repos。
@@ -518,6 +539,10 @@ func writeRepoMeta(path string, m repoMeta) error {
 }
 
 // recoverRegistry 在 registry 丢失时从各 repo 的 .p37/repo.json 重建。
+//
+// 同名候选可能同时存在（历史 repo_<hash> 与新应用卷 /<name>）。这里优先选
+// 目录名 == repo name 的候选；没有则按路径排序取第一个，并把冲突写进
+// RecoverWarnings，由 p37d 启动日志暴露，避免静默选错 L2 旧路径。
 func (h *Hub) recoverRegistry() {
 	var n int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM repo`).Scan(&n); err != nil || n > 0 {
@@ -527,6 +552,12 @@ func (h *Hub) recoverRegistry() {
 	if err != nil {
 		return
 	}
+	type cand struct {
+		path string
+		base string
+		meta repoMeta
+	}
+	byName := map[string][]cand{}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -540,8 +571,45 @@ func (h *Hub) recoverRegistry() {
 		if json.Unmarshal(b, &m) != nil || m.ID == "" || m.Name == "" {
 			continue
 		}
+		byName[m.Name] = append(byName[m.Name], cand{path: path, base: e.Name(), meta: m})
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seenID := map[string]string{}
+	for _, name := range names {
+		cs := byName[name]
+		sort.Slice(cs, func(i, j int) bool { return cs[i].path < cs[j].path })
+		chosen := cs[0]
+		for _, c := range cs {
+			if c.base == name {
+				chosen = c
+				break
+			}
+		}
+		if len(cs) > 1 {
+			paths := make([]string, 0, len(cs))
+			for _, c := range cs {
+				paths = append(paths, c.path)
+			}
+			h.recoverWarnings = append(h.recoverWarnings,
+				fmt.Sprintf("repo name %q 有多个候选，选择 %s；其它: %s",
+					name, chosen.path, strings.Join(paths, ", ")))
+		}
+		if prevName, ok := seenID[chosen.meta.ID]; ok && prevName != name {
+			h.recoverWarnings = append(h.recoverWarnings,
+				fmt.Sprintf("repo id %s 同时被 %q 与 %q 引用，保留 %q",
+					chosen.meta.ID, prevName, name, prevName))
+			continue
+		}
+		seenID[chosen.meta.ID] = name
 		_, _ = h.db.Exec(
 			`INSERT OR IGNORE INTO repo(id,name,path,default_line,created_ts)
-			 VALUES(?,?,?,?,?)`, m.ID, m.Name, path, m.DefaultLine, time.Now().UnixMilli())
+			 VALUES(?,?,?,?,?)`, chosen.meta.ID, name, chosen.path, chosen.meta.DefaultLine, time.Now().UnixMilli())
 	}
 }
+
+// RecoverWarnings 返回 registry 重建时的冲突/选择说明。
+func (h *Hub) RecoverWarnings() []string { return append([]string{}, h.recoverWarnings...) }

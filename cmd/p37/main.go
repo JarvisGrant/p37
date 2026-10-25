@@ -79,7 +79,7 @@ const usage = `p37 —— AI 原生版本控制系统
   p37 --root /srv/repos repo create <name> [--default-line main] [--json]
   p37 --root /srv/repos repo info <id|name> [--json]
   p37 --root /srv/repos repo delete <id|name> [--force]
-  p37 --root /srv/repos repo register <name> <path> [--init-if-missing] [--default-line main] [--json]
+  p37 --root /srv/repos repo register <name> <path> [--init-if-missing] [--default-line main] [--rebind] [--json]
   p37 --root /srv/repos repo unregister <id|name> [--force] [--json]
   p37 --root /srv/repos repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--json]
 

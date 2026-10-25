@@ -132,7 +132,7 @@ func TestToolsListed(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"repo_status", "version_log", "version_show", "version_diff",
+		"repo_status", "repo_health", "version_log", "version_show", "version_diff",
 		"lease_query", "blame",
 		"ws_open", "ws_ensure", "ws_list", "ws_info", "ws_lease", "ws_sync", "ws_drop", "ws_rebase",
 		"ws_quota",

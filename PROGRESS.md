@@ -40,6 +40,19 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.1：应用卷迁移安全与启动自检（2026-10-25）
+
+| 改动 | 落点 |
+|---|---|
+| `repo_path_mismatch` / `rebind` | `repo_register` 不再静默复用旧路径；只改 registry，不搬数据 |
+| `repo.root` 自愈 | `repo.Open` 检测实际路径并修 DB 元数据 |
+| registry 重建 | 同名候选优先 `basename == name`，冲突写启动日志；Scan skipped 可见 |
+| quota retry | 按 scope 给 `retryable/retry_after_ms/next_action` |
+| `ws_diff` | landed/dropped 返回 `already_landed,items=[]` |
+| `ws_reap name_prefix` | 按会话前缀过滤 eligible 候选 |
+| `repo_health` | 聚合 repo/quota/sync/workspace/line/persistence |
+| 文档 | name 会话级稳定、key turn 级；迁移命令 |
+
 ## v0.4.0：工作区协议补齐幂等与“消失语义”（2026-10-25）
 
 本版只加协议能力，不改仓库格式（仍 `format_ver=2`）：
@@ -645,7 +658,7 @@ PascalCase（`ID`、`ParentKind`、`Dir`…），与附录 K 的 snake_case 约�
 | `internal/mountmgr` | `overlay`（Linux，含 `ProbeOverlay` 自检）与 `copy`（跨平台）两种物化、基底 LRU、大小写冲突检测、标记文件在被跟踪树之外 |
 | `internal/repo` | init / import / **land 流水线**（可恢复的三段提交协议）/ revert / 状态 / 冲突视图 / 租约违规检测 |
 | `internal/meta` | stat_cache / workspace / op / conflict / resolution / journal 的读写；`CommitLand` / `FinishLand` / `RollbackLand` / `ReconcileLand` |
-| `internal/mcpsrv` | 62 个 MCP 工具 + 统一信封 + 错误码映射 |
+| `internal/mcpsrv` | 63 个 MCP 工具 + 统一信封 + 错误码映射 |
 | `internal/config` | 附录 B 的配置与默认值 |
 | `cmd/p37` | 运维 CLI（init/import/status/doctor/fsck/gc/migrate/ignore-check + 调试用版本操作） |
 | `cmd/p37d` | 常驻 daemon：flock、unix socket、可选 HTTP（强制 token）、优雅退出 |

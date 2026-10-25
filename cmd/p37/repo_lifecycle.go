@@ -20,12 +20,12 @@ import (
 // cmdRepoRegister 支持：
 //
 //	repo register <name> <path> [--init-if-missing] [--default-line main]
-//	                             [--force-rename] [--json]
+//	                             [--force-rename] [--rebind] [--json]
 func cmdRepoRegister(root string, args []string, out, errw io.Writer) int {
 	var (
-		name, path, defLine string
-		initMissing, rename bool
-		jsonOut             bool
+		name, path, defLine         string
+		initMissing, rename, rebind bool
+		jsonOut                     bool
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -36,6 +36,8 @@ func cmdRepoRegister(root string, args []string, out, errw io.Writer) int {
 			initMissing = true
 		case a == "--force-rename":
 			rename = true
+		case a == "--rebind":
+			rebind = true
 		case a == "--default-line" && i+1 < len(args):
 			defLine = args[i+1]
 			i++
@@ -61,7 +63,7 @@ func cmdRepoRegister(root string, args []string, out, errw io.Writer) int {
 	}
 	argsMap := map[string]any{
 		"repo": name, "path": path, "default_line": defLine,
-		"init_if_missing": initMissing, "force_rename": rename,
+		"init_if_missing": initMissing, "force_rename": rename, "rebind": rebind,
 	}
 	if data, routed, err := routeRepoCommand(root, "repo_register", argsMap); err != nil {
 		return repoFail(errw, err)
@@ -75,7 +77,7 @@ func cmdRepoRegister(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = h.Close() }()
 	e, err := h.RegisterPath(name, path, hub.RegisterOptions{
-		DefaultLine: defLine, InitIfMissing: initMissing, ForceRename: rename,
+		DefaultLine: defLine, InitIfMissing: initMissing, ForceRename: rename, Rebind: rebind,
 	})
 	if err != nil {
 		return repoFail(errw, err)

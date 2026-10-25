@@ -183,6 +183,11 @@ func Open(root string, opt Options) (*Repo, error) {
 		return nil, err
 	}
 	db.SetTombstoneTTL(opt.TombstoneTTL)
+	// 目录迁移/应用卷重挂后，repo.root 可能还是旧路径。以实际打开路径为准
+	// 自愈，避免 repo_info/persistence 继续展示 L2 旧路径。
+	if rp, err := db.GetRepo(); err == nil && rp.Root != "" && rp.Root != root {
+		_ = db.UpdateRepoRoot(root)
+	}
 
 	bs, err := cas.NewLocalFS(p37)
 	if err != nil {

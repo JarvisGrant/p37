@@ -249,6 +249,16 @@ func (d *DB) GetWSTombstone(wsID string, now int64) (*WSTombstone, error) {
 	return &t, nil
 }
 
+// CountWSTombstones 返回当前未过期的回收记录数。
+func (d *DB) CountWSTombstones(now int64) (int64, error) {
+	var n int64
+	err := d.sql.QueryRow(
+		`SELECT COUNT(*) FROM idempotency_result
+		  WHERE tool=? AND (expires_ts=0 OR expires_ts > ?)`,
+		KVToolWSTombstone, now).Scan(&n)
+	return n, err
+}
+
 // ListWSTombstones 返回 since 之后、未过期的回收记录。
 func (d *DB) ListWSTombstones(since, now int64, limit int) ([]WSTombstone, error) {
 	recs, err := d.ListKV(KVToolWSTombstone, since, limit)

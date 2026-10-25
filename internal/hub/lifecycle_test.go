@@ -157,9 +157,8 @@ func TestRegisterPathIdempotent(t *testing.T) {
 	if err != nil || e2.ID != e1.ID {
 		t.Fatalf("same path/name 幂等: %v %+v", err, e2)
 	}
-	e3, err := h.RegisterPath("a", p2, hub.RegisterOptions{})
-	if err != nil || e3.ID != e1.ID || e3.Path != p1 {
-		t.Fatalf("same name 幂等: %v %+v", err, e3)
+	if _, err := h.RegisterPath("a", p2, hub.RegisterOptions{}); !errors.Is(err, hub.ErrRepoPathMismatch) {
+		t.Fatalf("same name 不同路径必须显式 repo_path_mismatch: %v", err)
 	}
 	if _, err := h.RegisterPath("b", p1, hub.RegisterOptions{}); !errors.Is(err, hub.ErrRepoNameMismatch) {
 		t.Fatalf("same path 但 name 与 repo.json 冲突应 mismatch: %v", err)
@@ -538,4 +537,70 @@ func mustID(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestRegisterPathMismatchAndRebind(t *testing.T) {
+	h, root := newHub(t)
+	oldPath := filepath.Join(root, "repo_old")
+	externalRepo(t, oldPath, mountmgr.ModeCopy)
+	e, err := h.RegisterPath("app", oldPath, hub.RegisterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(root, "app")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同名不同路径：默认必须显式失败，不能静默继续用旧路径。
+	if _, err := h.RegisterPath("app", newPath, hub.RegisterOptions{}); !errors.Is(err, hub.ErrRepoPathMismatch) {
+		t.Fatalf("期望 repo_path_mismatch，实际: %v", err)
+	}
+	// 未 rebind 时 registry 仍指向旧路径。
+	if got, _ := h.Get("app"); got == nil || filepath.Clean(got.Path) != filepath.Clean(oldPath) {
+		t.Fatalf("registry 不应被静默改动: %+v", got)
+	}
+
+	got, err := h.RegisterPath("app", newPath, hub.RegisterOptions{Rebind: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(got.Path) != filepath.Clean(newPath) || got.ID != e.ID {
+		t.Fatalf("rebind entry=%+v want id=%s path=%s", got, e.ID, newPath)
+	}
+	r, err := h.Open("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	st, err := r.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(st.Root) != filepath.Clean(newPath) {
+		t.Fatalf("repo.root 未自愈: %s want %s", st.Root, newPath)
+	}
+}
+
+func TestRecoverRegistryPrefersMatchingBasename(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "repo_old")
+	newPath := filepath.Join(root, "app")
+	writeMeta(t, oldPath, "repo_0123456789abcdef0123456789abcdef", "app", "main")
+	writeMeta(t, newPath, "repo_0123456789abcdef0123456789abcdef", "app", "main")
+	h, err := hub.New(root, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close() }()
+	e, err := h.Get("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(e.Path) != filepath.Clean(newPath) {
+		t.Fatalf("恢复选了 %s，期望 %s", e.Path, newPath)
+	}
+	if len(h.RecoverWarnings()) == 0 {
+		t.Fatal("多候选应产生 RecoverWarnings")
+	}
 }

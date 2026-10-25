@@ -17,6 +17,7 @@ func (s *Server) registerRepoLifecycle() {
 		  "default_line":{"type":"string","default":"main"},
 		  "init_if_missing":{"type":"boolean","default":false},
 		  "force_rename":{"type":"boolean","default":false},
+		  "rebind":{"type":"boolean","default":false,"description":"同名已注册在旧路径时，把 registry 指针改到 path（不搬数据）"},
 		  "idempotency_key":{"type":"string"}
 		},"required":["repo","path"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -29,6 +30,7 @@ func (s *Server) registerRepoLifecycle() {
 				DefaultLine    string `json:"default_line"`
 				InitIfMissing  bool   `json:"init_if_missing"`
 				ForceRename    bool   `json:"force_rename"`
+				Rebind         bool   `json:"rebind"`
 				IdempotencyKey string `json:"idempotency_key"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
@@ -41,6 +43,7 @@ func (s *Server) registerRepoLifecycle() {
 				DefaultLine:   a.DefaultLine,
 				InitIfMissing: a.InitIfMissing,
 				ForceRename:   a.ForceRename,
+				Rebind:        a.Rebind,
 			})
 		})
 
