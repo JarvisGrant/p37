@@ -463,6 +463,7 @@ func (s *Server) registerWorkspace() {
 					"ws_id": w.ID, "name": w.Name, "state": state,
 					"parent_kind": pk, "parent_id": pid,
 					"base_version": w.BaseVersion.String(), "base_line": w.BaseLine,
+					"base_tree": w.BaseTree.String(), "ops_epoch": w.OpsEpoch,
 					"captured_ops": n, "conflict_count": c,
 					"materialize": w.Materialize, "dir": rr.WS.Dir(w.ID),
 					"created_ts": w.CreatedTS, "updated_ts": w.UpdatedTS,
@@ -528,6 +529,7 @@ func (s *Server) registerWorkspace() {
 			if err != nil {
 				return nil, err
 			}
+			rr.WS.FillRevisions(st)
 			return st, nil
 		})
 
@@ -868,18 +870,24 @@ func (s *Server) registerConflict() {
 func (s *Server) registerLand() {
 	s.register("land_preview",
 		"预演 land：target.kind=line|workspace；只读，冲突会持久化供 conflict_resolve。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"},"expected_parent_tree":{"type":"string"},"expected_child_tree":{"type":"string"},"expected_base_tree":{"type":"string"},"allowed_paths":{"type":"array","items":{"type":"string"}},"allowed_prefixes":{"type":"array","items":{"type":"string"}},"merge_policy":{"type":"string","enum":["auto","strict"]}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
 			var a struct {
-				WsID           string          `json:"ws_id"`
-				Target         json.RawMessage `json:"target"`
-				Fold           string          `json:"fold"`
-				ExpectedHead   string          `json:"expected_head"`
-				ExpectedWSTree string          `json:"expected_ws_tree"`
+				WsID               string          `json:"ws_id"`
+				Target             json.RawMessage `json:"target"`
+				Fold               string          `json:"fold"`
+				ExpectedHead       string          `json:"expected_head"`
+				ExpectedWSTree     string          `json:"expected_ws_tree"`
+				ExpectedParentTree string          `json:"expected_parent_tree"`
+				ExpectedChildTree  string          `json:"expected_child_tree"`
+				ExpectedBaseTree   string          `json:"expected_base_tree"`
+				AllowedPaths       []string        `json:"allowed_paths"`
+				AllowedPrefixes    []string        `json:"allowed_prefixes"`
+				MergePolicy        string          `json:"merge_policy"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
@@ -897,7 +905,15 @@ func (s *Server) registerLand() {
 				return view, nil
 			}
 			if kind == "workspace" {
-				res, err := rr.PreviewInto(a.WsID, id)
+				res, err := rr.PreviewIntoWithOptions(a.WsID, repo.LandIntoOptions{
+					ParentWsID:         id,
+					ExpectedParentTree: a.ExpectedParentTree,
+					ExpectedChildTree:  a.ExpectedChildTree,
+					ExpectedBaseTree:   a.ExpectedBaseTree,
+					AllowedPaths:       a.AllowedPaths,
+					AllowedPrefixes:    a.AllowedPrefixes,
+					StrictMerge:        a.MergePolicy == "strict",
+				})
 				if err != nil {
 					return nil, err
 				}
@@ -989,24 +1005,41 @@ func (s *Server) registerLand() {
 		})
 
 	s.register("ws_land_into",
-		"ws_land(target=workspace) 的显式别名。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"parent_ws_id":{"type":"string"},"expected_parent_tree":{"type":"string"},"preview_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","ws_id","parent_ws_id"],"additionalProperties":false}`,
+		"把子工作区并入直接父工作区（三方合并；默认只写子改动路径）。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"parent_ws_id":{"type":"string"},"expected_parent_tree":{"type":"string"},"expected_child_tree":{"type":"string"},"expected_base_tree":{"type":"string"},"allowed_paths":{"type":"array","items":{"type":"string"}},"allowed_prefixes":{"type":"array","items":{"type":"string"}},"merge_policy":{"type":"string","enum":["auto","strict"]},"preview":{"type":"boolean"},"preview_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","ws_id","parent_ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
 			var a struct {
-				WsID               string `json:"ws_id"`
-				ParentWsID         string `json:"parent_ws_id"`
-				ExpectedParentTree string `json:"expected_parent_tree"`
-				PreviewID          string `json:"preview_id"`
-				IdempotencyKey     string `json:"idempotency_key"`
+				WsID               string   `json:"ws_id"`
+				ParentWsID         string   `json:"parent_ws_id"`
+				ExpectedParentTree string   `json:"expected_parent_tree"`
+				ExpectedChildTree  string   `json:"expected_child_tree"`
+				ExpectedBaseTree   string   `json:"expected_base_tree"`
+				AllowedPaths       []string `json:"allowed_paths"`
+				AllowedPrefixes    []string `json:"allowed_prefixes"`
+				MergePolicy        string   `json:"merge_policy"`
+				Preview            bool     `json:"preview"`
+				PreviewID          string   `json:"preview_id"`
+				IdempotencyKey     string   `json:"idempotency_key"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
-			res, err := rr.LandInto(a.WsID, a.ParentWsID, a.ExpectedParentTree, a.PreviewID, a.IdempotencyKey)
+			res, err := rr.LandIntoWithOptions(a.WsID, repo.LandIntoOptions{
+				ParentWsID:         a.ParentWsID,
+				ExpectedParentTree: a.ExpectedParentTree,
+				ExpectedChildTree:  a.ExpectedChildTree,
+				ExpectedBaseTree:   a.ExpectedBaseTree,
+				PreviewID:          a.PreviewID,
+				IdempotencyKey:     a.IdempotencyKey,
+				Preview:            a.Preview,
+				AllowedPaths:       a.AllowedPaths,
+				AllowedPrefixes:    a.AllowedPrefixes,
+				StrictMerge:        a.MergePolicy == "strict",
+			})
 			if err != nil {
 				if view, ok, verr := landErrorView(rr, a.WsID, err); ok {
 					return view, verr
@@ -1014,6 +1047,28 @@ func (s *Server) registerLand() {
 				return nil, err
 			}
 			return landView2(rr, res), nil
+		})
+
+	s.register("land_history",
+		"读取最近 30 天的 land 幂等/审计记录（按时间倒序）。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["repo"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, err := s.repoFor(repoArg(raw))
+			if err != nil {
+				return nil, err
+			}
+			var a struct {
+				WsID  string `json:"ws_id"`
+				Limit int    `json:"limit"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			items, err := rr.LandHistory(a.WsID, a.Limit)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"items": items, "count": len(items)}, nil
 		})
 
 	s.register("version_revert",

@@ -197,6 +197,10 @@ func ensureColumnsTx(tx *sql.Tx) error {
 		{"workspace", "hidden", "INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0,1))"},
 		{"workspace", "kind", "TEXT NOT NULL DEFAULT 'user'"},
 		{"workspace", "landed_ts", "INTEGER NOT NULL DEFAULT 0"},
+		// ops_epoch 是 op-log 的单调版本号：每次 Sync 整体重建 op-log 都 +1。
+		// 有效树缓存与 land 预演令牌都以它为键；不能用 len(ops) 代替
+		// （同一批文件再改一次，op 条数不变，但内容变了）。
+		{"workspace", "ops_epoch", "INTEGER NOT NULL DEFAULT 0"},
 		{"landed_ws", "target_kind", "TEXT NOT NULL DEFAULT ''"},
 		{"landed_ws", "target_id", "TEXT NOT NULL DEFAULT ''"},
 		{"op", "mode_before", "INTEGER CHECK (mode_before IN (0,1))"},
@@ -385,7 +389,8 @@ var ddl = []string{
 	  mounted      INTEGER NOT NULL DEFAULT 0 CHECK (mounted IN (0,1)),
 	  created_ts   INTEGER NOT NULL,
 	  updated_ts   INTEGER NOT NULL,
-	  materialized_ts INTEGER NOT NULL DEFAULT 0
+	  materialized_ts INTEGER NOT NULL DEFAULT 0,
+	  ops_epoch    INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ws_parent ON workspace(parent_kind, parent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_ws_state  ON workspace(state)`,

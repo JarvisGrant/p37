@@ -11,7 +11,7 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**v0.4.1 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
+> 状态：**v0.4.2 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
 > `ws_land_into`、`line_merge`、历史读取、多 line 同步与恢复、应用卷热插拔
 > 生命周期均已接入。M1–M5 主体已在 P36 实例（Ubuntu 26.04 + ext4 +
 > OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；v0.3.x 的当前状态和
@@ -115,7 +115,7 @@ copy。copy 模式每个工作区是一份完整树，20GB L2 上需要更保守
 `config-overlay.toml` + `p37d-root-overlay.service` 走 OverlayFS。
 
 ```bash
-make release VERSION=0.4.1       # 发布 tar + sha256
+make release VERSION=0.4.2       # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 
@@ -212,7 +212,7 @@ conflict_resolve    →  逐条决策（take_lower / take_upper / both / custom�
 ## MCP 工具面
 
 完整参数、返回字段和错误码以 [`docs/mcp-contract.md`](docs/mcp-contract.md)
-为准；当前注册 63 个工具。
+为准；当前注册 64 个工具。
 
 | 分类 | 工具 |
 |---|---|
@@ -221,7 +221,7 @@ conflict_resolve    →  逐条决策（take_lower / take_upper / both / custom�
 | 应用卷生命周期 | `repo_register` `repo_unregister` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
 | 工作区 | `ws_open` `ws_ensure` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
-| 整合 | `land_preview` `ws_land` `ws_land_into` |
+| 整合 | `land_preview` `ws_land` `ws_land_into` `land_history` |
 | 冲突 | `conflict_list` `conflict_show` `conflict_resolve` `conflict_resolve_all` |
 | 历史读取 | `version_log` `version_show` `version_diff` `version_tree` `version_file` `version_archive` `version_compare` `version_graph` `version_revert` `blame` |
 | 同步 | `sync_status` `sync_prepare` `sync_list` `sync_show` `sync_push` `sync_fetch` `sync_pull` `sync_restore` `sync_prune` |

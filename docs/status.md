@@ -1,4 +1,4 @@
-# 当前状态（v0.4.1）
+# 当前状态（v0.4.2）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,15 +7,23 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.1` |
+| 发布版本 | `v0.4.2` |
 | 仓库格式 | `format_ver = 2` |
-| MCP 工具 | 63 个（以 `internal/mcpsrv` 注册为准） |
+| MCP 工具 | 64 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
 | 测试 | `go test ./...` 全绿；`make cross` 通过 |
 
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.4.2 重点（不改 `format_ver`）**：修复 `ws_land_into` 的有效树缓存一致性
+（`workspace.ops_epoch` + `ReplaceOps` 原子替换），落盘改为「只写子改动路径 +
+写前逐路径校验」，并新增 `base_tree/parent_tree/applied_paths/*_changed_paths`
+等结构化字段、`expected_parent_tree|child_tree|base_tree` 乐观锁、
+`allowed_paths` 越界拦截与 `merge_policy=strict`。详见
+[`../PROGRESS.md`](../PROGRESS.md) 的 v0.4.2 条目与
+[`mcp-contract.md`](mcp-contract.md)。`ops_epoch` 是幂等补列，旧库打开时自动添加。
 
 ## 里程碑
 

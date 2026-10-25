@@ -40,6 +40,34 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.2：land_into 一致性与三方合并可观测（2026-10-25）
+
+会话 #90 的复盘：子会话 land 后主管的测试修正被回退。根因不是合并算法，而是
+**有效树缓存用 `len(ops)` 当版本号且 `Sync` 不失效缓存**——同一批文件再改一次
+时 op 条数不变，`EffectiveTree` 命中旧树，`ApplyTree` 又把旧树整棵写回父目录。
+
+| 改动 | 落点 |
+|---|---|
+| 有效树缓存一致性 | `workspace.ops_epoch` 单调递增；`meta.ReplaceOps` 同一事务替换 op + 推进 epoch + 删除缓存 |
+| 工作区读写锁 | `workspace.Manager.wsLocks`；`Sync`/`Rebase`/`Drop`/`Apply*` 写锁，`EffectiveTree` 读锁 |
+| 只写子改动路径 | `ApplyTreeDelta` 复用 `applyDelta`；land 不再整树重写父目录 |
+| 写前逐路径校验 | `VerifyBeforeWrite`；失配返回 `parent_moved` + 路径，不写盘 |
+| 不变量护栏 | `applied_paths ⊆ child_changed`，否则 `land_invariant_violation` |
+| 采集可见性 | `ws_land_into` 用 `SyncStrict`（ForceHash）；`LastUnstable` 非空重试后返回 `ws_unstable` |
+| 三方坐标与分类 | `base_tree/child_tree/parent_tree_before/after`、`applied_paths`、`*_changed_paths`、`paths[]` |
+| 乐观锁 | `expected_parent_tree/child_tree/base_tree`；失配 `target_moved` + detail |
+| 工作卡范围 | `allowed_paths/allowed_prefixes`，越界 `path_not_allowed` |
+| 严格合并 | `merge_policy=strict`：同路径双改强制冲突 |
+| 暴露 revision | `ws_open/ws_info/ws_list` 返回 `base_tree/effective_tree/ops_epoch/parent_tree` |
+| 幂等 | land 在拿到 `landMu` 后二次检查 idem/landed，并发同 key 可重放 |
+
+验收：`TestEffectiveTreeCacheInvalidatedOnSameOpCount`、
+`TestLandIntoDoesNotRevertParentEdit`、`TestLandIntoPreservesParentOnlyChanges`、
+`TestLandIntoDisjointHunksAutoMerge`、`TestLandIntoSameLineConflict`、
+`TestLandIntoStrictMergeConflictsOnBothChanged`、`TestLandIntoAllowedPaths`、
+`TestLandIntoExpectedParentTreeMoved`、`TestLandIntoIdempotentReplay`、
+`TestVerifyBeforeWriteDetectsConcurrentEdit`、`TestLandIntoAPIRevisionFields`。
+
 ## v0.4.1：应用卷迁移安全与启动自检（2026-10-25）
 
 | 改动 | 落点 |

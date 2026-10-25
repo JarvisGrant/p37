@@ -344,7 +344,37 @@ func classify(err error) (code, msg string, detail any) {
 	case errors.Is(err, repo.ErrTargetNotAncestor):
 		return "target_not_ancestor", err.Error(), nil
 	case errors.Is(err, repo.ErrTargetMoved):
+		var te *repo.TokenMismatchError
+		if errors.As(err, &te) {
+			return "target_moved", err.Error(), map[string]any{
+				"field": te.Field, "expected": te.Expected, "current": te.Current,
+			}
+		}
 		return "target_moved", err.Error(), nil
+	case errors.Is(err, repo.ErrParentMoved):
+		var pe *repo.ParentMovedError
+		if errors.As(err, &pe) {
+			return "parent_moved", err.Error(), map[string]any{
+				"ws_id": pe.WSID, "paths": pe.Paths, "expected_parent_tree": pe.Expected,
+			}
+		}
+		return "parent_moved", err.Error(), nil
+	case errors.Is(err, repo.ErrPathNotAllowed):
+		var pe *repo.PathNotAllowedError
+		if errors.As(err, &pe) {
+			return "path_not_allowed", err.Error(), map[string]any{"paths": pe.Paths}
+		}
+		return "path_not_allowed", err.Error(), nil
+	case errors.Is(err, repo.ErrWSUnstable):
+		var ue *repo.UnstableWSError
+		if errors.As(err, &ue) {
+			return "ws_unstable", err.Error(), map[string]any{
+				"ws_id": ue.WSID, "paths": ue.Paths, "retryable": true,
+			}
+		}
+		return "ws_unstable", err.Error(), nil
+	case errors.Is(err, repo.ErrLandInvariant):
+		return "land_invariant_violation", err.Error(), nil
 	case errors.Is(err, repo.ErrSourceMoved):
 		return "source_moved", err.Error(), nil
 	case errors.Is(err, repo.ErrMergeBaseAmbiguous), errors.Is(err, meta.ErrMergeBaseAmbiguous):

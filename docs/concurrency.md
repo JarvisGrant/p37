@@ -11,6 +11,7 @@
 | per-repo flock | `internal/repolock` | daemon 生命周期内独占 `<repo>/.p37/lock`；CLI `gc` 用同一把锁拒绝在线 GC |
 | `Repo.landMu` | `internal/repo/repo.go` | 整条 land 流水线、revert、line reset/delete/merge、`ws_land_into`、GC、pack；**这是 repo 级的粗粒度写串行化** |
 | `Repo.landSem` | `internal/repo/repo.go` | 限制同时进入 land 的请求数；满时返回 `land_queue_full`。它只是准入限流，不提供正确性保证 |
+| `workspace.Manager.wsLocks` | `internal/workspace/locks.go` | 按 `ws_id` 的读写锁：`Sync`/`Rebase`/`Drop`/`Apply*` 取写锁，`EffectiveTree` 取读锁；`ws_land_into` 在合并/校验/落盘期间持子+父写锁 |
 | `Repo.syncMu` | `internal/repo/repo.go` | 同一 repo 的 `sync_prepare/push/fetch/pull/restore/prune` 互斥；并发返回 `sync_in_progress` |
 | `meta.DB.wmu` | `internal/meta/db.go` | SQLite 写事务串行化；WAL 下读操作可并发 |
 | `workspace.Manager.openMu` | `internal/workspace/workspace.go` | 工作区配额检查与名额预留，避免 open 的 TOCTOU |
@@ -23,7 +24,11 @@
 Hub.mu
   → per-repo flock（打开 repo 时）
     → Repo.landMu（写/整合/GC）
-      → meta.DB.wmu（SQLite 写事务）
+      → workspace wsLock(子) → wsLock(父)
+        → meta.DB.wmu（SQLite 写事务）
+
+workspace wsLock(单工作区)（Sync/Rebase/Drop）
+  → meta.DB.wmu
 
 Repo.syncMu（同步工具）
   → Repo.landMu（prepare 需要读稳定快照时）
@@ -38,11 +43,17 @@ Repo.syncMu（同步工具）
 - `landMu` 覆盖所有会推进 line head、删除版本/对象、或改变整合结果的操作：
   `ws_land`、`ws_land_into`、`version_revert`、`line_reset`、`line_delete`、
   `line_merge`、`gc`、`pack`。
-- `ws_sync` / `ws_diff` / `ws_rebase` / `ws_drop` 不取 `landMu`，依靠 SQLite
-  事务和状态检查保证一致性。
-- **没有按工作区的互斥锁，也没有“按 ws_id 升序取多把锁”的实现。** 调用方不要
-  对同一工作区并发执行 `ws_sync` 与 `ws_land`；需要并发时用不同工作区。
-- lease 是建议性路径声明，不是锁；`lease_query` 只用于改动前自查。
+- `wsLocks` 只在本进程内，保护「op-log ↔ 有效树 ↔ 工作区目录」三者的一致性：
+  `Sync` 整体替换 op-log（同一事务推进 `ops_epoch` 并清缓存），`EffectiveTree`
+  读 op 并写缓存，两者必须互斥，否则会把旧树写回新 epoch 的缓存。
+- 同时持两把 ws 锁时，方向固定为**子 → 父**；工作区层级无环，不会死锁。
+- 不要在同一 goroutine 里先持写锁再调用公开的 `Sync`/`EffectiveTree`（RWMutex
+  不可重入）；持锁代码必须使用 `SyncLocked`/`EffectiveTreeLocked`/`ApplyTreeDeltaLocked`。
+- `ws_sync` / `ws_diff` / `ws_rebase` / `ws_drop` 不取 `landMu`，但取各自工作区的
+  ws 锁，因此不会与 land 的合并窗口交错。
+- **没有按工作区的跨进程锁**；agent 直接写工作区文件不经过任何锁。`ws_land_into`
+  用「写前逐路径内容校验 + 只写子改动路径」把这类并发的影响限制在最小范围，
+  并在 `post_apply_mismatch` 里如实报告。
 
 ## 3. 跨进程
 

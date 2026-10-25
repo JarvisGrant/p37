@@ -24,6 +24,16 @@ type FileStat struct {
 	DestPath string `json:"dest_path,omitempty"`
 }
 
+// PathState 是路径级三方分类，供 P34 在落地前做审计/拦截。
+type PathState struct {
+	Path   string `json:"path"`
+	State  string `json:"state"` // child_only | parent_only | both_changed | both_auto_merged | conflict
+	Base   string `json:"base,omitempty"`
+	Parent string `json:"parent,omitempty"`
+	Child  string `json:"child,omitempty"`
+	Result string `json:"result,omitempty"`
+}
+
 // LandResult 是 land / land_preview 的结果。
 type LandResult struct {
 	OpsCount  int           `json:"ops_count"`
@@ -35,10 +45,36 @@ type LandResult struct {
 	AutoMerged int     `json:"auto_merged"`
 	VersionID  hash.ID `json:"version_id,omitempty"`
 
-	TargetHead      hash.ID `json:"target_head,omitempty"`
-	WSTree          hash.ID `json:"ws_tree,omitempty"`
-	WSOpsEpoch      int64   `json:"ws_ops_epoch,omitempty"`
-	PreviewID       string  `json:"preview_id,omitempty"`
+	TargetHead hash.ID `json:"target_head,omitempty"`
+	WSTree     hash.ID `json:"ws_tree,omitempty"`
+	WSOpsEpoch int64   `json:"ws_ops_epoch,omitempty"`
+	PreviewID  string  `json:"preview_id,omitempty"`
+
+	// --- 版本与路径级结构化结果（land_into / land_preview） ---------------
+	//
+	// BaseTree 是子工作区创建时冻结的基准（不可变，除非显式 ws_rebase）。
+	// ParentTreeBefore/After 是本次 land 前后父工作区的有效树。
+	// 这三者构成真正的三方合并坐标；调用方不需要再猜「父是不是变了」。
+	BaseTree         hash.ID `json:"base_tree,omitempty"`
+	ChildTree        hash.ID `json:"child_tree,omitempty"`
+	ParentTreeBefore hash.ID `json:"parent_tree_before,omitempty"`
+	ParentTreeAfter  hash.ID `json:"parent_tree_after,omitempty"`
+
+	AppliedPaths           []string    `json:"applied_paths,omitempty"`
+	ChildOnlyChangedPaths  []string    `json:"child_only_changed_paths,omitempty"`
+	ParentOnlyChangedPaths []string    `json:"parent_only_changed_paths,omitempty"`
+	BothChangedPaths       []string    `json:"both_changed_paths,omitempty"`
+	AutoMergedPaths        []string    `json:"auto_merged_paths,omitempty"`
+	ConflictPaths          []string    `json:"conflict_paths,omitempty"`
+	OutOfScopePaths        []string    `json:"out_of_scope_paths,omitempty"`
+	Paths                  []PathState `json:"paths,omitempty"`
+	// AppliedPaths 的语义：结果树相对父树的差异路径。
+	// preview 时是「计划写入」，land 成功时是「实际写入」，冲突时仅供定位。
+	// 不变量：它永远是 child_changed 的子集。
+	// PostApplyMismatch 是「落盘并重新采集后，父有效树仍与重放结果不同」的路径。
+	// 典型原因：agent 在 land 窗口里直接写了文件。P37 不谎报成功。
+	PostApplyMismatch []string `json:"post_apply_mismatch,omitempty"`
+
 	AlreadyLanded   bool    `json:"already_landed,omitempty"`
 	Replayed        bool    `json:"replayed,omitempty"`
 	State           string  `json:"state,omitempty"`

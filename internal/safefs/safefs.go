@@ -113,7 +113,15 @@ func WriteFileUnder(root, rel string, data []byte, mode os.FileMode) error {
 			return err
 		}
 	}
-	return os.WriteFile(p, data, mode)
+	if err := os.WriteFile(p, data, mode); err != nil {
+		return err
+	}
+	// os.WriteFile 的 perm 只对新建文件生效；已存在文件的权限变更（例如
+	// 子会话 chmod +x）必须显式 chmod，否则 land 会静默丢掉权限位。
+	if fi, err := os.Stat(p); err == nil && fi.Mode().Perm() != mode.Perm() {
+		return os.Chmod(p, mode)
+	}
+	return nil
 }
 
 // SymlinkUnder 在 root 之下安全地创建一个符号链接（目标内容原样写入）。

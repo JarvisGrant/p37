@@ -1,7 +1,7 @@
-# p37 MCP 契约（v0.4.1 / format_ver=2）
+# p37 MCP 契约（v0.4.2 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
-`internal/mcpsrv` 的注册为准；当前注册 63 个工具。
+`internal/mcpsrv` 的注册为准；当前注册 64 个工具。
 
 ## 统一信封
 
@@ -57,7 +57,7 @@
 | 应用卷生命周期 | `repo_register` `repo_unregister` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
 | 工作区 | `ws_open` `ws_ensure` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
-| 整合 | `land_preview` `ws_land` `ws_land_into` |
+| 整合 | `land_preview` `ws_land` `ws_land_into` `land_history` |
 | 冲突 | `conflict_list` `conflict_show` `conflict_resolve` `conflict_resolve_all` |
 | 历史读取 | `version_log` `version_show` `version_diff` `version_tree` `version_file` `version_archive` `version_compare` `version_graph` `version_revert` `blame` |
 | 同步 | `sync_status` `sync_prepare` `sync_list` `sync_show` `sync_push` `sync_fetch` `sync_pull` `sync_restore` `sync_prune` |
@@ -94,7 +94,7 @@
 
 ```json
 {
-  "p37_version": "0.4.1",
+  "p37_version": "0.4.2",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -263,9 +263,9 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `ws_open` | `parent?`, `name?`, `task?`/`task_desc?`, `leases?`, `materialize?` | 打开并物化工作区；返回 `ws_id/dir/base_line/base_version/materialize/state` |
+| `ws_open` | `parent?`, `name?`, `task?`/`task_desc?`, `leases?`, `materialize?` | 打开并物化工作区；返回 `ws_id/dir/base_line/base_version/base_tree/ops_epoch/materialize/state` |
 | `ws_list` | `include_hidden?` | 默认不含隐藏 merge/preview |
-| `ws_info` | `ws_id` | base_line/base_version/parent/dirty/ops/conflicts/disk/state/base_stale |
+| `ws_info` | `ws_id` | base_line/base_version/base_tree/effective_tree/ops_epoch/parent_tree/parent/dirty/ops/conflicts/disk/state/base_stale |
 | `ws_sync` | `ws_id` | 采集磁盘变更；见下方返回字段 |
 | `ws_diff` | `ws_id` | 文件级 A/M/D/R/C；已 land 返回 `ok=true,state=already_landed,items=[]` |
 | `ws_rebase` | `ws_id`, `to?` | `to` = version/line/workspace；默认父 |
@@ -275,6 +275,18 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
 | `lease_query` | `paths?` | 查询若干路径上的租约 |
 | `ws_reap` | `older_than?`, `state?`, `name_prefix?`, `include_orphan_dirs?`, `dry_run?` | 默认 dry-run；返回 `candidates[]/skipped[]`，有 lease/active 不删；`name_prefix` 只过滤 eligible 候选 |
 | `ws_disk_usage` | — | 按工作区统计磁盘占用 |
+
+### revision 字段（v0.4.2 起）
+
+- `base_tree`：子工作区创建时冻结的不可变基准树。**workspace 父的子工作区必须
+  用它做合并坐标**；`base_version` 是父的 line 基线，不能替代。
+- `effective_tree`：当前 op-log 对应的树（只读计算，不触发采集）。
+- `ops_epoch`：op-log 的单调版本号；内容没变时不会被周期扫描刷新，可以直接
+  当乐观锁令牌。
+- `parent_tree`：仅子工作区有，父工作区的当前有效树（不触发采集；需要「磁盘
+  最新」时先 `ws_sync(parent)` 或直接用 `land_preview` 的 `parent_tree_before`）。
+- `parent_tree_error`：父工作区有未决冲突/不可读时的原因，此时 `parent_tree`
+  为空。
 
 ### ws_info / ws_sync / land_preview 对已回收工作区
 
@@ -374,12 +386,19 @@ resolution。
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `land_preview` | `ws_id`, `target?`, `fold?`, `expected_head?`, `expected_ws_tree?` | 纯只读预演；冲突会持久化供 `conflict_resolve` |
+| `land_preview` | `ws_id`, `target?`, `fold?`, `expected_head?`, `expected_ws_tree?`, `expected_parent_tree?`, `expected_child_tree?`, `expected_base_tree?`, `allowed_paths?`, `allowed_prefixes?`, `merge_policy?` | 纯只读预演；workspace 目标会列出版本坐标与路径分类；冲突会持久化供 `conflict_resolve` |
 | `ws_land` | `ws_id`, `target?`, `fold?`, `drop_workspace?`, `expected_head?`, `expected_ws_tree?`, `expected_ws_ops_epoch?`, `expected_parent_tree?`, `preview_id?`, `idempotency_key?`, `task?` | 落地到 line 或父工作区 |
-| `ws_land_into` | `ws_id`, `parent_ws_id`, `expected_parent_tree?`, `preview_id?`, `idempotency_key?` | `ws_land(target=workspace)` 的显式别名 |
+| `ws_land_into` | `ws_id`, `parent_ws_id`, `expected_parent_tree?`, `expected_child_tree?`, `expected_base_tree?`, `allowed_paths?`, `allowed_prefixes?`, `merge_policy?`(`auto`\|`strict`), `preview?`, `preview_id?`, `idempotency_key?` | 子工作区并入直接父（三方合并） |
+| `land_history` | `ws_id?`, `limit?` | 读取最近 30 天 land 审计记录 |
 
 `fold` = `self`（默认）或 `stack`。`target` 省略时落到 default line；
 `target.kind=workspace` 时等价于 `ws_land_into`。
+
+**合并语义（v0.4.2 起）**：以 `child.base_tree` 为 base、当前父有效树为
+parent、当前子有效树为 child 做三方重放。只把 `child` 相对 base 的真实改动
+写进父目录；父在子运行期间改过、子没改的路径原样保留。同一路径双方都改时：
+`merge_policy=auto`（默认）按 hunk 自动合并并在 `auto_merged_paths` 里报告，
+放不下则冲突；`strict` 直接出冲突、不自动选边。
 
 ### 整合返回
 
@@ -395,15 +414,38 @@ resolution。
   "preview_id": "...",
   "already_landed": false,
   "conflicts": [],
+
+  "base_tree": "子工作区创建时冻结的基准树",
+  "child_tree": "本次 land 的子有效树",
+  "parent_tree_before": "合并前父有效树（= preview 的 target_head）",
+  "parent_tree_after": "落盘并重新采集后的父有效树",
+  "applied_paths": ["src/b.ts"],
+  "child_only_changed_paths": ["src/b.ts"],
+  "parent_only_changed_paths": ["tests/x.test.ts"],
+  "both_changed_paths": ["src/a.ts"],
+  "auto_merged_paths": ["src/a.ts"],
+  "conflict_paths": [],
+  "out_of_scope_paths": [],
+  "paths": [
+    {"path":"src/a.ts","state":"both_auto_merged",
+     "base":"…","parent":"…","child":"…","result":"…"}
+  ],
+  "post_apply_mismatch": [],
+
   "version_id": "可选",
   "state": "可选",
   "warnings": []
 }
 ```
 
+`paths[].state` ∈ `child_only|parent_only|both_changed|both_auto_merged|conflict`。
+`parent_only_changed_paths` 就是「子会话没改、但父工作区已经变化」的清单；
+`applied_paths` 是结果树相对父树的差异路径（preview=计划写入，land 成功=实际
+写入，冲突时仅供定位），保证是 `child_only + both_*` 的子集。
+
 冲突时 `can_land=false`、`state="conflict"`，冲突挂在被 land 的工作区上；
 `preview_id` 等于该工作区 id（历史 `mg_*` preview 仍接受）。冲突解决后带
-最新 `expected_head`/`expected_parent_tree` 重试，不要每次新建工作区。
+最新 `expected_parent_tree` 重试，不要每次新建工作区。
 
 ### 会话与子任务
 
@@ -420,14 +462,30 @@ ws_land(ws, target={kind:"line", id:"p34/session/<id>"},
 
 ```text
 child = ws_open(parent={kind:"workspace", id:parent_ws})
-r = ws_land_into(child, parent_ws)
+# 记录 child.base_tree 与 parent_ws；它们是本次任务的不可变血缘坐标。
+r = ws_land_into(child, parent_ws)           # 默认 auto
 if r.state == "conflict" or !r.can_land:
     conflict_list(ws_id=child)
     conflict_resolve_all(ws_id=child, policy="prefer_upper")
     r = ws_land_into(child, parent_ws,
-                     expected_parent_tree=r.target_head,
+                     expected_parent_tree=r.parent_tree_before,
                      preview_id=r.preview_id,
                      idempotency_key=<同一个 key>)
+```
+
+推荐的生产调用（先 preview 拿父树令牌，再 land；工作卡范围交给 P37 兜底）：
+
+```text
+p = land_preview(child, target={kind:"workspace", id:parent_ws},
+                 allowed_prefixes=<工作卡目录>)
+r = ws_land_into(child, parent_ws,
+                 expected_parent_tree=p.parent_tree_before,
+                 expected_base_tree=child_base_tree,
+                 allowed_prefixes=<工作卡目录>,
+                 merge_policy="strict",
+                 idempotency_key=<child task id>)
+# 遇到 target_moved / parent_moved：重读 p 后重试；遇到 path_not_allowed：
+# 不要重试，直接把 out_of_scope_paths 交给主管裁决。
 ```
 
 父工作区有冲突/未落地的子工作区时，`ws_land(fold=self)` 返回
@@ -443,7 +501,7 @@ if r.state == "conflict" or !r.can_land:
 {
   "repo": {"id":"repo_...","name":"my-app","path":"/srv/repos/my-app",
            "available":true,"degraded":false,"mount_point":true},
-  "p37_version": "0.4.1",
+  "p37_version": "0.4.2",
   "format_ver": 2,
   "persistence": {"durable": false, "durable_scope": "local_only",
                   "pending_packages": 0, "ahead": 0, "behind": 0, "diverged": false},
@@ -513,6 +571,7 @@ repo_name_mismatch repo_path_exists repo_is_mountpoint
 registry_busy
 line_not_found line_exists line_protected
 target_invalid target_moved source_moved target_not_ancestor
+parent_moved path_not_allowed ws_unstable land_invariant_violation
 merge_base_ambiguous merge_expired preview_expired
 ws_not_found ws_gone ws_not_mounted ws_broken ws_busy ws_has_active_children
 repo_path_mismatch
@@ -555,3 +614,13 @@ invalid_argument internal not_found
 - `ws_land` / `ws_land_into` 返回 `durable=false` 与
   `durability.local_committed=true`：本地真相源已提交，但跨 VM 仍需
   `sync_push`（`durable=true`）。
+- `target_moved` 的 `detail` 带 `field/expected/current`（字段可能是
+  `parent_tree` / `child_tree` / `base_tree`）：调用方重读最新 revision 后重试。
+- `parent_moved` 是「读树之后、写盘之前」的最终校验失败，`detail.paths` 列出
+  被并发改动的路径；P37 一个字节都没写，重试是安全的。
+- `path_not_allowed` 表示子工作区改动了 `allowed_paths/allowed_prefixes` 之外
+  的路径，`detail.paths` 是越界清单。
+- `ws_unstable` 表示采集时有文件正在被写（`detail.paths`），
+  `detail.retryable=true`；这不是冲突，稍后重试即可。
+- `land_invariant_violation` 是内部护栏：合并结果触碰了子工作区没改的路径，
+  直接拒绝而不是写盘。遇到它请带上完整结果反馈给 P37。

@@ -1,4 +1,4 @@
-# 验收清单（v0.4.1 / format_ver=2）
+# 验收清单（v0.4.2 / format_ver=2）
 
 ## 自动化
 
@@ -36,6 +36,10 @@ P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
 | 2 | 命名线创建、land、main 不变、log/compare/graph、reset/protect | `internal/repo/line_v2_test.go`（`TestLineSessionLoopAndMerge`、`TestResetAndProtect`、`TestLineCompareAndGraph`） |
 | 3 | `ws_open(parent=line)` + `ws_land(target=line)` + 销毁重开 | `TestLineSessionLoopAndMerge`、`TestMultiRepoMCPLineLoop` |
 | 4 | 子任务 `ws_land_into`（含删除/编辑冲突） | `TestLandIntoWorkspace`、`TestLandIntoDeleteVsEditConflict` |
+| 4a | **父改动不被子会话回退 / 有效树缓存 / 只写子改动路径** | `TestLandIntoDoesNotRevertParentEdit`、`TestEffectiveTreeCacheInvalidatedOnSameOpCount`、`TestLandIntoPreservesParentOnlyChanges` |
+| 4b | 同文件不同位置自动合并；同一行冲突；strict 策略 | `TestLandIntoDisjointHunksAutoMerge`、`TestLandIntoSameLineConflict`、`TestLandIntoStrictMergeConflictsOnBothChanged` |
+| 4c | 越界路径、expected_parent_tree、幂等重放 | `TestLandIntoAllowedPaths`、`TestLandIntoExpectedParentTreeMoved`、`TestLandIntoIdempotentReplay` |
+| 4d | 写前逐路径校验 / MCP 字段与错误码 | `TestVerifyBeforeWriteDetectsConcurrentEdit`、`TestLandIntoAPIRevisionFields`、`TestLandIntoAPIParentMoved` |
 | 5 | 会话 line 两回合 + 应用线合并 | `TestLineSessionLoopAndMerge` |
 | 6 | `line_merge` 双亲版本/冲突解决/幂等 | `TestMergeConflictPreviewAndResolve`、`TestLineMergeIdempotent` |
 | 7 | `version_tree/file/archive`、路径穿越、二进制 | `TestVersionReadAPIs`、`TestExportTree` |
@@ -55,7 +59,7 @@ P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
 | 21 | `repo_delete` 挂载点/root 自身/root 外路径保护 | `TestDeleteMountpointGuard`、`TestDeleteRejectsOutsideAndRoot`、`TestRepoDeleteMountpointMCP` |
 | 22 | `repo_export` 同步/异步、流式写入、export_root、目录非空、大文件 | `internal/repo/export_test.go`、`internal/mcpsrv/export_test.go` |
 
-## v0.4.1 工作区协议验收
+## 工作区协议验收（v0.4.1 起）
 
 ```bash
 go test ./internal/mcpsrv -run 'TestWS(EnsureConcurrent|OpenIdempotencyConcurrent|GoneLandReplay|GoneAbandonedAndTombstoneList|LandDurability|PersistenceReopen|QuotaAndReapObservability|ErrorContext)' -count=1 -v
@@ -64,6 +68,25 @@ P37_BIN=./p37 bash packaging/p36/ci/ws-contract.sh
 
 脚本用 5 个独立进程并发 `ws-ensure`，断言只产生 1 个工作区、5 个响应
 `ws_id` 相同；再并发 ensure 不变；drop 后 tombstone 可查。
+
+## v0.4.2 land_into 一致性验收
+
+```bash
+go test ./internal/repo -run 'TestLandInto|TestEffectiveTreeCache' -count=1 -v
+go test ./internal/workspace -run 'TestVerifyBeforeWrite|TestApplyDelta' -count=1 -v
+go test ./internal/mcpsrv -run 'TestLandIntoAPI' -count=1 -v
+```
+
+真机场景建议按 `docs/p34-integration.md` §5 的调用序列跑一遍，并额外断言：
+
+- 父写 `A=v1` → 派子只改 `B` → 父改 `A=v2` → land 后 `A` 仍是 `v2`；
+- 父子同文件不同位置 → `both_changed_paths` + 明确结果；
+- 父子同一行 → `state=conflict`，父目录哈希不变；
+- 子越界改 `C` → `land_preview.out_of_scope_paths` 含 `C`，land 返回
+  `path_not_allowed`；
+- 重复 landing 同一 `idempotency_key` → `replayed=true`；
+- preview 后父再改 → 带旧 `expected_parent_tree` 的 land 返回
+  `target_moved`，父目录不变。
 
 ## v0.3.x 真机补充（建议在 P36 上手工走一遍）
 

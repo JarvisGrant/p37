@@ -244,3 +244,47 @@ func readFile(t *testing.T, p string) string {
 	}
 	return string(b)
 }
+
+// TestVerifyBeforeWriteDetectsConcurrentEdit 覆盖 land_into 写盘前的乐观校验：
+// 磁盘内容一旦偏离 before 树，必须返回具体路径，绝不能覆盖。
+func TestVerifyBeforeWriteDetectsConcurrentEdit(t *testing.T) {
+	e := newDeltaEnv(t)
+	src := filepath.Join(e.root, "verify-before")
+	e.writeDir(src, "a.txt", "a-v1\n")
+	e.writeDir(src, "sub/b.txt", "b\n")
+	before := e.buildTree(src)
+
+	wsID := "ws_verifybefore01"
+	dir := e.mm.WorkspaceDir(wsID)
+	for _, p := range []string{"a.txt", "sub/b.txt"} {
+		b, err := os.ReadFile(filepath.Join(src, p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, p), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mism, err := e.m.VerifyBeforeWrite(wsID, before.ID(), []string{"a.txt", "sub/b.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mism) != 0 {
+		t.Fatalf("未改动时不应有 mismatch: %v", mism)
+	}
+
+	// 模拟 agent 在「读树之后、写盘之前」直接改了文件。
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a-v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mism, err = e.m.VerifyBeforeWrite(wsID, before.ID(), []string{"a.txt", "sub/b.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mism) != 1 || mism[0] != "a.txt" {
+		t.Fatalf("并发修改应只报 a.txt，得到 %v", mism)
+	}
+}

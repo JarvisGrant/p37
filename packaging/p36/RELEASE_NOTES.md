@@ -1,4 +1,4 @@
-# p37 @VERSION@ — 应用卷迁移安全与自检聚合
+# p37 @VERSION@ — land_into 一致性修复
 
 ## 发布物
 
@@ -19,7 +19,29 @@
 }
 ```
 
-## 本版重点（v0.4.1）
+## 本版重点（v0.4.2）
+
+- **修复子会话 land 回退父改动**：`ws_effective_tree` 缓存原来用 `len(ops)`
+  当版本号且 `Sync` 不失效缓存；同一批文件再改一次时命中旧树，`ApplyTree`
+  再把旧树整棵写回父目录。现在 op-log 替换与 `ops_epoch+1`、缓存删除在同一
+  事务完成（`meta.ReplaceOps`），并按工作区加读写锁。
+- **land 只写子改动路径**：`ws_land_into` 从整树重写改为 `ApplyTreeDelta`，
+  父在子运行期间改过、子没改的路径一个字节都不会被碰。
+- **写前逐路径校验**：落盘前重新哈希 `applied_paths`，父内容已变则返回
+  `parent_moved` + 路径，不写盘；结果树触碰子未改路径直接
+  `land_invariant_violation`。
+- **结构化三方结果**：`base_tree/child_tree/parent_tree_before/parent_tree_after`、
+  `applied_paths`、`child_only/parent_only/both_changed/auto_merged/conflict_paths`、
+  `paths[]`（含三方 blob 坐标）。
+- **乐观锁**：`expected_parent_tree/expected_child_tree/expected_base_tree`；
+  `ws_info` 暴露 `effective_tree/ops_epoch/parent_tree`，P34 可直接回传。
+- **工作卡范围**：`allowed_paths/allowed_prefixes`，越界 `path_not_allowed`。
+- **严格合并**：`merge_policy=strict` 时间一路径双方都改即冲突。
+- **采集可见性**：`ws_land_into` 使用 `SyncStrict`（禁用快路径）；不稳定文件重试后返回
+  `ws_unstable`，不再把「正在被写」误判为未变。
+- **幂等补强**：拿到 `landMu` 后二次检查 idem/landed，并发同 key 可重放。
+
+## 上一版（v0.4.1）
 
 - **repo 路径不一致保护**：同名 repo 已注册在旧路径时，`repo_register` 返回
   `repo_path_mismatch`，不再静默继续用旧路径；`rebind=true` 才改 registry 指针。

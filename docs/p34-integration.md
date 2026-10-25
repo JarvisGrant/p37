@@ -76,22 +76,32 @@ ws_land(repo, ws_id,
 parent = ws_ensure(name="p34s-<sessionID>", parent=session line)
 child  = ws_ensure(name="p34s-<sessionID>-task-1",
                    parent={kind:"workspace", id:parent.ws_id})
+# child.base_tree = 父工作区创建子时的有效树（不可变血缘坐标）。
 ... worker 改文件 ...
 
-r = ws_land_into(child, parent.ws_id, idempotency_key=<child-task-id>)
-# r.can_land=false / r.state="conflict" 时：
-#   conflict_list(ws_id=child)
-#   conflict_resolve(key, ...) 或 conflict_resolve_all(ws_id=child, policy="prefer_upper")
-#   r2 = land_preview 可选；直接带最新 target_head 重试：
-#   ws_land_into(child, parent.ws_id,
-#                expected_parent_tree=<最新 target_head>,
-#                preview_id=r.preview_id, idempotency_key=<同一个 key>)
+# 推荐：先 preview 拿父树令牌 + 越界清单，再 land。
+p = land_preview(child.ws_id, target={kind:"workspace", id:parent.ws_id},
+                 allowed_prefixes=<工作卡目录>)
+r = ws_land_into(child.ws_id, parent.ws_id,
+                 expected_parent_tree=p.parent_tree_before,
+                 expected_base_tree=child.base_tree,
+                 allowed_prefixes=<工作卡目录>,
+                 merge_policy="strict",       # 或不传，默认 auto
+                 idempotency_key=<child-task-id>)
+# r.state="conflict"：冲突挂在子工作区，按 key 解决后带同一个 key 重试。
+# r.code="target_moved"/"parent_moved"：父被并发改动，P37 没写盘；重读 p 再试。
+# r.code="path_not_allowed"：子越界改了工作卡外的路径，不要重试。
+# r.code="ws_unstable"：文件正在被写，退避重试即可。
 ```
 
-- 子工作区也建议用 `ws_ensure(name=..., parent={workspace:parentId})`。
+- 子工作区也建议用 `ws_ensure(name=..., parent={workspace:parentId})`，并且**父会话必须按
+  `head_sha`/缓存句柄精确认领**，不能只按 name 在 `ws_list` 里猜；同名多活工作区
+  会让子会话拿到旧快照（会话 #90）。
 - 冲突挂在子工作区上，`preview_id` 等于子工作区 id；不要再为每次重试新建子工作区。
 - 解决记录按冲突 key 保存，key 含工作区 id；同一子工作区重试才会命中。
 - 子工作区默认销毁；父保留。`ws_land_into` 只允许直接父，不产生版本。
+- **父的并发改动不会被覆盖**：v0.4.2 起只写 `applied_paths`（子改动集合），
+  父在子运行期间改过、子没改的路径列在 `parent_only_changed_paths` 且保持原样。
 - 子工作区冲突未解决时，父工作区 `ws_land(fold=self)` 会返回
   `ws_has_active_children`，`detail.blocked_by_children` 列出阻塞项；此时要么
   解冲突，要么 `ws_drop(child)`（配额立即回收），不要无限重试。

@@ -137,7 +137,7 @@ func TestToolsListed(t *testing.T) {
 		"ws_open", "ws_ensure", "ws_list", "ws_info", "ws_lease", "ws_sync", "ws_drop", "ws_rebase",
 		"ws_quota",
 		"conflict_list", "conflict_show", "conflict_resolve", "conflict_resolve_all",
-		"land_preview", "ws_land", "version_revert",
+		"land_preview", "ws_land", "version_revert", "land_history",
 		"sync_status", "sync_prepare", "sync_list", "sync_show",
 		"repo_export", "repo_export_status",
 	}

@@ -76,7 +76,7 @@ internal/tree   tree/diff/ignore/lines
 ## 发布
 
 ```bash
-make release VERSION=0.4.1
+make release VERSION=0.4.2
 make p36-bootstrap
 ```
 

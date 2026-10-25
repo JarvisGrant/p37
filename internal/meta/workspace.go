@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/op"
@@ -48,6 +49,10 @@ type Workspace struct {
 	LandedTS    int64
 	CreatedTS   int64
 	UpdatedTS   int64
+	// OpsEpoch 是 op-log 的单调版本号：每次 Sync 整体重建 op-log 都 +1。
+	// 有效树缓存与 land 预演令牌以它为键，避免「op 条数相同但内容变化」
+	// 造成缓存误命中（会话 #90 的回退根因）。
+	OpsEpoch int64
 	// MaterializedTS 是工作区最近一次物化（挂载/复制）完成时刻，Unix 纳秒。
 	//
 	// 采集用它做**惰性判定**：文件不比这个时刻更新，就说明它仍是基准树里
@@ -86,11 +91,11 @@ func (d *DB) GetWorkspace(id string) (*Workspace, error) {
 	err := d.sql.QueryRow(
 		`SELECT id, name, parent_kind, parent_id, base_tree, base_version, base_line,
 		        task_desc, state, materialize, mounted, hidden, kind, landed_ts,
-		        created_ts, updated_ts, materialized_ts
+		        created_ts, updated_ts, materialized_ts, ops_epoch
 		   FROM workspace WHERE id = ?`, id).
 		Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &baseTreeStr, &baseVerStr, &baseLine,
 			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &hidden, &kind, &landed,
-			&w.CreatedTS, &w.UpdatedTS, &w.MaterializedTS)
+			&w.CreatedTS, &w.UpdatedTS, &w.MaterializedTS, &w.OpsEpoch)
 	w.BaseLine = baseLine
 	w.Hidden = hidden != 0
 	w.Kind = kind
@@ -116,7 +121,7 @@ func (d *DB) ListWorkspaces() ([]Workspace, error) {
 	rows, err := d.sql.Query(
 		`SELECT id, name, parent_kind, parent_id, base_tree, base_version, base_line,
 		        task_desc, state, materialize, mounted, hidden, kind, landed_ts,
-		        created_ts, updated_ts
+		        created_ts, updated_ts, materialized_ts, ops_epoch
 		   FROM workspace ORDER BY created_ts, id`)
 	if err != nil {
 		return nil, err
@@ -134,7 +139,7 @@ func (d *DB) ListWorkspaces() ([]Workspace, error) {
 		var hidden, landed int64
 		if err := rows.Scan(&w.ID, &w.Name, &w.ParentKind, &w.ParentID, &bt, &bv, &baseLine,
 			&w.TaskDesc, &w.State, &w.Materialize, &mounted, &hidden, &kind, &landed,
-			&w.CreatedTS, &w.UpdatedTS); err != nil {
+			&w.CreatedTS, &w.UpdatedTS, &w.MaterializedTS, &w.OpsEpoch); err != nil {
 			return nil, err
 		}
 		w.Mounted = mounted != 0
@@ -471,6 +476,126 @@ func (d *DB) InsertOps(ops []op.Op) error {
 		}
 		return nil
 	})
+}
+
+// ReplaceOps 用一个事务整体替换某工作区的 op-log。
+//
+// 这是 Sync 的唯一写入口。三件事必须原子完成，否则会出现「op 已换新、
+// 有效树缓存还是旧树」的窗口（会话 #90：父的测试修正被子会话 land 回退）：
+//
+//  1. 清空旧 op；
+//  2. 写入新 op；
+//  3. ops_epoch+1 并删除 ws_effective_tree 缓存。
+//
+// 即使调用方传空 ops 也要执行，因为「改动被撤销」同样是一次版本推进。
+func (d *DB) ReplaceOps(wsID string, ops []op.Op) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		cur, err := opsSignatureTx(tx, wsID)
+		if err != nil {
+			return err
+		}
+		next, err := opsSignature(ops)
+		if err != nil {
+			return err
+		}
+		if cur == next {
+			// 周期扫描 / ws_sync 在「内容没变」时不推进版本，否则 P34 拿到的
+			// ops_epoch 会被无意义地刷新，preview → land 之间凭空出现 target_moved。
+			return nil
+		}
+		if _, err := tx.Exec(`DELETE FROM op WHERE ws_id = ?`, wsID); err != nil {
+			return err
+		}
+		for i := range ops {
+			if err := insertOpTx(tx, &ops[i]); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(
+			`UPDATE workspace SET ops_epoch = ops_epoch + 1 WHERE id = ?`, wsID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM ws_effective_tree WHERE ws_id = ?`, wsID)
+		return err
+	})
+}
+
+// opsSignatureTx 读取当前 op-log 的规范化签名（忽略 captured_ts/by 这类噪声）。
+func opsSignatureTx(tx *sql.Tx, wsID string) (string, error) {
+	rows, err := tx.Query(
+		`SELECT id, seq, kind, path, COALESCE(dest_path,''), entry_kind,
+		        COALESCE(mode_before,-1), COALESCE(mode_after,-1),
+		        COALESCE(blob_before,''), COALESCE(blob_after,''),
+		        hunks_json, COALESCE(attr_json,'')
+		   FROM op WHERE ws_id = ? ORDER BY seq`, wsID)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	var b strings.Builder
+	for rows.Next() {
+		var (
+			id, kind, path, dest, hunks, attr string
+			seq, entryKind, modeB, modeA      int64
+			before, after                     string
+		)
+		if err := rows.Scan(&id, &seq, &kind, &path, &dest, &entryKind,
+			&modeB, &modeA, &before, &after, &hunks, &attr); err != nil {
+			return "", err
+		}
+		writeOpSig(&b, id, seq, kind, path, dest, entryKind, modeB, modeA, before, after, hunks, attr)
+	}
+	return b.String(), rows.Err()
+}
+
+// opsSignature 把待写入的 op 规范化为与 opsSignatureTx 完全一致的字符串。
+func opsSignature(ops []op.Op) (string, error) {
+	var b strings.Builder
+	for i := range ops {
+		o := &ops[i]
+		hunks, err := op.MarshalHunks(o.Hunks)
+		if err != nil {
+			return "", err
+		}
+		attr := ""
+		if o.Attr != nil {
+			attr = fmt.Sprintf(`{"eol":%d}`, o.Attr.EOL)
+		}
+		writeOpSig(&b, o.ID, o.Seq, string(o.Kind), o.Path, o.DestPath,
+			int64(o.EntryKindOf()), modeSig(o.ModeBefore), modeSig(o.ModeAfter),
+			hashSig(o.BaseFile), hashSig(o.NewFile), hunks, attr)
+	}
+	return b.String(), nil
+}
+
+func writeOpSig(b *strings.Builder, id string, seq int64, kind, path, dest string,
+	entryKind, modeB, modeA int64, before, after, hunks, attr string) {
+	fmt.Fprintf(b, "%s\x00%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%s\x00%s\n",
+		id, seq, kind, path, dest, entryKind, modeB, modeA, before, after, hunks, attr)
+}
+
+func modeSig(m *uint64) int64 {
+	if m == nil {
+		return -1
+	}
+	return int64(*m)
+}
+
+func hashSig(h hash.ID) string {
+	if h.IsZero() {
+		return ""
+	}
+	return h.String()
+}
+
+// WorkspaceOpsEpoch 返回工作区的单调 op-log 版本号。
+func (d *DB) WorkspaceOpsEpoch(wsID string) (int64, error) {
+	var epoch int64
+	err := d.sql.QueryRow(`SELECT ops_epoch FROM workspace WHERE id = ?`, wsID).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotExist
+	}
+	return epoch, err
 }
 
 func insertOpTx(tx *sql.Tx, o *op.Op) error {

@@ -337,6 +337,10 @@ type Manager struct {
 	// 串行化。
 	openMu        sync.Mutex
 	pendingActive int
+
+	// wsLocks 是按 ws_id 的读写锁：Sync/EffectiveTree/Apply/Rebase/Drop 用它
+	// 串行化「op-log 与有效树」的一致性（见 locks.go）。
+	wsLocks *wsLockSet
 }
 
 // New 创建 Manager。ig 为 nil 时使用内置忽略集。
@@ -348,7 +352,8 @@ func New(repoRoot string, db *meta.DB, store *cas.Store, mm *mountmgr.Manager, o
 		opt.Capture = capture.DefaultOptions()
 	}
 	return &Manager{repoRoot: repoRoot, db: db, store: store, mm: mm, opt: opt,
-		now: func() int64 { return time.Now().UnixMilli() }}
+		wsLocks: newWSLockSet(),
+		now:     func() int64 { return time.Now().UnixMilli() }}
 }
 
 // DB 暴露元数据库。
@@ -587,10 +592,14 @@ func (m *Manager) resolveParent(parent string) (string, string, hash.ID, hash.ID
 	}
 
 	// B9：父必须先采集，否则子的基准不含父的最新改动。
-	if err := m.Sync(pw.ID); err != nil {
+	// 采集与取有效树在同一把工作区写锁内完成，避免「刚取到旧树，父又被改写」。
+	unlockParent := m.wsLocks.lock(pw.ID)
+	if err := m.SyncLocked(pw.ID); err != nil {
+		unlockParent()
 		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
-	et, err := m.EffectiveTree(pw.ID)
+	et, err := m.EffectiveTreeLocked(pw.ID)
+	unlockParent()
 	if err != nil {
 		return "", "", hash.ID{}, hash.ID{}, "", err
 	}
@@ -699,6 +708,28 @@ func (m *Manager) flattenTreeIDs(root hash.ID) (map[string]hash.ID, error) {
 //
 // 因为 op-log 的定义就是「base 与磁盘之差」，每次采集都整体重建，而不是追加。
 func (m *Manager) Sync(wsID string) error {
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
+	return m.SyncLocked(wsID)
+}
+
+// SyncLocked 与 Sync 相同，但调用方必须已经持有 LockWorkspace(wsID)。
+func (m *Manager) SyncLocked(wsID string) error { return m.syncLocked(wsID, false) }
+
+// SyncStrict 做一次全量读盘采集：禁用 stat 快路径与惰性基准判定。
+//
+// land_into 在合并前后使用它，确保「父/子最新改动」不会因为 mtime 恰好
+// 没变而被快路径漏判。成本是读一遍全部已跟踪文件，land 频率低，可以接受。
+func (m *Manager) SyncStrict(wsID string) error {
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
+	return m.syncLocked(wsID, true)
+}
+
+// SyncStrictLocked 与 SyncStrict 相同，但调用方必须已持有写锁。
+func (m *Manager) SyncStrictLocked(wsID string) error { return m.syncLocked(wsID, true) }
+
+func (m *Manager) syncLocked(wsID string, strict bool) error {
 	w, err := m.Get(wsID)
 	if err != nil {
 		return err
@@ -733,7 +764,13 @@ func (m *Manager) Sync(wsID string) error {
 	// 传入基准树的扁平视图与物化时刻：文件若不比物化时刻更新，就是基准树里
 	// 那一份，可直接复用其对象 id（不读、不哈希）。
 	copt := m.opt.Capture
-	copt.MaterializedNS = w.MaterializedTS
+	if strict {
+		// 全量读：绕过 (mtime,size) 与「不比物化时刻新」两条快路径。
+		copt.ForceHash = true
+		copt.MaterializedNS = 0
+	} else {
+		copt.MaterializedNS = w.MaterializedTS
+	}
 	// §5.2 稳定点判定：把被跳过的文件记下来，供 ws_sync 回报。
 	var skipped []string
 	if copt.StableRetries > 0 {
@@ -764,16 +801,13 @@ func (m *Manager) Sync(wsID string) error {
 		return err
 	}
 
-	// 3. 整体替换 op-log。
-	if err := m.db.DeleteOpsUnderRoot(wsID); err != nil {
-		return err
-	}
+	// 3. 整体替换 op-log（同一事务内推进 ops_epoch 并清掉有效树缓存）。
 	ts := m.now()
 	for i := range ops {
 		ops[i].CapturedTS = ts
 		ops[i].CapturedBy = "daemon"
 	}
-	if err := m.db.InsertOps(ops); err != nil {
+	if err := m.db.ReplaceOps(wsID, ops); err != nil {
 		return err
 	}
 	if w.State == meta.StateBroken {
@@ -842,17 +876,23 @@ func (m *Manager) RemountAll() (int, error) {
 	return n, firstErr
 }
 
-// EffectiveTree 计算并缓存父工作区的有效树（§4.9.1）。
+// EffectiveTree 计算并缓存工作区的有效树（§4.9.1）。
 func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
+	unlock := m.wsLocks.rlock(wsID)
+	defer unlock()
+	return m.EffectiveTreeLocked(wsID)
+}
+
+// EffectiveTreeLocked 与 EffectiveTree 相同，但调用方必须持有
+// LockWorkspace(wsID) 或 RLockWorkspace(wsID)。
+func (m *Manager) EffectiveTreeLocked(wsID string) (hash.ID, error) {
 	w, err := m.Get(wsID)
 	if err != nil {
 		return hash.ID{}, err
 	}
-	ops, err := m.db.ListOps(wsID)
-	if err != nil {
-		return hash.ID{}, err
-	}
-	epoch := int64(len(ops))
+	// 缓存键必须是单调的 ops_epoch，不能用 len(ops)：同一批路径再改一次时
+	// op 条数不变、内容却变了（会话 #90 的回退根因）。
+	epoch := w.OpsEpoch
 
 	if cached, ok, err := m.db.GetEffectiveTree(wsID, epoch); err != nil {
 		return hash.ID{}, err
@@ -860,6 +900,10 @@ func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
 		return cached, nil
 	}
 
+	ops, err := m.db.ListOps(wsID)
+	if err != nil {
+		return hash.ID{}, err
+	}
 	base, err := m.store.GetTree(w.BaseTree)
 	if err != nil {
 		return hash.ID{}, err
@@ -882,12 +926,21 @@ func (m *Manager) EffectiveTree(wsID string) (hash.ID, error) {
 
 // Status 是 ws_info 的返回（字段名遵循附录 K 的 snake_case 约定）。
 type Status struct {
-	ID            string  `json:"ws_id"`
-	Name          string  `json:"name"`
-	ParentKind    string  `json:"parent_kind"`
-	ParentID      string  `json:"parent_id"`
-	BaseVersion   hash.ID `json:"base_version"`
-	BaseLine      string  `json:"base_line,omitempty"`
+	ID          string  `json:"ws_id"`
+	Name        string  `json:"name"`
+	ParentKind  string  `json:"parent_kind"`
+	ParentID    string  `json:"parent_id"`
+	BaseVersion hash.ID `json:"base_version"`
+	BaseLine    string  `json:"base_line,omitempty"`
+	BaseTree    hash.ID `json:"base_tree"`
+	// EffectiveTree 是当前 op-log 对应的有效树（只读计算，不触发采集）。
+	// 磁盘上尚未采集的改动不会反映在这里；需要最新值请先 ws_sync。
+	EffectiveTree hash.ID `json:"effective_tree,omitempty"`
+	OpsEpoch      int64   `json:"ops_epoch"`
+	// ParentTree 仅对 ParentKind=workspace 的子工作区有意义：父工作区的
+	// 当前有效树。它是 P34 传给 ws_land_into(expected_parent_tree) 的令牌。
+	ParentTree    hash.ID `json:"parent_tree,omitempty"`
+	ParentTreeErr string  `json:"parent_tree_error,omitempty"`
 	Dir           string  `json:"dir"`
 	Dirty         bool    `json:"dirty"`
 	CapturedOps   int64   `json:"captured_ops"`
@@ -945,6 +998,8 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 		ParentID:      pid,
 		BaseVersion:   w.BaseVersion,
 		BaseLine:      w.BaseLine,
+		BaseTree:      w.BaseTree,
+		OpsEpoch:      w.OpsEpoch,
 		Dir:           m.mm.WorkspaceDir(wsID),
 		Dirty:         ops > 0,
 		CapturedOps:   ops,
@@ -985,6 +1040,26 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 	return st, nil
 }
 
+// FillRevisions 计算并填充有效树 / 父树（只读，不触发采集）。
+//
+// 单独提供而不是放进 Info：ws_disk_usage / repo_health 会遍历全部工作区，
+// 每个都做两次重放是没必要的。只有 ws_info 需要精确 revision。
+func (m *Manager) FillRevisions(st *Status) {
+	if st == nil {
+		return
+	}
+	if eff, err := m.EffectiveTree(st.ID); err == nil {
+		st.EffectiveTree = eff
+	}
+	if st.ParentKind == meta.ParentWorkspace && st.BaseLine == "" && st.ParentID != "" {
+		if eff, err := m.EffectiveTree(st.ParentID); err == nil {
+			st.ParentTree = eff
+		} else {
+			st.ParentTreeErr = err.Error()
+		}
+	}
+}
+
 // DropOptions 让回收路径带上可解释的 reason / 落地目标。
 type DropOptions struct {
 	Cascade       bool
@@ -1015,6 +1090,9 @@ func (m *Manager) DropWithOptions(wsID string, opt DropOptions) (dropped, repare
 	if err != nil {
 		return nil, nil, err
 	}
+	// 与 land / rebase / 采集互斥：删除目录与元数据期间不能让合并继续写盘。
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
 	kids, err := m.db.Children(wsID)
 	if err != nil {
 		return nil, nil, err
@@ -1231,6 +1309,8 @@ type RebaseResult struct {
 // 步骤：算新基准 → 取出自己的工作 → 重放到新基准 → 覆写工作区 → 更新 base_tree。
 // 第 4 步失败时**完全不改状态**（原子性）。
 func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
 	w, err := m.Get(wsID)
 	if err != nil {
 		return nil, err
@@ -1238,7 +1318,7 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 	if w.State != meta.StateActive && w.State != meta.StateConflicted {
 		return nil, fmt.Errorf("%w: 状态 %s", ErrWrongState, w.State)
 	}
-	if err := m.Sync(wsID); err != nil {
+	if err := m.SyncLocked(wsID); err != nil {
 		return nil, err
 	}
 
@@ -1340,7 +1420,7 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, m.now(), matTS); err != nil {
 		return nil, err
 	}
-	if err := m.Sync(wsID); err != nil {
+	if err := m.SyncLocked(wsID); err != nil {
 		return nil, err
 	}
 	_ = m.db.UpdateWorkspaceState(wsID, meta.StateActive, m.now())
@@ -1639,6 +1719,8 @@ func (m *Manager) RebaseTo(wsID, ref string) (*RebaseResult, error) {
 	if ref == "" {
 		return m.Rebase(wsID)
 	}
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
 	w, err := m.Get(wsID)
 	if err != nil {
 		return nil, err
@@ -1649,7 +1731,7 @@ func (m *Manager) RebaseTo(wsID, ref string) (*RebaseResult, error) {
 	if w.State != meta.StateActive && w.State != meta.StateConflicted {
 		return nil, fmt.Errorf("%w: 状态 %s", ErrWrongState, w.State)
 	}
-	if err := m.Sync(wsID); err != nil {
+	if err := m.SyncLocked(wsID); err != nil {
 		return nil, err
 	}
 	kind, id, baseLine, newBase, err := m.resolveRebaseTarget(w, ref)
@@ -1708,7 +1790,7 @@ func (m *Manager) RebaseTo(wsID, ref string) (*RebaseResult, error) {
 	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, m.now(), matTS); err != nil {
 		return nil, err
 	}
-	if err := m.Sync(wsID); err != nil {
+	if err := m.SyncLocked(wsID); err != nil {
 		return nil, err
 	}
 	_ = m.db.UpdateWorkspaceState(wsID, meta.StateActive, m.now())
@@ -1772,8 +1854,15 @@ func (m *Manager) resolveRebaseTarget(w *meta.Workspace, ref string) (string, st
 	return "", "", "", hash.ID{}, fmt.Errorf("%w: 无法解析 rebase 目标 %q", ErrNotFound, ref)
 }
 
-// ApplyTree 把工作区目录与 op-log 更新为目标树（供 ws_land_into 使用）。
+// ApplyTree 把工作区目录与 op-log 更新为目标树（供内部整树重建使用）。
 func (m *Manager) ApplyTree(wsID string, target *tree.Tree) error {
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
+	return m.ApplyTreeLocked(wsID, target)
+}
+
+// ApplyTreeLocked 与 ApplyTree 相同，但调用方必须已持有工作区写锁。
+func (m *Manager) ApplyTreeLocked(wsID string, target *tree.Tree) error {
 	w, err := m.Get(wsID)
 	if err != nil {
 		return err
@@ -1794,7 +1883,44 @@ func (m *Manager) ApplyTree(wsID string, target *tree.Tree) error {
 	if err := m.db.UpdateWorkspaceMount(wsID, w.Materialize, w.Mounted, m.now(), 0); err != nil {
 		return err
 	}
-	return m.Sync(wsID)
+	return m.SyncLocked(wsID)
+}
+
+// ApplyTreeDelta 只把 before → target 有差异的路径写进工作区，并重新采集。
+//
+// 这是 ws_land_into 的落盘入口：父工作区里「子会话没改」的路径完全不会被
+// 触碰，因此即使采集漏判或 agent 在合并窗口里直写，也不会被整树重写放大成
+// 回退（会话 #90 的第二个根因）。
+func (m *Manager) ApplyTreeDelta(wsID string, before hash.ID, target *tree.Tree) error {
+	unlock := m.wsLocks.lock(wsID)
+	defer unlock()
+	return m.ApplyTreeDeltaLocked(wsID, before, target)
+}
+
+// ApplyTreeDeltaLocked 与 ApplyTreeDelta 相同，但调用方必须已持有工作区写锁。
+func (m *Manager) ApplyTreeDeltaLocked(wsID string, before hash.ID, target *tree.Tree) error {
+	w, err := m.Get(wsID)
+	if err != nil {
+		return err
+	}
+	if w.Hidden || w.LandedTS != 0 {
+		return fmt.Errorf("%w: 工作区不可写", ErrWrongState)
+	}
+	if w.Materialize == meta.MaterializeOverlay && !m.mm.IsMounted(wsID) {
+		return fmt.Errorf("%w: %s", ErrNotMounted, wsID)
+	}
+	if before.IsZero() {
+		return fmt.Errorf("%w: ApplyTreeDelta 需要 before tree", ErrWrongState)
+	}
+	if err := m.applyDelta(wsID, before, target); err != nil {
+		return err
+	}
+	if _, err := m.db.StatCache().Clear(wsID); err != nil {
+		return err
+	}
+	// 不把 materialized_ts 置 0：只写了差异路径，未变文件仍然等于基准，
+	// 惰性判定依旧成立；新写入路径的 mtime 必然大于物化时刻，会被重新读取。
+	return m.SyncLocked(wsID)
 }
 
 // MarkLanded 标记工作区已落地但保留目录与元数据（drop_workspace=false）。

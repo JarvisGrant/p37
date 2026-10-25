@@ -8,9 +8,9 @@ systemd / L1 胶水细节见 [`../packaging/p36/README.md`](../packaging/p36/REA
 ### 1.1 发布物
 
 ```bash
-make release VERSION=0.4.1
-# dist/p37-linux-amd64-0.4.1.tar.gz
-# dist/p37-linux-amd64-0.4.1.tar.gz.sha256
+make release VERSION=0.4.2
+# dist/p37-linux-amd64-0.4.2.tar.gz
+# dist/p37-linux-amd64-0.4.2.tar.gz.sha256
 make p36-bootstrap
 # dist/p36-bootstrap/...
 ```

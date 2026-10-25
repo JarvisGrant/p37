@@ -713,6 +713,46 @@ func landView2(rr *repo.Repo, res *repo.LandResult) map[string]any {
 		"preview_id": res.PreviewID, "already_landed": res.AlreadyLanded,
 		"conflicts": conflicts,
 	}
+	// 版本坐标与路径级分类：全部为增量字段，旧调用方可以忽略。
+	if !res.BaseTree.IsZero() {
+		out["base_tree"] = res.BaseTree.String()
+	}
+	if !res.ChildTree.IsZero() {
+		out["child_tree"] = res.ChildTree.String()
+	}
+	if !res.ParentTreeBefore.IsZero() {
+		out["parent_tree_before"] = res.ParentTreeBefore.String()
+	}
+	if !res.ParentTreeAfter.IsZero() {
+		out["parent_tree_after"] = res.ParentTreeAfter.String()
+	}
+	if res.AppliedPaths != nil {
+		out["applied_paths"] = res.AppliedPaths
+	}
+	if res.ChildOnlyChangedPaths != nil {
+		out["child_only_changed_paths"] = res.ChildOnlyChangedPaths
+	}
+	if res.ParentOnlyChangedPaths != nil {
+		out["parent_only_changed_paths"] = res.ParentOnlyChangedPaths
+	}
+	if res.BothChangedPaths != nil {
+		out["both_changed_paths"] = res.BothChangedPaths
+	}
+	if len(res.AutoMergedPaths) > 0 {
+		out["auto_merged_paths"] = res.AutoMergedPaths
+	}
+	if len(res.ConflictPaths) > 0 {
+		out["conflict_paths"] = res.ConflictPaths
+	}
+	if len(res.OutOfScopePaths) > 0 {
+		out["out_of_scope_paths"] = res.OutOfScopePaths
+	}
+	if len(res.Paths) > 0 {
+		out["paths"] = res.Paths
+	}
+	if len(res.PostApplyMismatch) > 0 {
+		out["post_apply_mismatch"] = res.PostApplyMismatch
+	}
 	if !res.VersionID.IsZero() {
 		out["version_id"] = res.VersionID.String()
 	}

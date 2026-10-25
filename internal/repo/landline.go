@@ -20,6 +20,63 @@ var ErrHasActiveChildren = errors.New("repo: 工作区仍有活跃子工作区")
 var ErrTargetInvalid = errors.New("repo: 非法 land 目标")
 var ErrPreviewExpired = errors.New("repo: land_into preview 已过期")
 
+// ErrParentMoved 表示父工作区在「读树 → 重放 → 写盘」窗口里被改动。
+//
+// 调用方（P34）应重读父有效树、重跑 preview 后重试；绝不能忽略后继续写。
+var ErrParentMoved = errors.New("repo: 父工作区在合并期间被改动")
+
+// ErrPathNotAllowed 表示子工作区改了工作卡允许范围之外的路径。
+var ErrPathNotAllowed = errors.New("repo: 子工作区改动了未授权路径")
+
+// ErrWSUnstable 表示采集时有文件正在被写，本轮看不清它的内容。
+var ErrWSUnstable = errors.New("repo: 工作区存在不稳定文件")
+
+// ErrLandInvariant 表示重放结果触碰了子工作区没有改动的路径。
+//
+// 这是实现缺陷的护栏：宁可拒绝合并，也不要把「子会话没改的文件」写回父工作区。
+var ErrLandInvariant = errors.New("repo: land 结果越过了子工作区的改动集合")
+
+// ParentMovedError 携带被并发改动的具体路径。
+type ParentMovedError struct {
+	WSID     string
+	Paths    []string
+	Expected string
+	Current  string
+}
+
+func (e *ParentMovedError) Error() string {
+	msg := fmt.Sprintf("%s: %s", ErrParentMoved, e.WSID)
+	if len(e.Paths) > 0 {
+		msg += fmt.Sprintf("（路径: %s）", strings.Join(e.Paths, ", "))
+	}
+	return msg
+}
+
+func (e *ParentMovedError) Unwrap() error { return ErrParentMoved }
+
+// PathNotAllowedError 列出越界路径，供 P34 直接回显给主管。
+type PathNotAllowedError struct {
+	Paths []string
+}
+
+func (e *PathNotAllowedError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrPathNotAllowed, strings.Join(e.Paths, ", "))
+}
+
+func (e *PathNotAllowedError) Unwrap() error { return ErrPathNotAllowed }
+
+// UnstableWSError 列出本轮无法稳定读取的路径。
+type UnstableWSError struct {
+	WSID  string
+	Paths []string
+}
+
+func (e *UnstableWSError) Error() string {
+	return fmt.Sprintf("%s: %s（路径: %s）", ErrWSUnstable, e.WSID, strings.Join(e.Paths, ", "))
+}
+
+func (e *UnstableWSError) Unwrap() error { return ErrWSUnstable }
+
 // ChildRef 是被父工作区 land 阻塞的子工作区。
 type ChildRef struct {
 	WSID  string `json:"ws_id"`
@@ -187,26 +244,36 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 		}
 	}
 
+	// 折叠集合可能包含多个工作区：按 ws_id 升序一次性锁住，避免 rebase 在
+	// 「采集 → 读有效树 → 读 ops」之间改写。
+	lockIDs := make([]string, 0, len(fold))
 	for _, fw := range fold {
-		if err := r.WS.Sync(fw.ID); err != nil {
+		lockIDs = append(lockIDs, fw.ID)
+	}
+	unlockFold := r.WS.LockWorkspaces(lockIDs)
+	defer unlockFold()
+	for _, fw := range fold {
+		if err := r.WS.SyncLocked(fw.ID); err != nil {
 			return nil, err
 		}
 	}
-	// 预览令牌：工作区有效树 / ops epoch。
-	wsTree, err := r.WS.EffectiveTree(wsID)
+	wsTree, err := r.WS.EffectiveTreeLocked(wsID)
 	if err != nil {
 		return nil, err
 	}
-	opsCount, _ := r.DB.CountOps(wsID)
-	res := &LandResult{WSTree: wsTree, WSOpsEpoch: opsCount, TargetHead: line.Head,
-		PreviewID: wsID}
+	wsEpoch := int64(0)
+	if w, werr := r.WS.Get(wsID); werr == nil {
+		wsEpoch = w.OpsEpoch
+	}
+	res := &LandResult{WSTree: wsTree, WSOpsEpoch: wsEpoch, TargetHead: line.Head,
+		PreviewID: wsID, ChildTree: wsTree, BaseTree: fold[0].BaseTree}
 	if opt.ExpectedWSTree != "" {
 		exp, err := hash.Parse(opt.ExpectedWSTree)
 		if err != nil || exp != wsTree {
 			return nil, fmt.Errorf("%w: workspace tree 已变化", ErrTargetMoved)
 		}
 	}
-	if opt.ExpectedWSOpsEpoch > 0 && opt.ExpectedWSOpsEpoch != opsCount {
+	if opt.ExpectedWSOpsEpoch > 0 && opt.ExpectedWSOpsEpoch != wsEpoch {
 		return nil, fmt.Errorf("%w: workspace ops 已变化", ErrTargetMoved)
 	}
 	if opt.ExpectedHead != "" {
@@ -337,32 +404,84 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 
 // PreviewInto 预演把 child 的变更并入 parent workspace。
 func (r *Repo) PreviewInto(wsID, parentWsID string) (*LandResult, error) {
+	return r.PreviewIntoWithOptions(wsID, LandIntoOptions{ParentWsID: parentWsID})
+}
+
+// PreviewIntoWithOptions 是带完整参数的 dry-run。
+func (r *Repo) PreviewIntoWithOptions(wsID string, opt LandIntoOptions) (*LandResult, error) {
+	opt.Preview = true
 	r.landMu.Lock()
 	defer r.landMu.Unlock()
-	return r.landIntoLocked(wsID, parentWsID, true, "", "", "")
+	return r.landIntoLocked(wsID, opt)
 }
 
 // LandInto 把 child 的变更并入直接父工作区，不产生版本。
 func (r *Repo) LandInto(wsID, parentWsID, expectedParentTree, previewID, idemKey string) (*LandResult, error) {
-	if idemKey != "" {
-		req := map[string]string{"idempotency_key": idemKey, "ws_id": wsID, "parent_ws_id": parentWsID}
-		if storedReq, res, ok := r.getLandIdem("ws_land_into", idemKey); ok {
-			if err := checkLandIdem(req, storedReq); err != nil {
-				return nil, err
-			}
-			if res == nil {
-				res = &LandResult{}
-			}
-			res.AlreadyLanded, res.Replayed, res.State = true, true, "already_landed"
-			res.ParentWSID = parentWsID
-			return res, nil
+	return r.LandIntoWithOptions(wsID, LandIntoOptions{
+		ParentWsID:         parentWsID,
+		ExpectedParentTree: expectedParentTree,
+		PreviewID:          previewID,
+		IdempotencyKey:     idemKey,
+	})
+}
+
+// LandIntoOptions 是 ws_land_into 的完整参数。
+type LandIntoOptions struct {
+	ParentWsID         string
+	ExpectedParentTree string
+	ExpectedChildTree  string
+	ExpectedBaseTree   string
+	PreviewID          string
+	IdempotencyKey     string
+	// Preview=true 时只计算、不落盘、不改子工作区状态。
+	Preview bool
+	// AllowedPaths / AllowedPrefixes 是工作卡授权范围；空表示不限制。
+	// 越界路径在 preview 里以 out_of_scope_paths 返回，在 land 时直接拒绝。
+	AllowedPaths    []string
+	AllowedPrefixes []string
+	// StrictMerge=true 时「父子双方都改过的同一路径」一律出冲突，不做自动合并。
+	StrictMerge bool
+}
+
+// LandIntoWithOptions 是 ws_land_into 的实现入口。
+func (r *Repo) LandIntoWithOptions(wsID string, opt LandIntoOptions) (*LandResult, error) {
+	parentWsID, idemKey := opt.ParentWsID, opt.IdempotencyKey
+	checkIdem := func() (*LandResult, bool, error) {
+		if idemKey == "" {
+			return nil, false, nil
 		}
+		req := map[string]string{"idempotency_key": idemKey, "ws_id": wsID, "parent_ws_id": parentWsID}
+		storedReq, res, ok := r.getLandIdem("ws_land_into", idemKey)
+		if !ok {
+			return nil, false, nil
+		}
+		if err := checkLandIdem(req, storedReq); err != nil {
+			return nil, false, err
+		}
+		if res == nil {
+			res = &LandResult{}
+		}
+		res.AlreadyLanded, res.Replayed, res.State = true, true, "already_landed"
+		res.ParentWSID = parentWsID
+		return res, true, nil
 	}
-	if info, landed, err := r.DB.GetLandedWSInfo(wsID); err == nil && landed {
+	checkLanded := func() (*LandResult, bool) {
+		info, landed, err := r.DB.GetLandedWSInfo(wsID)
+		if err != nil || !landed {
+			return nil, false
+		}
 		id, _ := hash.Parse(info.VersionID)
 		return &LandResult{CanLand: true, AlreadyLanded: true, TargetHead: id,
 			WSTree: id, PreviewID: wsID, ParentWSID: parentWsID,
-			State: "already_landed"}, nil
+			State: "already_landed"}, true
+	}
+	if res, ok, err := checkIdem(); err != nil {
+		return nil, err
+	} else if ok {
+		return res, nil
+	}
+	if res, ok := checkLanded(); ok {
+		return res, nil
 	}
 	release, err := r.enterLand()
 	if err != nil {
@@ -371,15 +490,25 @@ func (r *Repo) LandInto(wsID, parentWsID, expectedParentTree, previewID, idemKey
 	defer release()
 	r.landMu.Lock()
 	defer r.landMu.Unlock()
-	return r.landIntoLocked(wsID, parentWsID, false, expectedParentTree, previewID, idemKey)
+	// 拿到 landMu 之后再查一次幂等/已落地：并发同 key 的两个请求都可能在
+	// 入口检查之后才到达这里，第二次必须重放而不是撞上「子工作区已删除」。
+	if res, ok, err := checkIdem(); err != nil {
+		return nil, err
+	} else if ok {
+		return res, nil
+	}
+	if res, ok := checkLanded(); ok {
+		return res, nil
+	}
+	return r.landIntoLocked(wsID, opt)
 }
 
-func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
-	expectedParentTree, previewID, idemKey string) (*LandResult, error) {
+func (r *Repo) landIntoLocked(wsID string, opt LandIntoOptions) (*LandResult, error) {
+	preview, parentWsID := opt.Preview, opt.ParentWsID
 	// 兼容旧调用方：如果传入的是历史 hidden preview 工作区（mg_*），仍然
 	// 做 24h 过期校验；新协议下 preview_id == 子工作区 id，不再单独建 preview。
-	if previewID != "" && previewID != wsID {
-		if pw, err := r.DB.GetWorkspace(previewID); err == nil {
+	if opt.PreviewID != "" && opt.PreviewID != wsID {
+		if pw, err := r.DB.GetWorkspace(opt.PreviewID); err == nil {
 			if time.Now().UnixMilli()-pw.CreatedTS > int64(24*time.Hour/time.Millisecond) {
 				return nil, ErrPreviewExpired
 			}
@@ -407,61 +536,23 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if parent.State != meta.StateActive {
 		return nil, fmt.Errorf("%w: 父工作区状态为 %s", workspace.ErrWrongState, parent.State)
 	}
-	if err := r.WS.Sync(parentWsID); err != nil {
-		return nil, err
+
+	// 子 → 父持写锁：合并/校验/落盘期间禁止 ws_rebase / ws_drop / 另一次采集
+	// 改写这两个工作区。所有 land 已由 landMu 串行化，因此不会出现反向持锁。
+	res, err := func() (*LandResult, error) {
+		unlockChild := r.WS.LockWorkspace(wsID)
+		defer unlockChild()
+		unlockParent := r.WS.LockWorkspace(parentWsID)
+		defer unlockParent()
+		return r.mergeIntoParentLocked(wsID, parentWsID, opt)
+	}()
+	if err != nil || res == nil {
+		return res, err
 	}
-	if err := r.WS.Sync(wsID); err != nil {
-		return nil, err
-	}
-	childTree, err := r.WS.EffectiveTree(wsID)
-	if err != nil {
-		return nil, err
-	}
-	childBase, err := r.Store.GetTree(child.BaseTree)
-	if err != nil {
-		return nil, err
-	}
-	childEffective, err := r.Store.GetTree(childTree)
-	if err != nil {
-		return nil, err
-	}
-	parentTree, err := r.WS.EffectiveTree(parentWsID)
-	if err != nil {
-		return nil, err
-	}
-	if expectedParentTree != "" {
-		exp, err := hash.Parse(expectedParentTree)
-		if err != nil || exp != parentTree {
-			return nil, fmt.Errorf("%w: parent tree 已变化", ErrTargetMoved)
-		}
-	}
-	ops, err := capture.Diff("__land_into__", childBase, childEffective, r.Store, r.CaptureOpt)
-	if err != nil {
-		return nil, err
-	}
-	parentTreeObj, err := r.Store.GetTree(parentTree)
-	if err != nil {
-		return nil, err
-	}
-	// 冲突 key 含 WsID：这里必须**恒用子工作区 id**，不能因为调用方传了
-	// preview_id 就换 key 域。否则「preview → resolve → 带 preview_id 重试」
-	// 会算出新 key，解决记录永远匹配不上（沙盒 #66.2 的死循环）。
-	replayed, err := op.Replay(parentTreeObj, ops, r.Store, op.Options{
-		WsID: wsID, MaxMatches: op.DefaultMaxMatches,
-		Resolver: r.DB.Resolver(), Candidates: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-	res := &LandResult{
-		OpsCount: len(ops), Files: summarize(ops), Conflicts: replayed.Conflicts,
-		CanLand: len(replayed.Conflicts) == 0, AutoMerged: replayed.AutoMerged,
-		TargetHead: parentTree, WSTree: childTree, PreviewID: wsID,
-	}
-	if len(replayed.Conflicts) > 0 {
+	if len(res.Conflicts) > 0 {
 		// 冲突挂在**子工作区**上：conflict_list(child) / conflict_resolve_all(child)
 		// 直接可用，不再依赖调用方记住 hidden preview id。
-		if err := r.persistConflicts(wsID, replayed.Conflicts); err != nil {
+		if err := r.persistConflicts(wsID, res.Conflicts); err != nil {
 			return nil, err
 		}
 		res.State = "conflict"
@@ -475,22 +566,249 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 	if preview {
 		return res, nil
 	}
-	// 提交：先写 journal，再把结果树写回父工作区目录并重新采集父 ops。
+	// 提交已经完成（mergeIntoParentLocked 内已写 journal、落盘、重采集）。
+	res.ParentWSID = parentWsID
+	r.dropAfterLand(res, wsID, false)
+	r.cleanupLandIntoJournal(wsID, parentWsID)
+	// 老协议遗留的 hidden preview：成功时顺手清掉。
+	if opt.PreviewID != "" && opt.PreviewID != wsID {
+		_ = r.DB.ClearConflicts(opt.PreviewID)
+		r.dropAfterLand(res, opt.PreviewID, true)
+	}
+	r.putLandIdem("ws_land_into", opt.IdempotencyKey, map[string]string{
+		"idempotency_key": opt.IdempotencyKey, "ws_id": wsID, "parent_ws_id": parentWsID,
+	}, res)
+	return res, nil
+}
+
+// mergeIntoParentLocked 在已持有子/父工作区写锁的前提下完成一次三方合并。
+func (r *Repo) mergeIntoParentLocked(wsID, parentWsID string, opt LandIntoOptions) (*LandResult, error) {
+	// 等锁期间状态可能变化，重新校验一次。
+	child, err := r.WS.Get(wsID)
+	if err != nil {
+		return nil, err
+	}
+	if child.State != meta.StateActive && child.State != meta.StateConflicted {
+		return nil, fmt.Errorf("%w: child 状态为 %s", workspace.ErrWrongState, child.State)
+	}
+	parent, err := r.WS.Get(parentWsID)
+	if err != nil {
+		return nil, err
+	}
+	if parent.Hidden || parent.Kind == "merge" || parent.LandedTS != 0 || parent.State != meta.StateActive {
+		return nil, fmt.Errorf("%w: 父工作区不可写", workspace.ErrWrongState)
+	}
+
+	// land 的采集必须看全：禁用 stat/惰性快路径，并拒绝「正在被写」的文件。
+	// 否则父的最后一笔改动会被当成未变，随后被结果树覆盖。
+	if err := r.syncForLandLocked(wsID); err != nil {
+		return nil, err
+	}
+	if err := r.syncForLandLocked(parentWsID); err != nil {
+		return nil, err
+	}
+	// 重新读取：Sync 刚推进了 ops_epoch，结果里要报告同步后的版本。
+	if child, err = r.WS.Get(wsID); err != nil {
+		return nil, err
+	}
+
+	childTree, err := r.WS.EffectiveTreeLocked(wsID)
+	if err != nil {
+		return nil, err
+	}
+	parentTree, err := r.WS.EffectiveTreeLocked(parentWsID)
+	if err != nil {
+		return nil, err
+	}
+	if opt.ExpectedParentTree != "" {
+		exp, perr := hash.Parse(opt.ExpectedParentTree)
+		if perr != nil {
+			return nil, fmt.Errorf("repo: expected_parent_tree 非法: %w", perr)
+		}
+		if exp != parentTree {
+			return nil, &TokenMismatchError{Field: "parent_tree", Expected: exp.String(), Current: parentTree.String()}
+		}
+	}
+	if opt.ExpectedChildTree != "" {
+		exp, perr := hash.Parse(opt.ExpectedChildTree)
+		if perr != nil {
+			return nil, fmt.Errorf("repo: expected_child_tree 非法: %w", perr)
+		}
+		if exp != childTree {
+			return nil, &TokenMismatchError{Field: "child_tree", Expected: exp.String(), Current: childTree.String()}
+		}
+	}
+	if opt.ExpectedBaseTree != "" {
+		exp, perr := hash.Parse(opt.ExpectedBaseTree)
+		if perr != nil {
+			return nil, fmt.Errorf("repo: expected_base_tree 非法: %w", perr)
+		}
+		if exp != child.BaseTree {
+			return nil, &TokenMismatchError{Field: "base_tree", Expected: exp.String(), Current: child.BaseTree.String()}
+		}
+	}
+
+	childBase, err := r.Store.GetTree(child.BaseTree)
+	if err != nil {
+		return nil, err
+	}
+	childEffective, err := r.Store.GetTree(childTree)
+	if err != nil {
+		return nil, err
+	}
+	parentTreeObj, err := r.Store.GetTree(parentTree)
+	if err != nil {
+		return nil, err
+	}
+
+	baseFlat, err := flattenStoreTree(r.Store, child.BaseTree)
+	if err != nil {
+		return nil, err
+	}
+	childFlat, err := flattenStoreTree(r.Store, childTree)
+	if err != nil {
+		return nil, err
+	}
+	parentFlat, err := flattenStoreTree(r.Store, parentTree)
+	if err != nil {
+		return nil, err
+	}
+	childChanged := diffFlatPaths(baseFlat, childFlat)
+	parentChanged := diffFlatPaths(baseFlat, parentFlat)
+	bothChanged := intersectionPaths(childChanged, parentChanged)
+
+	outOfScope := outOfScopePaths(childChanged, opt.AllowedPaths, opt.AllowedPrefixes)
+	if len(outOfScope) > 0 && !opt.Preview {
+		return nil, &PathNotAllowedError{Paths: outOfScope}
+	}
+
+	ops, err := capture.Diff("__land_into__", childBase, childEffective, r.Store, r.CaptureOpt)
+	if err != nil {
+		return nil, err
+	}
+	var forceConflict map[string]bool
+	if opt.StrictMerge && len(bothChanged) > 0 {
+		forceConflict = make(map[string]bool, len(bothChanged))
+		for _, p := range bothChanged {
+			forceConflict[p] = true
+		}
+	}
+	// 冲突 key 含 WsID：这里必须**恒用子工作区 id**，不能因为调用方传了
+	// preview_id 就换 key 域。否则「preview → resolve → 带 preview_id 重试」
+	// 会算出新 key，解决记录永远匹配不上（沙盒 #66.2 的死循环）。
+	replayed, err := op.Replay(parentTreeObj, ops, r.Store, op.Options{
+		WsID: wsID, MaxMatches: op.DefaultMaxMatches,
+		Resolver: r.DB.Resolver(), Candidates: true,
+		ForceConflictPaths: forceConflict,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	res := &LandResult{
+		OpsCount: len(ops), Files: summarize(ops), Conflicts: replayed.Conflicts,
+		CanLand: len(replayed.Conflicts) == 0, AutoMerged: replayed.AutoMerged,
+		TargetHead: parentTree, WSTree: childTree, PreviewID: wsID,
+		BaseTree: child.BaseTree, ChildTree: childTree,
+		ParentTreeBefore: parentTree, ParentTreeAfter: parentTree,
+		ChildOnlyChangedPaths:  subtractPaths(childChanged, parentChanged),
+		ParentOnlyChangedPaths: subtractPaths(parentChanged, childChanged),
+		BothChangedPaths:       bothChanged,
+		AutoMergedPaths:        replayed.AutoMergedPaths,
+		OutOfScopePaths:        outOfScope,
+	}
+	conflictSet := conflictPathSet(replayed.Conflicts)
+	res.ConflictPaths = sortedKeys(conflictSet)
+	res.WSOpsEpoch = child.OpsEpoch
+	// 结果树中「与父树不同」的路径就是本次真正要写的集合。
+	resultFlat, err := flattenStoreTree(r.Store, replayed.Tree.ID())
+	if err != nil {
+		return nil, err
+	}
+	applyPaths := diffFlatPaths(parentFlat, resultFlat)
+	// 不变量：只允许写子会话真正改过的路径。违反说明合并实现越界，
+	// 宁可拒绝也不能把「子会话没碰的文件」写回父工作区。
+	if p, ok := subsetOf(applyPaths, childChanged); !ok {
+		return nil, fmt.Errorf("%w: %s", ErrLandInvariant, p)
+	}
+	res.AppliedPaths = applyPaths
+	res.Paths = buildPathStates(baseFlat, parentFlat, childFlat, resultFlat, conflictSet, res.AutoMergedPaths)
+	if len(outOfScope) > 0 {
+		// preview 不报错，但必须让调用方看见「这次不能直接落」。
+		res.CanLand = false
+	}
+
+	if len(replayed.Conflicts) > 0 {
+		return res, nil
+	}
+	if opt.Preview {
+		return res, nil
+	}
+	// 写前逐路径校验：父工作区在这些路径上必须仍等于 parentTreeBefore。
+	// 这是 expected_parent_tree 之外的第二道锁，能挡住「读树之后 agent 直接写盘」。
+	mismatched, err := r.WS.VerifyBeforeWrite(parentWsID, parentTree, applyPaths)
+	if err != nil {
+		return nil, err
+	}
+	if len(mismatched) > 0 {
+		return nil, &ParentMovedError{WSID: parentWsID, Paths: mismatched,
+			Expected: parentTree.String()}
+	}
+	// 提交：先写 journal，再只写差异路径，最后重新采集父 ops。
 	if err := r.DB.InsertLandIntoJournal(wsID, parentWsID, parentTree.String(),
 		replayed.Tree.ID().String()); err != nil {
 		return nil, err
 	}
-	if err := r.WS.ApplyTree(parentWsID, replayed.Tree); err != nil {
+	if err := r.WS.ApplyTreeDeltaLocked(parentWsID, parentTree, replayed.Tree); err != nil {
 		return nil, err
 	}
-	res.TargetHead = replayed.Tree.ID()
+	after, err := r.WS.EffectiveTreeLocked(parentWsID)
+	if err != nil {
+		return nil, err
+	}
+	res.ParentTreeAfter = after
+	res.TargetHead = after
 	res.State = "done"
-	if err := r.DB.InsertLandedWSWithTarget(wsID, replayed.Tree.ID().String(),
+	if after != replayed.Tree.ID() {
+		afterFlat, ferr := flattenStoreTree(r.Store, after)
+		if ferr == nil {
+			res.PostApplyMismatch = diffFlatPaths(resultFlat, afterFlat)
+		}
+		msg := fmt.Sprintf("落盘后父有效树与重放结果不同（%s）", after.String())
+		if len(res.PostApplyMismatch) > 0 {
+			msg += fmt.Sprintf("；差异路径: %s", strings.Join(res.PostApplyMismatch, ", "))
+		}
+		res.Warnings = append(res.Warnings, msg)
+		log.Printf("p37: %s", msg)
+	}
+	if err := r.DB.InsertLandedWSWithTarget(wsID, after.String(),
 		"workspace", parentWsID, time.Now().UnixMilli()); err != nil {
 		return nil, err
 	}
 	_ = r.DB.ClearConflicts(wsID)
-	r.dropAfterLand(res, wsID, false)
+	return res, nil
+}
+
+// syncForLandLocked 是全量采集 + 不稳定文件重试。
+func (r *Repo) syncForLandLocked(wsID string) error {
+	const attempts = 3
+	for i := 0; i < attempts; i++ {
+		if err := r.WS.SyncStrictLocked(wsID); err != nil {
+			return err
+		}
+		unstable := r.WS.LastUnstable(wsID)
+		if len(unstable) == 0 {
+			return nil
+		}
+		if i == attempts-1 {
+			return &UnstableWSError{WSID: wsID, Paths: unstable}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil
+}
+
+func (r *Repo) cleanupLandIntoJournal(wsID, parentWsID string) {
 	if js, err := r.DB.ListLandIntoJournal(); err == nil {
 		for _, j := range js {
 			if j.WsID == wsID && j.ParentWsID == parentWsID {
@@ -498,16 +816,6 @@ func (r *Repo) landIntoLocked(wsID, parentWsID string, preview bool,
 			}
 		}
 	}
-	// 老协议遗留的 hidden preview：成功时顺手清掉。
-	if previewID != "" && previewID != wsID {
-		_ = r.DB.ClearConflicts(previewID)
-		r.dropAfterLand(res, previewID, true)
-	}
-	res.ParentWSID = parentWsID
-	r.putLandIdem("ws_land_into", idemKey, map[string]string{
-		"idempotency_key": idemKey, "ws_id": wsID, "parent_ws_id": parentWsID,
-	}, res)
-	return res, nil
 }
 
 // reconcileLandInto 在启动时补做未完成的 ws_land_into。
@@ -532,7 +840,12 @@ func (r *Repo) reconcileLandInto() error {
 		if err != nil {
 			continue
 		}
-		if err := r.WS.ApplyTree(j.ParentWsID, target); err != nil {
+		before, err := hash.Parse(j.BeforeTree)
+		if err != nil {
+			continue
+		}
+		// 只重放 before→result 的差异路径：崩溃恢复同样不能整树覆盖父目录。
+		if err := r.WS.ApplyTreeDelta(j.ParentWsID, before, target); err != nil {
 			continue
 		}
 		_ = r.DB.DeleteLandIntoJournal(j.ID)

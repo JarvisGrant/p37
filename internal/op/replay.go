@@ -53,6 +53,16 @@ type Options struct {
 	// 用于跟随对侧已经落地的重命名（§6.3 rename_vs_edit）。
 	// nil 表示不做跟随。
 	Follow map[string]string
+	// NoAutoMergePaths 里的路径禁用 §6.3 的不重叠行自动合并。
+	//
+	// merge_policy=strict 时由调用方填入「父子双方都改过」的路径集合：
+	// 同一路径双方都动过就必须显式裁决，不静默取并集。
+	NoAutoMergePaths map[string]bool
+	// ForceConflictPaths 里的路径跳过 place 直接进入冲突判定。
+	//
+	// 与 NoAutoMergePaths 的区别：即使 hunk 能在目标里唯一定位（strict 语义下
+	// 也算「双方都改过」），也强制交给调用方裁决。
+	ForceConflictPaths map[string]bool
 }
 
 // ReplayResult 是一次重放的结果。
@@ -69,6 +79,21 @@ type ReplayResult struct {
 	// 例如两侧改的是同一文件的不同行 —— 这是最常见的「冲突」，
 	// 按 §6.3 它根本不需要人来裁决。
 	AutoMerged int
+	// AutoMergedPaths 是被自动合并消化掉的路径（去重、稳定顺序）。
+	AutoMergedPaths []string
+
+	autoMergedSeen map[string]bool
+}
+
+func (r *ReplayResult) markAutoMerged(path string) {
+	if r.autoMergedSeen == nil {
+		r.autoMergedSeen = map[string]bool{}
+	}
+	if r.autoMergedSeen[path] {
+		return
+	}
+	r.autoMergedSeen[path] = true
+	r.AutoMergedPaths = append(r.AutoMergedPaths, path)
 }
 
 // Replay 把 ops 依次重放到 base 树上（§6.5）。
@@ -314,24 +339,26 @@ func (c *replayCtx) applyHunksTo(path string, o *Op) error {
 
 	// 逐 hunk 放置，**原地推进**目标。
 	placed := cur
+	force := c.opt.ForceConflictPaths[path]
 	for hi := range o.Hunks {
 		h := &o.Hunks[hi]
-		next, ok := Place(h, placed, h.StartHint, c.opt.MaxMatches)
-		if ok {
-			placed = next
-			continue
-		}
-
-		// §6.3 第一条规则：两侧改的是**不重叠的行** —— 自动都保留。
-		//
-		// 判据（要求唯一匹配，不唯一就退回冲突，绝不猜）：
-		//   Remove 非空 -> 本侧要替换的那段原文在目标里仍**唯一**存在，
-		//                  说明对侧没碰这些行，直接把 Remove 换成 Insert。
-		//   Remove 为空 -> 对侧在同一锚点插过内容，本侧内容接在其后。
-		if next, ok := autoMerge(h, placed); ok {
-			placed = next
-			c.res.AutoMerged++
-			continue
+		if !force {
+			if next, ok := Place(h, placed, h.StartHint, c.opt.MaxMatches); ok {
+				placed = next
+				continue
+			}
+			// §6.3 第一条规则：两侧改的是**不重叠的行** —— 自动都保留。
+			//
+			// 判据（要求唯一匹配，不唯一就退回冲突，绝不猜）：
+			//   Remove 非空 -> 本侧要替换的那段原文在目标里仍**唯一**存在，
+			//                  说明对侧没碰这些行，直接把 Remove 换成 Insert。
+			//   Remove 为空 -> 对侧在同一锚点插过内容，本侧内容接在其后。
+			if next, ok := autoMerge(h, placed); ok && !c.opt.NoAutoMergePaths[path] {
+				placed = next
+				c.res.AutoMerged++
+				c.res.markAutoMerged(path)
+				continue
+			}
 		}
 
 		// 未决冲突：先看是否已有记录的 resolution（§6.4）。
