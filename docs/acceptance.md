@@ -1,4 +1,4 @@
-# 验收清单（v0.4.3 / format_ver=2）
+# 验收清单（v0.4.4 / format_ver=2）
 
 ## 自动化
 
@@ -68,6 +68,36 @@ P37_BIN=./p37 bash packaging/p36/ci/ws-contract.sh
 
 脚本用 5 个独立进程并发 `ws-ensure`，断言只产生 1 个工作区、5 个响应
 `ws_id` 相同；再并发 ensure 不变；drop 后 tombstone 可查。
+
+## v0.4.4 半初始化 + 幂等验收
+
+```bash
+go test ./internal/repo -run 'TestEnsureHalf|TestEnsureImportHalf|TestImportV0|TestImportFault|TestInitIdempotency|TestDefaultLineLandUpdatesRefs' -count=1 -v
+go test ./internal/hub -run 'TestInitIdempotency' -count=1 -v
+go test ./internal/mcpsrv -run 'TestRepoInitUserFile|TestRepoHealthUserFile|TestRepoInitIdempotency|TestRepoRegisterInitIfMissingUserFile' -count=1 -v
+```
+
+必须覆盖：
+
+1. 半 DB + v0 空 + user.txt + `mode=empty/repair` → `repo_not_empty`，
+   文件不变；`mode=import` → 导入成功，v0 包含 user.txt。
+2. 半 DB + v0 非空 + worktree 与 v0 相同 + `mode=import` → 只 repair，
+   不新建 v0；不同 + force=false → `repo_not_empty` +
+   `next_action=repo_init_import_force`；force=true → 替换 v0，version_count=1。
+3. 半 DB + v0 非空 + worktree 空 + force=false → 不自动覆盖；force=true 才
+   替换为空树。
+4. 有历史版本/命名 line → `repo_history_not_empty`；有活跃 workspace/lease →
+   `repo_busy`；两者 force 都无效。
+5. `repo_register(init_if_missing)` 对上述含用户文件的目录返回
+   `repo_not_empty`，不静默 repair。
+6. 同 key 同请求幂等；同 key 改 mode/name/default_line/force/path →
+   `idempotency_conflict`；并发同 key → `idempotency_in_progress` 或幂等；
+   重启 p37d 后仍然有效；root 索引删除后同 path 仍幂等，跨 path 降级 warning。
+7. `P37_IMPORT_FAULT_AT=swap_after_delete|swap_after_insert|swap_before_commit`
+   → 旧 v0/head/line/refs/version_count 不变；`after_commit_before_refs` →
+   DB head 新、refs 旧、`refs_match=false`，`repo_init(mode=repair)` 对齐 refs。
+8. default line 的 `ws_land` / `line_merge` / `line_reset` / `version_revert` /
+   `sync fetch` 后 `repo_health.refs_match=true`。
 
 ## v0.4.3 仓库初始化验收
 

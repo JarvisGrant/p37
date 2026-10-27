@@ -191,11 +191,21 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 			it.OK = false
 			it.Error = err.Error()
 		} else if in == nil || !in.Initialized {
-			if in != nil && in.FormatVer > 0 && in.FormatVer < meta.FormatVer {
+			switch {
+			case in != nil && in.FormatVer > 0 && in.FormatVer < meta.FormatVer:
 				// v1 老仓库允许启动后由 Open 自动迁移；--check 本身保持只读。
 				it.OK = true
 				it.NextAction = "migrate_on_open"
-			} else {
+			case !strict && in != nil && in.RepoDBOK:
+				// 非 strict 是 daemon 启动前门禁：允许 daemon 起来，让
+				// /ready 暴露 initialized=false，并允许 repo_init(repair)。
+				it.OK = true
+				it.NextAction = in.NextAction
+				it.Error = "repo 未完整初始化（允许启动，等待 repair）"
+				if in.Reason != "" {
+					it.Error += ": " + in.Reason
+				}
+			default:
 				it.OK = false
 				it.Error = "repo 未完整初始化"
 				if in != nil && in.Reason != "" {

@@ -8,9 +8,9 @@ systemd / L1 胶水细节见 [`../packaging/p36/README.md`](../packaging/p36/REA
 ### 1.1 发布物
 
 ```bash
-make release VERSION=0.4.3
-# dist/p37-linux-amd64-0.4.3.tar.gz
-# dist/p37-linux-amd64-0.4.3.tar.gz.sha256
+make release VERSION=0.4.4
+# dist/p37-linux-amd64-0.4.4.tar.gz
+# dist/p37-linux-amd64-0.4.4.tar.gz.sha256
 make p36-bootstrap
 # dist/p36-bootstrap/...
 ```
@@ -145,9 +145,9 @@ auth_token = "<token>"
 | `ws_broken` | 工作区目录缺失或未挂载 | `ws_reap` 回收，或 `ws_drop` 后重开 |
 | `repo_busy` | 活跃工作区/lease，或 per-repo flock 被占 | 先 `ws_list`/`lease_query` 确认；必要时 `force`，但会丢未落地数据 |
 | `repo_is_mountpoint` | 对应用卷挂载点调用 `repo_delete` | 走 `repo_unregister → guest umount → 宿主删卷` |
-| `repo_not_initialized` | path 下没有 p37 DB，或 DB 缺 head/line/refs | 读 `detail.next_action`：`repo_init` 或 `repo_init_repair`；旧 P36 可继续 `p37 init --if-missing`（0.4.3 会自动修复） |
+| `repo_not_initialized` | path 下没有 p37 DB，或 DB 缺 head/line/refs | 读 `detail.next_action`：无用户文件用 `repo_init_repair`；有用户文件用 `repo_init(mode=import)`；旧 P36 可继续 `p37 init`（有用户文件时需显式 `--mode=import`） |
 | `repo_not_empty` | `repo_init(mode=empty)` 遇到用户文件，或 import 覆盖已有版本 | 用 `mode=import`，或显式 `repo_import(force=true)`；不要删用户文件 |
-| `repo_db_corrupt` | DB 可打开但结构不可恢复（多根/对象缺失/format 不匹配） | 先看 `detail.backup_path`；0.4.3 不自动重建，需显式 `repo_init(mode=repair)` 或人工处理 |
+| `repo_db_corrupt` | DB 可打开但结构不可恢复（多根/对象缺失/format 不匹配） | 先看 `detail.backup_path`；0.4.4 不自动重建，需显式 `repo_init(mode=repair)` 或人工处理 |
 | `quota_exceeded` | `max_active`/`max_hidden`/`max_depth`/`max_fanout` 达到上限 | 读 `ws_quota`，先 `ws_drop`/`ws_reap`；不要把它当成模型空转 |
 | `land_queue_full` | 并发 land 超过 `land_queue_max` | 退避重试；检查是否有工作区长时间卡住 |
 | `sync_in_progress` | 同 repo 已有同步在跑 | 等待或检查是否有残留进程 |
@@ -169,8 +169,8 @@ auth_token = "<token>"
 
 ## 半初始化仓库修复（0.4.3+）
 
-新应用第一次 attach 时，P36 应调用 `p37 init <mountPath> --if-missing` 或 MCP
-`repo_init(mode=empty)`。0.4.3 的初始化是原子的：在 `<path>/.p37.tmp` 里建完整
+新应用第一次 attach 时，P36 应调用 MCP `repo_init(mode=empty)`（或兼容旧镜像的
+`p37 init <mountPath>`）。0.4.4 的初始化是原子的：在 `<path>/.p37.tmp` 里建完整
 布局（p37.db + v0 + default line + refs）后 rename；失败回滚。
 
 如果历史遗留了一个半成品（repo 行 + root v0，但没有 head/line/refs）：
@@ -179,12 +179,24 @@ auth_token = "<token>"
 p37 --root /srv/repos repo health <name>        # initialized=false + next_action
 p37 --root /srv/repos repo init <name> <path> --mode=repair
 # 或旧入口（兼容 P36 旧镜像）
-p37 init <path> --if-missing
+p37 init <path> --if-missing            # 无用户文件时自动 repair
+p37 init <path> --mode=import            # 有用户文件：先比较 v0，相同则 repair
+p37 init <path> --mode=import --force    # 显式替换非空 v0（危险）
+p37 init <path> --idempotency-key <key>  # 自动化脚本；无 daemon 时仅 path 级
 ```
 
 修复会认领已有的唯一 root v0，补齐 `mainline_head`、default line 与
-`refs/mainline`；**不会新建第二个 v0**，也不会删除用户文件。多个根或对象缺失
-返回 `repo_db_corrupt`，先保留 `.p37/p37.db.corrupt-<ts>` 备份。
+`refs/mainline`；**不会新建第二个 v0**，也不会删除用户文件。半初始化 DB 有用户
+文件时，`empty/repair` 返回 `repo_not_empty`，必须显式 `--mode=import`：
+currentTree == v0Tree 只 repair；v0 为空直接导入；v0 非空且不同需要 `--force`。
+多个根、历史版本/非默认 line、活跃工作区分别返回 `repo_db_corrupt` /
+`repo_history_not_empty` / `repo_busy`。
+
+幂等：`repo_init`/`repo_register(init_if_missing)` 的 key 由 root
+`registry.db` 的 `init_idempotency` 表校验；同 key 不同 mode/path/name/
+default_line/force 返回 `idempotency_conflict`，并发返回
+`idempotency_in_progress`。`p37 init` 默认不传 key，自动化脚本用
+`--idempotency-key`；没有 daemon/root 时只能做 path 级兜底。
 
 诊断：
 

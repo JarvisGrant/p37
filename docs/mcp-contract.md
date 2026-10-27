@@ -1,4 +1,4 @@
-# p37 MCP 契约（v0.4.3 / format_ver=2）
+# p37 MCP 契约（v0.4.4 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
 `internal/mcpsrv` 的注册为准；当前注册 65 个工具。
@@ -94,7 +94,7 @@
 
 ```json
 {
-  "p37_version": "0.4.3",
+  "p37_version": "0.4.4",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -123,12 +123,16 @@
 `repo_delete` 的 `delete_remote` 当前保留但未参与删除逻辑；不会删除远端包。
 `repo_import` 的 `task` 当前只作为参数保留，不写 journal。
 
-`repo_import` 的顺序是：先采集目录并构建完整对象树、flush，再在一个 SQLite
-事务里退休旧 v0/插入新 v0/更新 head 与 line，最后写 `refs/mainline`。任何一步
-失败都不会出现 “head 指向已删除版本”。已有版本时返回 `repo_not_empty`；
-只有 `force=true` 且 `version_count<=1`、没有活跃 workspace/lease 时才允许
-覆盖初始 v0。未初始化的已注册仓库等价于 `repo_init(mode=import)`（此时
-`dir` 必须等于仓库路径）。
+`repo_import.idempotency_key` 当前保留但未参与 root `init_idempotency` 表；
+需要跨重启幂等请使用 `repo_init`。
+
+`repo_import` 与 `repo_init(mode=import)` 共用同一个 v0 状态机：先采集目录并
+构建完整对象树、flush，再比较 `currentTree` / `v0Tree`；相同只 repair，v0 为空
+时直接导入，v0 非空且不同时要求 `force=true`。替换在同一个 SQLite 事务里完成
+退休旧 v0/插入新 v0/更新 head 与 line，最后写 `refs/mainline`；任何 pre-commit
+失败都会回滚，不会出现 “head 指向已删除版本”。`version_count>1`、非默认
+line、活跃 workspace/lease 不允许 force。未初始化的已注册仓库等价于
+`repo_init(mode=import)`（此时 `dir` 必须等于仓库路径）。
 
 ### repo_export
 
@@ -176,6 +180,7 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
   "path": "/srv/repos/p34-59",
   "default_line": "main",
   "mode": "empty",
+  "force": false,
   "idempotency_key": "p34-init-p34-59"
 }
 ```
@@ -192,17 +197,34 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
 }
 ```
 
-- `mode=empty`：只允许空目录。`lost+found`、`workspaces`、`.p37*` 不算用户
-  文件（ext4 新卷根目录一定有 `lost+found`）。
-- `mode=import`：把目录中的用户文件作为 v0 导入；同样排除上述目录。
-- `mode=repair`：已有 `.p37/p37.db` 但缺 head/line/refs 时补齐；**认领已有的
-  唯一 root v0，不新建第二个根**。多个根/对象缺失返回 `repo_db_corrupt` +
-  `backup_path`。
-- 已完整初始化时幂等返回，不重复建 v0/line。
+- `worktree` = repo root 下排除 `.p37*`、`workspaces`、`lost+found` 的用户文件。
+- `mode=empty`：只允许空 worktree；有用户文件返回 `repo_not_empty`，
+  `detail.next_action=repo_init_import`，不改 DB、不动文件。
+- `mode=repair`：只修复已有 DB 的 head/line/refs；有用户文件时同样返回
+  `repo_not_empty`，不允许静默 repair。没有 DB 返回 `repo_not_initialized`。
+- `mode=import` 的状态机：
+  - 没有 DB / 没有 v0：完整导入；
+  - `currentTree == v0Tree`：只 repair 元数据，`repaired=true, imported=false`；
+  - v0 为空树、currentTree 非空：直接导入（不需要 force）；
+  - v0 非空、currentTree 不同或为空：`force=false` 返回 `repo_not_empty`
+    + `next_action=repo_init_import_force`；`force=true` 才替换 v0；
+  - `version_count>1`、存在非默认 line：`repo_history_not_empty`，force 也不行；
+  - 有活跃 workspace/lease：`repo_busy`，force 也不行；
+  - 多个 root v0：`repo_db_corrupt` + `backup_path`，force 也不行。
+- 已完整初始化时：`mode=empty/repair` 幂等返回；`mode=import` 仍会按上面的
+  same/different 判断（same 只 repair，different 需要 force）。
 - 新仓库在 `<path>/.p37.tmp` 里完整建好后 `rename` 成 `.p37`；失败回滚，
   不留下半套 `.p37`。残留 `.p37.tmp` 会在下次初始化时清理。
 - 并发初始化用 root 级文件锁串行化：一个创建，另一个返回已初始化。
-- 幂等键持久化在 `.p37/init.json`（registry 是本地临时库）。
+- 幂等键：
+  - root 级 `init_idempotency` 表（`<root>/.p37/registry.db`）记录
+    `key/path/mode/name/default_line/force/request_hash/status/result_json`；
+  - 同 key 同 request 返回原结果；同 key 不同 request 返回
+    `idempotency_conflict`；同 key 正在处理返回 `idempotency_in_progress`
+    （`retryable=true`）；
+  - 每个 repo 的 `.p37/init.json` 保留最近 32 个 key 的 `requests` map，
+    作为 root 索引丢失时的同 path 兜底；跨 path 冲突在 root 索引丢失后降级；
+  - root 索引不可用/CLI 本地无 daemon 时记录 warning，按 path 级幂等。
 - 生产环境要求 `mount_point=true`；开发/CI 可用 CLI
   `--allow-nonpersistent` 或 `P37_ALLOW_NONPERSISTENT=1` 放宽，MCP 不暴露该字段。
 - 路径非法/不在 root/符号链接逃逸/非持久卷返回 `invalid_path`，
@@ -232,6 +254,9 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
 - 同 path 已注册且完整时幂等返回已有 Entry。
 - `init_if_missing=true` **保留但已 deprecated**：内部等价于
   `repo_init(mode=empty)`，失败完整回滚；新调用方应直接用 `repo_init`。
+- `idempotency_key` 只在 `init_if_missing=true` 且确实触发初始化时传给
+  `repo_init`；仓库已完整时按 strict register 处理，key 被忽略，不会因 key
+  冲突失败。`repo_init` 的 root 级 key 规则见上节。
 - 同名但已注册在**不同路径**：默认返回 `repo_path_mismatch`，不会静默复用旧
   路径；只有显式 `rebind=true` 才把 registry 指针改到 `path`。`rebind` 只改控制
   面，不搬数据；目标必须已有完整 `p37.db`（缺 head/line/refs 时返回
@@ -571,7 +596,7 @@ repo_health { "repo": "my-app", "deep": true }
   registry 还没有行时直接探测挂载点。
 - `with_quota=false`：P36 `/ready` 用。不打开 repo、不跑 EnsureSchema/migrate，
   只做 repo.json + 只读 SQLite + 短 TTL 缓存。
-- `deep=true`：doctor 用，额外校验 head 的对象树存在。
+- `deep=true`：doctor/attach 用，额外校验 head（或唯一 root v0）的对象树存在。
 
 未初始化时仍返回 `ok=true`（HTTP 200），不能当成 p37d down：
 
@@ -585,12 +610,20 @@ repo_health { "repo": "my-app", "deep": true }
   "default_line_ready": false,
   "mainline_head": "0000...",
   "version_count": 0,
+  "data_ok": false,
   "repo_db_ok": true,
   "repo_json_ok": false,
   "root_ok": true,
   "refs_ok": false,
+  "refs_match": false,
+  "user_files": 0,
+  "root_count": 1,
+  "root_tree_empty": true,
+  "history_not_empty": false,
+  "active_workspaces": 0,
+  "leases": 0,
   "format_ver": 2,
-  "p37_version": "0.4.3",
+  "p37_version": "0.4.4",
   "warnings": ["mainline_head_missing"]
 }
 ```
@@ -605,8 +638,9 @@ repo_health { "repo": "my-app", "deep": true }
   "default_line_ready": true,
   "refs_ok": true,
   "refs_match": true,
+  "data_ok": true,
   "repo_db_ok": true,
-  "p37_version": "0.4.3",
+  "p37_version": "0.4.4",
   "quota": {"max_active":8,"active_used":2,"active_available":6,
             "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
             "landed":0,"broken":0,"workspaces":[]},
@@ -623,10 +657,26 @@ repo_health { "repo": "my-app", "deep": true }
 判定规则：repo 行存在、`root` 与 path 一致、`mainline_head` 非零、
 `version_count>0`、default line 存在且 head 指向存在的 version、
 `refs/mainline` 存在且指向存在的 version、DB 可读、format_ver 匹配。任一不满足
-`initialized=false`，并给出 `next_action` ∈ `repo_init|repo_init_repair|repo_init_import`。
-`refs_match=false` 表示 ref 与 DB head 不同（例如只 land 到命名 line），这是
-信息字段，不单独导致 `initialized=false`；`repo_init(mode=repair)` 会把 ref
-对齐到 DB head。
+`initialized=false`。
+
+`next_action` 的口径：
+
+- 缺 DB / 空 worktree：`repo_init`；
+- 数据完整、只缺 refs/root（`data_ok=true`）：`repo_init_repair`，即使有用户文件
+  也允许（只修元数据，不导入）；
+- v0 为空 + 有用户文件：`repo_init_import`；
+- v0 非空 + 有用户文件：`repo_init_import`；`repo_init(mode=import, force=false)`
+  会先比较 currentTree/v0Tree，相同则 repair，不同则返回
+  `repo_not_empty + next_action=repo_init_import_force`；health 不在线做完整
+  worktree 建树，避免 `/ready` 变重；
+- 有历史版本/非默认 line：health 给 `repo_init_repair`（修元数据安全），
+  `repo_init(mode=import)` 会返回 `repo_history_not_empty`；
+- 有活跃 workspace/lease：`stop_workspaces`。
+
+`refs_ok=true` 表示 ref 存在且指向存在的 version；`refs_match=true` 表示 ref
+等于 DB head。0.4.4 起 default line 的 land/merge/reset/revert/sync 都会同步
+`refs/mainline`，P36 `/ready` 应要求两者都为 true；如果为 false，
+`repo_init(mode=repair)` 会对齐。
 
 ## 历史读取
 
@@ -679,7 +729,8 @@ repo_health { "repo": "my-app", "deep": true }
 
 ```text
 repo_required repo_not_found repo_exists repo_busy repo_not_initialized
-repo_not_empty repo_db_corrupt
+repo_not_empty repo_history_not_empty repo_db_corrupt
+idempotency_in_progress
 repo_name_mismatch repo_path_exists repo_is_mountpoint
 registry_busy
 line_not_found line_exists line_protected
@@ -706,7 +757,12 @@ invalid_argument internal not_found
 - `repo_db_corrupt`：DB 可打开但结构不可恢复（多个 root/no unique head/
   head tree 缺失/format 不匹配），或 `.p37` 存在但 DB 缺失且目录非空。
   `detail` 带 `path`、`backup_path`、`retryable=false`、
-  `next_action=repo_init_repair`。0.4.3 不自动重建，先备份再要求显式修复。
+  `next_action=repo_init_repair`。0.4.4 不自动重建，先备份再要求显式修复。
+- `repo_history_not_empty`：`repo_init(mode=import)` / `repo_import` 发现
+  `version_count>1` 或存在非默认 line，不能覆盖 v0；`detail` 带
+  `version_count`/`lines`，`next_action=repo_init_repair`。force 也无效。
+- `idempotency_in_progress`：同一个 init key 正在被另一个请求处理；
+  `detail.idempotency_key`，`retryable=true`，`retry_after_ms=1000`。
 - `repo_not_initialized`：`detail.reason` 至少是
   `repo_db_missing_or_corrupt`/`mainline_head_missing`/`default_line_missing`/
   `refs_missing_or_invalid`，`detail.next_action` 是 `repo_init` 或

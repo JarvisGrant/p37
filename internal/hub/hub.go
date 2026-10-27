@@ -150,6 +150,23 @@ func New(root string, cfg config.Config) (*Hub, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS init_idempotency (
+	  key          TEXT PRIMARY KEY,
+	  path         TEXT NOT NULL,
+	  mode         TEXT NOT NULL,
+	  name         TEXT NOT NULL,
+	  default_line TEXT NOT NULL,
+	  force        INTEGER NOT NULL DEFAULT 0,
+	  request_hash TEXT NOT NULL,
+	  status       TEXT NOT NULL,
+	  result_json  TEXT NOT NULL DEFAULT '',
+	  created_ts   INTEGER NOT NULL,
+	  updated_ts   INTEGER NOT NULL,
+	  lease_until  INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	_ = os.Chmod(regPath, 0o600)
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)

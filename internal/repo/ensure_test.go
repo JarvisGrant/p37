@@ -13,6 +13,7 @@ import (
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/tree"
 	"github.com/chenyiwen/p37/internal/version"
+	"github.com/chenyiwen/p37/internal/workspace"
 )
 
 func ensureOpt(mode InitMode) EnsureOptions {
@@ -395,5 +396,397 @@ func TestImportRefusesWhenNamedLineExists(t *testing.T) {
 	head, _, _ := r.DB.Head()
 	if _, err := r.DB.GetVersion(head); err != nil {
 		t.Fatalf("旧 head 丢失: %v", err)
+	}
+}
+
+func breakMetadata(t *testing.T, root string) {
+	t.Helper()
+	db, err := meta.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteLine("main", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if err := os.Remove(filepath.Join(root, ".p37", "refs", "mainline")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func repoHead(t *testing.T, root string) (hash.ID, int64) {
+	t.Helper()
+	db, err := meta.OpenReadOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	st, err := db.RootState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Repo.MainlineHead, st.VersionCount
+}
+
+func treeHas(t *testing.T, root string, id hash.ID, name string) bool {
+	t.Helper()
+	db, err := meta.OpenReadOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	bs, err := cas.NewLocalFS(filepath.Join(root, ".p37"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
+	v, err := db.GetVersion(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := store.GetTree(v.Tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range tr.Entries {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEnsureHalfUserFilesRefusesEmptyRepair(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "user.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, beforeCount := repoHead(t, root)
+	breakMetadata(t, root)
+	for _, mode := range []InitMode{InitEmpty, InitRepair} {
+		_, err := Ensure(root, ensureOpt(mode))
+		var ne *NotEmptyError
+		if !errors.As(err, &ne) || ne.NextAction != "repo_init_import" {
+			t.Fatalf("mode=%s err=%v", mode, err)
+		}
+		head, count := repoHead(t, root)
+		if head != before || count != beforeCount {
+			t.Fatalf("mode=%s changed DB: head=%s count=%d", mode, head, count)
+		}
+		if b, _ := os.ReadFile(filepath.Join(root, "user.txt")); string(b) != "U\n" {
+			t.Fatalf("用户文件被改动: %q", b)
+		}
+	}
+}
+
+func TestEnsureImportHalfEmptyV0(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "user.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	breakMetadata(t, root)
+	res, err := Ensure(root, ensureOpt(InitImport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Imported || res.Repo.VersionCount != 1 {
+		t.Fatalf("res=%+v", res)
+	}
+	head, _ := repoHead(t, root)
+	if !treeHas(t, root, head, "user.txt") {
+		t.Fatal("user.txt 未进入 v0")
+	}
+}
+
+func importedHalf(t *testing.T, root, worktree string) hash.ID {
+	t.Helper()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Import(src); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if worktree != "" {
+		if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(worktree), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	head, _ := repoHead(t, root)
+	breakMetadata(t, root)
+	return head
+}
+
+func TestEnsureImportHalfNonEmptySameRepairsOnly(t *testing.T) {
+	root := t.TempDir()
+	old := importedHalf(t, root, "A\n")
+	res, err := Ensure(root, ensureOpt(InitImport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Repaired || res.Imported {
+		t.Fatalf("res=%+v", res)
+	}
+	head, count := repoHead(t, root)
+	if head != old || count != 1 {
+		t.Fatalf("head=%s want=%s count=%d", head, old, count)
+	}
+}
+
+func TestEnsureImportHalfNonEmptyDifferentForce(t *testing.T) {
+	root := t.TempDir()
+	old := importedHalf(t, root, "B\n")
+	_, err := Ensure(root, ensureOpt(InitImport))
+	var ne *NotEmptyError
+	if !errors.As(err, &ne) || ne.NextAction != "repo_init_import_force" {
+		t.Fatalf("err=%v", err)
+	}
+	head, count := repoHead(t, root)
+	if head != old || count != 1 {
+		t.Fatalf("force=false changed DB: head=%s count=%d", head, count)
+	}
+	opt := ensureOpt(InitImport)
+	opt.Force = true
+	res, err := Ensure(root, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Imported {
+		t.Fatalf("res=%+v", res)
+	}
+	head, count = repoHead(t, root)
+	if head == old || count != 1 {
+		t.Fatalf("force=true head=%s old=%s count=%d", head, old, count)
+	}
+}
+
+func TestEnsureImportHalfWorktreeEmptyForce(t *testing.T) {
+	root := t.TempDir()
+	old := importedHalf(t, root, "")
+	_, err := Ensure(root, ensureOpt(InitImport))
+	var ne *NotEmptyError
+	if !errors.As(err, &ne) || ne.NextAction != "repo_init_import_force" {
+		t.Fatalf("err=%v", err)
+	}
+	opt := ensureOpt(InitImport)
+	opt.Force = true
+	res, err := Ensure(root, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Imported {
+		t.Fatalf("res=%+v", res)
+	}
+	head, _ := repoHead(t, root)
+	if head == old {
+		t.Fatal("空 worktree 未替换 v0")
+	}
+	if treeHas(t, root, head, "a.txt") {
+		t.Fatal("v0 仍包含 a.txt")
+	}
+}
+
+func TestImportV0RefusesHistory(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.CreateLine("s", "mainline", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Ensure(root, ensureOpt(InitImport))
+	var he *HistoryNotEmptyError
+	if !errors.As(err, &he) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestImportV0RefusesBusy(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.WS.Open(workspace.OpenRequest{Parent: "mainline", TaskDesc: "busy"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if err := os.WriteFile(filepath.Join(root, "u.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	breakMetadata(t, root)
+	_, err = Ensure(root, ensureOpt(InitImport))
+	var be *BusyError
+	if !errors.As(err, &be) || len(be.Workspaces) == 0 {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestInitIdempotencyKeyConflict(t *testing.T) {
+	root := t.TempDir()
+	opt := ensureOpt(InitEmpty)
+	opt.IdempotencyKey = "k1"
+	if _, err := Ensure(root, opt); err != nil {
+		t.Fatal(err)
+	}
+	head, count := repoHead(t, root)
+	if _, err := Ensure(root, opt); err != nil {
+		t.Fatalf("same request should be idempotent: %v", err)
+	}
+	head2, count2 := repoHead(t, root)
+	if head2 != head || count2 != count {
+		t.Fatalf("idempotent changed repo: %s/%d -> %s/%d", head, count, head2, count2)
+	}
+	opt.Mode = InitImport
+	_, err := Ensure(root, opt)
+	var ie *IdemConflictError
+	if !errors.As(err, &ie) || ie.Field != "mode" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func preparedImportSwap(t *testing.T) (string, hash.ID) {
+	t.Helper()
+	root := t.TempDir()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Import(src); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	head, _ := repoHead(t, root)
+	return root, head
+}
+
+func TestImportFaultPreCommitRollsBack(t *testing.T) {
+	for _, step := range []string{"swap_after_delete", "swap_after_insert", "swap_before_commit"} {
+		t.Run(step, func(t *testing.T) {
+			root, old := preparedImportSwap(t)
+			r, err := Open(root, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("P37_IMPORT_FAULT_AT", step)
+			if _, err := r.ImportV0(root, true); err == nil {
+				t.Fatalf("%s 未触发", step)
+			}
+			t.Setenv("P37_IMPORT_FAULT_AT", "")
+			_ = r.Close()
+			head, count := repoHead(t, root)
+			if head != old || count != 1 {
+				t.Fatalf("rollback failed: head=%s want=%s count=%d", head, old, count)
+			}
+			if b, _ := os.ReadFile(filepath.Join(root, "a.txt")); string(b) != "B\n" {
+				t.Fatalf("用户文件被改动: %q", b)
+			}
+			ref, err := os.ReadFile(filepath.Join(root, ".p37", "refs", "mainline"))
+			if err != nil || string(ref) != old.String()+"\n" {
+				t.Fatalf("refs=%q err=%v", ref, err)
+			}
+		})
+	}
+}
+
+func TestImportFaultAfterCommitBeforeRefsRepair(t *testing.T) {
+	root, old := preparedImportSwap(t)
+	r, err := Open(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("P37_IMPORT_FAULT_AT", "after_commit_before_refs")
+	if _, err := r.ImportV0(root, true); err == nil {
+		t.Fatal("fault 未触发")
+	}
+	t.Setenv("P37_IMPORT_FAULT_AT", "")
+	_ = r.Close()
+	head, count := repoHead(t, root)
+	if head == old || count != 1 {
+		t.Fatalf("DB head 未推进: head=%s old=%s count=%d", head, old, count)
+	}
+	ref, _ := os.ReadFile(filepath.Join(root, ".p37", "refs", "mainline"))
+	if string(ref) != old.String()+"\n" {
+		t.Fatalf("refs 应保持旧值: %q", ref)
+	}
+	in, _ := CheckIntegrity(root)
+	if in.Initialized || !in.DataOK || in.NextAction != "repo_init_repair" {
+		t.Fatalf("integrity=%+v", in)
+	}
+	if _, err := Ensure(root, ensureOpt(InitRepair)); err != nil {
+		t.Fatalf("repair refs: %v", err)
+	}
+	in, _ = CheckIntegrity(root)
+	if !in.Initialized || !in.RefsMatch {
+		t.Fatalf("repair 后 integrity=%+v", in)
+	}
+}
+
+func TestDefaultLineLandUpdatesRefs(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Ensure(root, ensureOpt(InitEmpty)); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	w, err := r.WS.Open(workspace.OpenRequest{Parent: "mainline", TaskDesc: "refs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.WS.Dir(w.ID), "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.LandTo(w.ID, LandOptions{Line: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, _, _ := r.DB.Head()
+	ref, err := os.ReadFile(filepath.Join(root, ".p37", "refs", "mainline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ref) != head.String()+"\n" {
+		t.Fatalf("refs=%q head=%s res=%+v", ref, head, res)
+	}
+	in := IntegrityOpen(r)
+	if !in.Initialized || !in.RefsMatch {
+		t.Fatalf("integrity=%+v", in)
 	}
 }

@@ -65,12 +65,43 @@ func (h *Hub) InitRepo(name, path string, opt InitOptions) (*repo.EnsureResult, 
 	if err != nil {
 		return nil, &repo.PathError{Path: path, Reason: pathReason(err)}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	res, err := h.initRepoLocked(name, abs, opt)
+	mode := opt.Mode
+	if mode == "" {
+		mode = repo.InitEmpty
+	}
+	def := opt.DefaultLine
+	if def == "" {
+		def = "main"
+	}
+	req := repo.InitRequest{Path: abs, Mode: string(mode), Name: name,
+		DefaultLine: def, Force: opt.Force}
+	claim, err := h.claimInitKey(opt.IdempotencyKey, req)
 	if err != nil {
 		return nil, err
 	}
+	if claim.Done {
+		if claim.Result == nil {
+			return nil, &repo.InitInProgressError{Key: opt.IdempotencyKey}
+		}
+		return claim.Result, nil
+	}
+	if !claim.Owner {
+		return nil, &repo.InitInProgressError{Key: opt.IdempotencyKey}
+	}
+	ok := false
+	defer func() {
+		if !ok && opt.IdempotencyKey != "" {
+			h.failInitKey(opt.IdempotencyKey)
+		}
+	}()
+	h.mu.Lock()
+	res, err := h.initRepoLocked(name, abs, opt)
+	h.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	h.completeInitKey(opt.IdempotencyKey, req.Hash(), res)
+	ok = true
 	return res, nil
 }
 
@@ -156,26 +187,35 @@ func (h *Hub) initRepoLocked(name, abs string, opt InitOptions) (*repo.EnsureRes
 	}
 
 	// 已存在且完整：先做 activity/rebind 检查，再幂等返回。
+	// mode=import 例外：它要对当前 worktree 与 v0 做一致/替换判断。
 	if in, _ := repo.CheckIntegrity(abs); in != nil && in.Initialized {
-		if existing != nil && filepath.Clean(existing.Path) != filepath.Clean(abs) {
-			if err := h.rebindTargetLocked(existing, abs); err != nil {
+		if opt.Mode == repo.InitImport {
+			if existing != nil && filepath.Clean(existing.Path) != filepath.Clean(abs) {
+				if err := h.rebindTargetLocked(existing, abs); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			if existing != nil && filepath.Clean(existing.Path) != filepath.Clean(abs) {
+				if err := h.rebindTargetLocked(existing, abs); err != nil {
+					return nil, err
+				}
+			}
+			// 完整仓库不重新打开/修复（会触发 EnsureSchema 或抢 flock），
+			// 只补 repo.json/config 这类不改变数据的身份锚。
+			if err := h.ensureMetaAndConfig(abs, effID, effName, def); err != nil {
 				return nil, err
 			}
+			res, err := repo.ResultFromDisk(abs)
+			if err != nil {
+				return nil, err
+			}
+			if err := h.upsertEntryLocked(effID, effName, abs, res.Repo.DefaultLine); err != nil {
+				return nil, err
+			}
+			h.invalidateHealth(abs)
+			return res, nil
 		}
-		// 完整仓库不重新打开/修复（会触发 EnsureSchema 或抢 flock），
-		// 只补 repo.json/config 这类不改变数据的身份锚。
-		if err := h.ensureMetaAndConfig(abs, effID, effName, def); err != nil {
-			return nil, err
-		}
-		res, err := repo.ResultFromDisk(abs)
-		if err != nil {
-			return nil, err
-		}
-		if err := h.upsertEntryLocked(effID, effName, abs, res.Repo.DefaultLine); err != nil {
-			return nil, err
-		}
-		h.invalidateHealth(abs)
-		return res, nil
 	}
 
 	// 半初始化仓库如果已被本进程打开，Ensure 会拿不到 .p37/lock。
@@ -314,7 +354,9 @@ func (h *Hub) Health(ref, path string, deep bool) (*repo.Integrity, error) {
 	}
 
 	if !deep {
-		if in := h.cachedHealth(abs, false); in != nil {
+		// 只缓存“未初始化”的探测结果；initialized 仓库的 refs_match 必须
+		// 实时读，否则 land/merge 后 /ready 会短暂误报。
+		if in := h.cachedHealth(abs, false); in != nil && !in.Initialized {
 			return in, nil
 		}
 	}

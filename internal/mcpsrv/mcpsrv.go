@@ -354,9 +354,34 @@ func classify(err error) (code, msg string, detail any) {
 	}
 	var ne *repo.NotEmptyError
 	if errors.As(err, &ne) {
+		next := ne.NextAction
+		if next == "" {
+			next = "repo_init_import"
+		}
 		return "repo_not_empty", err.Error(), map[string]any{
 			"path": ne.Path, "user_files_count": ne.UserFiles,
-			"retryable": false, "next_action": "repo_init_import",
+			"retryable": false, "next_action": next,
+		}
+	}
+	var he *repo.HistoryNotEmptyError
+	if errors.As(err, &he) {
+		return "repo_history_not_empty", err.Error(), map[string]any{
+			"path": he.Path, "version_count": he.VersionCount, "lines": he.Lines,
+			"retryable": false, "next_action": "repo_init_repair",
+		}
+	}
+	var be2 *repo.BusyError
+	if errors.As(err, &be2) {
+		return "repo_busy", err.Error(), map[string]any{
+			"workspaces": be2.Workspaces, "leases": be2.Leases,
+			"retryable": false, "next_action": "stop_workspaces",
+		}
+	}
+	var ipe *repo.InitInProgressError
+	if errors.As(err, &ipe) {
+		return "idempotency_in_progress", err.Error(), map[string]any{
+			"idempotency_key": ipe.Key, "retryable": true, "retry_after_ms": 1000,
+			"next_action": "retry",
 		}
 	}
 	var de *repo.DBCorruptError
@@ -380,6 +405,10 @@ func classify(err error) (code, msg string, detail any) {
 	case errors.Is(err, repo.ErrRepoNotEmpty):
 		return "repo_not_empty", err.Error(), map[string]any{
 			"retryable": false, "next_action": "repo_init_import",
+		}
+	case errors.Is(err, repo.ErrRepoHistoryNotEmpty):
+		return "repo_history_not_empty", err.Error(), map[string]any{
+			"retryable": false, "next_action": "repo_init_repair",
 		}
 	case errors.Is(err, repo.ErrRepoBusy):
 		return "repo_busy", err.Error(), map[string]any{

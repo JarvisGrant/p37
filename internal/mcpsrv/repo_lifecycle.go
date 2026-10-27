@@ -41,10 +41,11 @@ func (s *Server) registerRepoLifecycle() {
 				return nil, coded("invalid_argument", "repo 和 path 不能为空")
 			}
 			return s.Hub.RegisterPath(a.Repo, a.Path, hub.RegisterOptions{
-				DefaultLine:   a.DefaultLine,
-				InitIfMissing: a.InitIfMissing,
-				ForceRename:   a.ForceRename,
-				Rebind:        a.Rebind,
+				DefaultLine:    a.DefaultLine,
+				InitIfMissing:  a.InitIfMissing,
+				ForceRename:    a.ForceRename,
+				Rebind:         a.Rebind,
+				IdempotencyKey: a.IdempotencyKey,
 			})
 		})
 
@@ -55,6 +56,7 @@ func (s *Server) registerRepoLifecycle() {
 		  "path":{"type":"string","description":"必须位于 root 下的绝对路径，且是持久挂载卷"},
 		  "default_line":{"type":"string","default":"main"},
 		  "mode":{"type":"string","enum":["empty","import","repair"],"default":"empty"},
+		  "force":{"type":"boolean","default":false,"description":"mode=import 时允许替换非空 v0（需无历史/命名 line/活跃工作区）"},
 		  "idempotency_key":{"type":"string"}
 		},"required":["repo","path"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -66,6 +68,7 @@ func (s *Server) registerRepoLifecycle() {
 				Path           string `json:"path"`
 				DefaultLine    string `json:"default_line"`
 				Mode           string `json:"mode"`
+				Force          bool   `json:"force"`
 				IdempotencyKey string `json:"idempotency_key"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
@@ -82,7 +85,7 @@ func (s *Server) registerRepoLifecycle() {
 				return nil, coded("invalid_argument", "mode 必须是 empty/import/repair")
 			}
 			return s.Hub.InitRepo(a.Repo, a.Path, hub.InitOptions{
-				Mode: mode, DefaultLine: a.DefaultLine,
+				Mode: mode, DefaultLine: a.DefaultLine, Force: a.Force,
 				IdempotencyKey: a.IdempotencyKey,
 			})
 		})

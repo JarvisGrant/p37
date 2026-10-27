@@ -236,41 +236,28 @@ func setRootStateTx(tx *sql.Tx, root, defaultLine string, head hash.ID, count in
 	return nil
 }
 
-// SwapRoot 用一个新 v0 替换旧 v0。
-//
-// 只允许在“旧 head 是唯一版本”时调用；调用方负责校验没有工作区/line 依赖。
-// 这是 repo_import 的提交点：先构建对象树，再在单个事务里完成替换。
+// SwapRoot 用一个新 v0 替换旧 v0（不写 repo.root）。
 func (d *DB) SwapRoot(old hash.ID, v *version.Version, defaultLine string, journal *JournalEntry) error {
-	if v == nil {
-		return errors.New("meta: swap 缺少 version")
-	}
-	if defaultLine == "" {
-		defaultLine = "main"
-	}
-	head := v.ID()
-	return d.withWrite(func(tx *sql.Tx) error {
-		if !old.IsZero() {
-			if _, err := tx.Exec(`DELETE FROM version_parent WHERE version_id=?`, old.String()); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`DELETE FROM version WHERE id=?`, old.String()); err != nil {
-				return err
-			}
-		}
-		if err := insertVersionNoJournalTx(tx, v); err != nil {
-			return err
-		}
-		if journal != nil {
-			if err := insertJournalTx(tx, *journal); err != nil {
-				return err
-			}
-		}
-		return setRootStateTx(tx, "", defaultLine, head, 1, v.Epoch)
-	})
+	return d.swapRootAt("", old, v, defaultLine, journal, nil)
 }
 
-// SwapRootAt 与 SwapRoot 相同，但显式写入 repo.root（初始化/迁移后使用）。
+// SwapRootAt 与 SwapRoot 相同，但显式写入 repo.root。
 func (d *DB) SwapRootAt(root string, old hash.ID, v *version.Version, defaultLine string, journal *JournalEntry) error {
+	return d.swapRootAt(root, old, v, defaultLine, journal, nil)
+}
+
+// SwapFault 是测试/验收用的事务内失败注入。
+type SwapFault func(step string) error
+
+// SwapRootAtWithFault 暴露事务内故障点：swap_after_delete / swap_after_insert /
+// swap_before_commit。返回 error 时整个 SQLite 事务回滚。
+func (d *DB) SwapRootAtWithFault(root string, old hash.ID, v *version.Version,
+	defaultLine string, journal *JournalEntry, fault SwapFault) error {
+	return d.swapRootAt(root, old, v, defaultLine, journal, fault)
+}
+
+func (d *DB) swapRootAt(root string, old hash.ID, v *version.Version,
+	defaultLine string, journal *JournalEntry, fault SwapFault) error {
 	if v == nil {
 		return errors.New("meta: swap 缺少 version")
 	}
@@ -278,6 +265,12 @@ func (d *DB) SwapRootAt(root string, old hash.ID, v *version.Version, defaultLin
 		defaultLine = "main"
 	}
 	head := v.ID()
+	fail := func(step string) error {
+		if fault != nil {
+			return fault(step)
+		}
+		return nil
+	}
 	return d.withWrite(func(tx *sql.Tx) error {
 		if !old.IsZero() {
 			if _, err := tx.Exec(`DELETE FROM version_parent WHERE version_id=?`, old.String()); err != nil {
@@ -287,6 +280,9 @@ func (d *DB) SwapRootAt(root string, old hash.ID, v *version.Version, defaultLin
 				return err
 			}
 		}
+		if err := fail("swap_after_delete"); err != nil {
+			return err
+		}
 		if err := insertVersionNoJournalTx(tx, v); err != nil {
 			return err
 		}
@@ -295,7 +291,13 @@ func (d *DB) SwapRootAt(root string, old hash.ID, v *version.Version, defaultLin
 				return err
 			}
 		}
-		return setRootStateTx(tx, root, defaultLine, head, 1, v.Epoch)
+		if err := fail("swap_after_insert"); err != nil {
+			return err
+		}
+		if err := setRootStateTx(tx, root, defaultLine, head, 1, v.Epoch); err != nil {
+			return err
+		}
+		return fail("swap_before_commit")
 	})
 }
 

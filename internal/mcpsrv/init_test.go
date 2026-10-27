@@ -9,6 +9,7 @@ import (
 	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
+	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/tree"
 	"github.com/chenyiwen/p37/internal/version"
 )
@@ -253,5 +254,278 @@ func TestRepoRegisterHalfRepoStructured(t *testing.T) {
 	info := hh.mustOK("repo_info", map[string]any{"repo": "p34-59"})
 	if info["version_count"] != float64(1) || info["mainline_head"] != want {
 		t.Fatalf("info=%v want=%s", info, want)
+	}
+}
+
+func importedHalfMCP(t *testing.T, path, worktree string) string {
+	t.Helper()
+	r, err := repo.Init(path, repo.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Import(src); err != nil {
+		t.Fatal(err)
+	}
+	head, _, _ := r.DB.Head()
+	_ = r.Close()
+	if worktree != "" {
+		if err := os.WriteFile(filepath.Join(path, "a.txt"), []byte(worktree), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := meta.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteLine("main", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if err := os.Remove(filepath.Join(path, ".p37", "refs", "mainline")); err != nil {
+		t.Fatal(err)
+	}
+	return head.String()
+}
+
+func TestRepoInitUserFileRules(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	// 无 DB + 用户文件：empty 拒绝。
+	p1 := filepath.Join(hh.root, "p1")
+	if err := os.MkdirAll(p1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p1, "user.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := hh.mustFail("repo_init", "repo_not_empty", map[string]any{
+		"repo": "p1", "path": p1, "mode": "empty"})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["next_action"] != "repo_init_import" {
+		t.Fatalf("detail=%v", detail)
+	}
+	if _, err := os.Stat(filepath.Join(p1, ".p37", "p37.db")); !os.IsNotExist(err) {
+		t.Fatalf("empty 拒绝后不应有 DB: %v", err)
+	}
+	// import 成功。
+	res := hh.mustOK("repo_init", map[string]any{
+		"repo": "p1", "path": p1, "mode": "import"})
+	repoInfo, _ := res["repo"].(map[string]any)
+	if repoInfo["version_count"] != float64(1) || res["imported"] != true {
+		t.Fatalf("import=%v", res)
+	}
+
+	// 半 DB + 空 v0 + 用户文件：empty/repair 拒绝，import 成功。
+	p2 := filepath.Join(hh.root, "p2")
+	hh.mustOK("repo_init", map[string]any{"repo": "p2", "path": p2, "mode": "empty"})
+	if err := os.WriteFile(filepath.Join(p2, "user.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, err := meta.Open(p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteLine("main", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	_ = os.Remove(filepath.Join(p2, ".p37", "refs", "mainline"))
+	for _, mode := range []string{"empty", "repair"} {
+		e := hh.mustFail("repo_init", "repo_not_empty", map[string]any{
+			"repo": "p2", "path": p2, "mode": mode})
+		detail, _ := e["detail"].(map[string]any)
+		if detail["next_action"] != "repo_init_import" {
+			t.Fatalf("mode=%s detail=%v", mode, detail)
+		}
+	}
+	res2 := hh.mustOK("repo_init", map[string]any{
+		"repo": "p2", "path": p2, "mode": "import"})
+	if res2["imported"] != true {
+		t.Fatalf("import=%v", res2)
+	}
+}
+
+func TestRepoInitUserFileForce(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	p1 := filepath.Join(hh.root, "same")
+	old := importedHalfMCP(t, p1, "A\n")
+	res := hh.mustOK("repo_init", map[string]any{
+		"repo": "same", "path": p1, "mode": "import"})
+	if res["repaired"] != true || res["imported"] == true {
+		t.Fatalf("same content should repair only: %v", res)
+	}
+	info := hh.mustOK("repo_info", map[string]any{"repo": "same"})
+	if info["mainline_head"] != old || info["version_count"] != float64(1) {
+		t.Fatalf("info=%v old=%s", info, old)
+	}
+
+	p2 := filepath.Join(hh.root, "diff")
+	old2 := importedHalfMCP(t, p2, "B\n")
+	e := hh.mustFail("repo_init", "repo_not_empty", map[string]any{
+		"repo": "diff", "path": p2, "mode": "import"})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["next_action"] != "repo_init_import_force" {
+		t.Fatalf("detail=%v", detail)
+	}
+	res2 := hh.mustOK("repo_init", map[string]any{
+		"repo": "diff", "path": p2, "mode": "import", "force": true})
+	if res2["imported"] != true {
+		t.Fatalf("force=%v", res2)
+	}
+	info2 := hh.mustOK("repo_info", map[string]any{"repo": "diff"})
+	if info2["mainline_head"] == old2 || info2["version_count"] != float64(1) {
+		t.Fatalf("info=%v old=%s", info2, old2)
+	}
+}
+
+func TestRepoHealthUserFileNextAction(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	// 半 DB + 空 v0 + 用户文件。
+	p1 := filepath.Join(hh.root, "p1")
+	hh.mustOK("repo_init", map[string]any{"repo": "p1", "path": p1, "mode": "empty"})
+	if err := os.WriteFile(filepath.Join(p1, "u.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := meta.Open(p1)
+	_ = db.DeleteLine("main", time.Now().UnixMilli())
+	_ = db.Close()
+	_ = os.Remove(filepath.Join(p1, ".p37", "refs", "mainline"))
+	h := hh.mustOK("repo_health", map[string]any{"path": p1, "with_quota": false})
+	if h["initialized"] != false || h["next_action"] != "repo_init_import" {
+		t.Fatalf("health=%v", h)
+	}
+	if h["user_files"] == float64(0) {
+		t.Fatalf("health=%v", h)
+	}
+
+	// 半 DB + 非空 v0 + worktree 空：repair 安全，不自动 import force。
+	p2 := filepath.Join(hh.root, "p2")
+	importedHalfMCP(t, p2, "")
+	h2 := hh.mustOK("repo_health", map[string]any{"path": p2, "with_quota": false})
+	if h2["initialized"] != false || h2["next_action"] != "repo_init_repair" {
+		t.Fatalf("health=%v", h2)
+	}
+	if h2["root_tree_empty"] != false || h2["user_files"] != float64(0) {
+		t.Fatalf("health=%v", h2)
+	}
+}
+
+func TestRepoInitIdempotencyMCP(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	p1 := filepath.Join(hh.root, "p1")
+	res := hh.mustOK("repo_init", map[string]any{
+		"repo": "p1", "path": p1, "mode": "empty", "idempotency_key": "k1"})
+	repo1, _ := res["repo"].(map[string]any)
+	again := hh.mustOK("repo_init", map[string]any{
+		"repo": "p1", "path": p1, "mode": "empty", "idempotency_key": "k1"})
+	repo2, _ := again["repo"].(map[string]any)
+	if repo1["mainline_head"] != repo2["mainline_head"] {
+		t.Fatalf("idempotent changed head: %v -> %v", repo1["mainline_head"], repo2["mainline_head"])
+	}
+	e := hh.mustFail("repo_init", "idempotency_conflict", map[string]any{
+		"repo": "p1", "path": p1, "mode": "import", "idempotency_key": "k1"})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["field"] != "mode" {
+		t.Fatalf("detail=%v", detail)
+	}
+	p2 := filepath.Join(hh.root, "p2")
+	hh.mustFail("repo_init", "idempotency_conflict", map[string]any{
+		"repo": "p2", "path": p2, "mode": "empty", "idempotency_key": "k1"})
+	if _, err := os.Stat(filepath.Join(p2, ".p37", "p37.db")); !os.IsNotExist(err) {
+		t.Fatalf("冲突不应创建 p2: %v", err)
+	}
+}
+
+func TestRepoRegisterInitIfMissingUserFile(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	path := filepath.Join(hh.root, "app")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "u.txt"), []byte("U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := hh.mustFail("repo_register", "repo_not_empty", map[string]any{
+		"repo": "app", "path": path, "init_if_missing": true})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["next_action"] != "repo_init_import" {
+		t.Fatalf("detail=%v", detail)
+	}
+	if _, err := os.Stat(filepath.Join(path, ".p37", "p37.db")); !os.IsNotExist(err) {
+		t.Fatalf("register 不应留下 DB: %v", err)
+	}
+}
+
+func TestRepoRegisterKeyOnlyOnInit(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	p1 := filepath.Join(hh.root, "p1")
+	if err := os.MkdirAll(p1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hh.mustOK("repo_register", map[string]any{
+		"repo": "p1", "path": p1, "init_if_missing": true, "idempotency_key": "kreg"})
+	hh.mustFail("repo_init", "idempotency_conflict", map[string]any{
+		"repo": "p1", "path": p1, "mode": "import", "idempotency_key": "kreg"})
+	// strict register 忽略 key。
+	p2 := filepath.Join(hh.root, "p2")
+	hh.mustOK("repo_init", map[string]any{"repo": "p2", "path": p2, "mode": "empty"})
+	hh.mustOK("repo_register", map[string]any{
+		"repo": "p2", "path": p2, "idempotency_key": "k-strict"})
+}
+
+func TestRepoHealthRefsMatchAfterDefaultLand(t *testing.T) {
+	h := newHarness(t)
+	h.seed("a.txt", "A\n")
+	if _, err := h.r.Import(h.srcDir); err != nil {
+		t.Fatal(err)
+	}
+	w := h.mustOK("ws_ensure", map[string]any{"name": "refs-health"})
+	dir := w["dir"].(string)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.mustOK("ws_land", map[string]any{"ws_id": w["ws_id"].(string)})
+	hh := h.mustOK("repo_health", map[string]any{"with_quota": false})
+	if hh["initialized"] != true || hh["refs_ok"] != true || hh["refs_match"] != true {
+		t.Fatalf("health=%v", hh)
+	}
+}
+
+func TestRepoImportForceSameStateMachine(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	p := filepath.Join(hh.root, "imp")
+	hh.mustOK("repo_init", map[string]any{"repo": "imp", "path": p, "mode": "empty"})
+	r, err := repo.Open(p, repo.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Import(src); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if err := os.WriteFile(filepath.Join(p, "a.txt"), []byte("B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := meta.Open(p)
+	_ = db.DeleteLine("main", time.Now().UnixMilli())
+	_ = db.Close()
+	_ = os.Remove(filepath.Join(p, ".p37", "refs", "mainline"))
+	e := hh.mustFail("repo_import", "repo_not_empty", map[string]any{
+		"repo": "imp", "dir": p})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["next_action"] != "repo_init_import_force" {
+		t.Fatalf("detail=%v", detail)
+	}
+	res := hh.mustOK("repo_import", map[string]any{
+		"repo": "imp", "dir": p, "force": true})
+	if res["imported"] != true {
+		t.Fatalf("import=%v", res)
 	}
 }

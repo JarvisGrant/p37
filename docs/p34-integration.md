@@ -27,8 +27,14 @@ POST tools/call repo_init
   不会创建根版本）。
 - `mode` 选择：
   - `empty`：空卷（新应用）。`lost+found`/`workspaces`/`.p37*` 不算用户文件；
-  - `import`：卷里已有用户文件，作为 v0 导入；
-  - `repair`：`repo_health.initialized=false` 时修复半初始化仓库（认领已有 v0）。
+    有用户文件返回 `repo_not_empty`；
+  - `import`：卷里已有用户文件时使用。v0 为空则直接导入；v0 非空时先比较
+    currentTree/v0Tree，相同只 repair，不同需 `force=true`；
+  - `repair`：`repo_health.initialized=false` 且**没有用户文件**时修复元数据
+    （认领已有 v0）；有用户文件必须走 import。
+- 初始化 key：P36 建议 `p36-attach-<repo>-<volumeId>`，P34 建议
+  `p34-repair-<repo>-<requestId>`；同 key 不同请求返回
+  `idempotency_conflict`，不要复用 key。
 - `repo_health {path, with_quota:false}` 返回 `initialized=false` 时按
   `next_action` 走 `repo_init` / `repo_init_repair` / `repo_init_import`。
 - 远端配置在仓库完整后用 `repo_set_remote` 写（凭证仍只从环境变量读）：
@@ -255,7 +261,9 @@ on ws_not_found: 最多重试一次（新 key），仍失败则上报
 比 `repo_info + ws_quota + sync_status + ws_list` 少 3~4 次往返。
 
 P36 `/ready` 应使用 `repo_health {path, with_quota:false}`，只消费
-`initialized`/`default_line_ready`/`next_action`；未初始化是 200 而不是 p37d down。
+`initialized`/`default_line_ready`/`refs_ok`/`refs_match`/`next_action`；
+未初始化是 200 而不是 p37d down。0.4.4 起 default line 的 land/merge/reset/
+revert/sync 都会同步 `refs/mainline`，`refs_match=true` 可作为就绪门槛。
 
 P34 不再调用 `EnsureRepoDefaultLine`（它假设 `line_create` 不带 `from` 会创建
 根版本，真实 P37 从 0.3.x 起就返回 `meta: 记录不存在`）。

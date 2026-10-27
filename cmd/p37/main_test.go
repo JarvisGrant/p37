@@ -218,8 +218,12 @@ func TestInitImportAndRepairFlags(t *testing.T) {
 	if code, _, _ := runCLI("init", root, "--no-repair"); code == 0 {
 		t.Fatal("--no-repair 不应修复半成品")
 	}
-	if code, _, errs := runCLI("init", root, "--if-missing"); code != 0 {
-		t.Fatalf("--if-missing 应修复半成品: %s", errs)
+	// 半成品 + 用户文件：empty/repair 不能静默修；必须显式 import。
+	if code, _, _ := runCLI("init", root, "--if-missing"); code == 0 {
+		t.Fatal("半成品 + 用户文件时 --if-missing 应返回 repo_not_empty")
+	}
+	if code, _, errs := runCLI("init", root, "--mode=import"); code != 0 {
+		t.Fatalf("--mode=import 应修复/对齐 v0: %s", errs)
 	}
 	in, err := repo.CheckIntegrity(root)
 	if err != nil || !in.Initialized {

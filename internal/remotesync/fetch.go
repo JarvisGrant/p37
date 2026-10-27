@@ -272,5 +272,10 @@ func ApplyLineRefs(r *repo.Repo, ref Ref) (map[string]string, error) {
 	if def != "" {
 		_ = r.DB.SetDefaultLine(def)
 	}
+	if curDef, derr := r.DB.DefaultLine(); derr == nil {
+		if h, herr := r.DB.LineHead(curDef); herr == nil {
+			_ = r.WriteMainlineRef(h)
+		}
+	}
 	return result, nil
 }

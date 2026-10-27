@@ -137,10 +137,15 @@ func (s *Server) registerRepoLineRead() {
 					out["default_line_ready"] = false
 					out["mainline_head"] = in.MainlineHead
 					out["version_count"] = in.VersionCount
+					out["data_ok"] = in.DataOK
 					out["repo_db_ok"] = in.RepoDBOK
 					out["repo_json_ok"] = in.RepoJSONOK
 					out["refs_ok"] = in.RefsOK
+					out["refs_match"] = in.RefsMatch
 					out["root_ok"] = in.RootOK
+					out["user_files"] = in.UserFiles
+					out["history_not_empty"] = in.HistoryNotEmpty
+					out["active_workspaces"] = in.ActiveWorkspaces
 					out["p37_version"] = Version
 					out["lines"] = []any{}
 					out["persistence"] = map[string]any{
@@ -187,9 +192,12 @@ func (s *Server) registerRepoLineRead() {
 				"version_count": st.VersionCount, "epoch": st.Epoch,
 				"workspace_count": visible, "format_ver": st.FormatVer,
 				"initialized": in.Initialized, "default_line_ready": in.DefaultLineReady,
+				"data_ok":    in.DataOK,
 				"repo_db_ok": in.RepoDBOK, "repo_json_ok": in.RepoJSONOK,
-				"root_ok": in.RootOK, "refs_ok": in.RefsOK,
-				"next_action": in.NextAction, "reason": in.Reason,
+				"root_ok": in.RootOK, "refs_ok": in.RefsOK, "refs_match": in.RefsMatch,
+				"user_files": in.UserFiles, "history_not_empty": in.HistoryNotEmpty,
+				"active_workspaces": in.ActiveWorkspaces,
+				"next_action":       in.NextAction, "reason": in.Reason,
 				"p37_version": Version,
 				"lines":       lines,
 				"persistence": persistenceView(rr),
@@ -280,7 +288,7 @@ func (s *Server) registerRepoLineRead() {
 							}, "未初始化仓库只能原地导入；dir 必须等于 %s", e.Path)
 						}
 						res, err := s.Hub.InitRepo(e.Name, e.Path, hub.InitOptions{
-							Mode: repo.InitImport, DefaultLine: e.DefaultLine,
+							Mode: repo.InitImport, DefaultLine: e.DefaultLine, Force: a.Force,
 						})
 						if err != nil {
 							return nil, err
@@ -300,11 +308,16 @@ func (s *Server) registerRepoLineRead() {
 			if dir == "" {
 				dir = rr.Root
 			}
-			id, err := rr.ImportWithOptions(dir, repo.ImportOptions{Force: a.Force})
+			res, err := rr.ImportV0(dir, a.Force)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"version_id": id.String(), "dir": dir}, nil
+			return map[string]any{
+				"version_id": res.Version, "dir": dir,
+				"imported": res.Imported, "repaired": res.Repaired,
+				"old_version_id": res.OldVersionID,
+				"current_tree":   res.CurrentTree, "v0_tree": res.V0Tree,
+			}, nil
 		})
 
 	s.register("repo_set_remote", "设置/更新仓库远端配置（凭证仍只从环境变量读）。",

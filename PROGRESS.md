@@ -40,6 +40,32 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.4 半初始化导入与幂等收紧
+
+- **半初始化 + 用户文件**：`mode=empty/repair` 不再静默 repair；有用户文件时
+  返回 `repo_not_empty + repo_init_import`。`mode=import` 共用 v0 状态机：
+  currentTree==v0Tree 只 repair；v0 为空直接导入；v0 非空且不同需 force。
+- **force**：`repo_init`/`repo_import` 增加 `force`；历史版本、非默认 line、
+  活跃 workspace/lease 即使 force 也拒绝（`repo_history_not_empty`/`repo_busy`）。
+- **幂等键**：root `registry.db` 增加 `init_idempotency` 表（claim/lease/done/
+  failed + request_hash/result_json）；`.p37/init.json` 增加 path/force/
+  request_hash 与最近 32 个 key 的 requests map；同 key 不同 request 返回
+  `idempotency_conflict`，并发返回 `idempotency_in_progress`；新增
+  `p37 init --idempotency-key`，默认不再生成 `cli-init-*`。
+- **repo_register key**：仅 `init_if_missing=true` 触发 InitRepo 时传入；
+  strict register 忽略 key，不因冲突失败。
+- **repo_health**：增加 `user_files/root_tree_empty/history_not_empty/
+  active_workspaces` 等字段；`next_action` 区分 import/repair/stop_workspaces；
+  data 完整只缺 refs/root 时允许有用户文件的元数据 repair；健康缓存只缓存
+  未初始化结果，避免 `refs_match` 过期。
+- **refs/mainline 对齐**：default line 的 `ws_land` / `line_merge` /
+  `line_reset` / `version_revert` / `sync fetch` 都写 refs；`refs_match`
+  成为 P36 `/ready` 可靠门槛。
+- **import 故障注入**：`swap_after_delete` / `swap_after_insert` /
+  `swap_before_commit` / `after_commit_before_refs`；前者回滚，后者由
+  `repo_init(mode=repair)` 对齐 refs。
+- 文档、验收、CLI、P34 接入与发布说明同步到 0.4.4；`format_ver` 不变。
+
 ## v0.4.3 应用卷仓库初始化闭环
 
 ### 问题

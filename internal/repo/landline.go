@@ -368,6 +368,9 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 		}
 		return nil, err
 	}
+	if err := r.syncMainlineRefIfDefault(opt.Line, v.ID()); err != nil {
+		return nil, err
+	}
 	res.TargetHead = v.ID()
 	res.State = "done"
 	// drop 或保留为只读 landed。

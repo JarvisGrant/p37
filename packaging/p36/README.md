@@ -82,19 +82,22 @@ detach:
 per-repo flock，再写 registry tombstone；`.p37`、workspaces 和 repo 数据全部
 保留。卷重新挂载后执行 `repo_register` 即可恢复，id/name 不变。
 
-0.4.3 起 `repo_register` **只注册完整仓库**，不再创建半初始化 DB。path 下没有
+0.4.4 起 `repo_register` **只注册完整仓库**，不再创建半初始化 DB。path 下没有
 `.p37/p37.db` 或 DB 缺 head/line/refs 时：
 
 - 默认返回 `repo_not_initialized`/`repo_db_corrupt`，`detail.next_action` 指向
   `repo_init`/`repo_init_repair`；
 - `--init-if-missing` 仍保留（deprecated），内部等价于
   `repo_init(mode=empty)`；完整失败会回滚；
-- 新代码建议先 `repo_init` 或 `p37 init --if-missing`，成功后再 register。
+- 新代码建议先 `repo_init` 或 `p37 init`，成功后再 register；半成品有用户文件时
+  必须显式 `repo_init(mode=import)`，v0 非空且内容不同再显式 `force=true`。
 
 **初始化失败时 P36 必须保持卷挂载、不删 `.p37`**，返回 409 +
 `mounted=true` + `initialized=false` + `next_action`；用户可重试 repair。只有
 卷本身无法挂载/损坏才 umount。P36 `/ready` 用
-`repo_health {path, with_quota:false}` 消费 `initialized`。
+`repo_health {path, with_quota:false}` 消费 `initialized/refs_ok/refs_match/
+next_action`；default line 的 land/merge/reset/revert/sync 已同步 refs，
+`refs_match=true` 可作为就绪门槛。
 
 `.p37/repo.json` 是仓库身份锚（`id` / `name` / `default_line`）：
 

@@ -37,7 +37,8 @@ const usage = `p37 —— AI 原生版本控制系统
 
 初始化与运维：
   init <root> [--if-missing] [--mode empty|import|repair] [--default-line main]
-              [--name <name>] [--config <file>] [--allow-nonpersistent]
+              [--name <name>] [--force] [--idempotency-key <key>]
+              [--config <file>] [--allow-nonpersistent]
                                   原子初始化/修复仓库；--if-missing 校验+修复
   init <root> --strict | --no-repair
                                   只校验 / 诊断，不修复
@@ -79,7 +80,8 @@ const usage = `p37 —— AI 原生版本控制系统
 
 多仓库维护：
   p37 --root /srv/repos repo list [--json]
-  p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair] [--json]
+  p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair]
+              [--force] [--idempotency-key <key>] [--json]
   p37 --root /srv/repos repo create <name> [--default-line main] [--json]
   p37 --root /srv/repos repo info <id|name> [--json]
   p37 --root /srv/repos repo delete <id|name> [--force]
@@ -282,8 +284,8 @@ func fail(errw io.Writer, err error) int {
 // flag 可以出现在 root 前后，方便引导脚本按需拼装。
 func cmdInit(args []string, out, errw io.Writer) int {
 	var (
-		ifMissing, strict, noRepair, allowNonPersistent, jsonOut, modeSet, nameSet bool
-		template, root, name, defLine, mode                                        string
+		ifMissing, strict, noRepair, allowNonPersistent, jsonOut, modeSet, nameSet, force bool
+		template, root, name, defLine, mode, idemKey                                      string
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -298,6 +300,8 @@ func cmdInit(args []string, out, errw io.Writer) int {
 			allowNonPersistent = true
 		case a == "--json":
 			jsonOut = true
+		case a == "--force":
+			force = true
 		case a == "--config":
 			if i+1 >= len(args) {
 				fmt.Fprintln(errw, "--config 需要 <file>")
@@ -338,6 +342,15 @@ func cmdInit(args []string, out, errw io.Writer) int {
 		case strings.HasPrefix(a, "--mode="):
 			mode = strings.TrimPrefix(a, "--mode=")
 			modeSet = true
+		case a == "--idempotency-key":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errw, "--idempotency-key 需要 <key>")
+				return 2
+			}
+			idemKey = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--idempotency-key="):
+			idemKey = strings.TrimPrefix(a, "--idempotency-key=")
 		case a == "-h" || a == "--help":
 			fmt.Fprint(out, usage)
 			return 0
@@ -459,7 +472,7 @@ func cmdInit(args []string, out, errw io.Writer) int {
 	}
 
 	// 如果上层 root 有 p37d，路由到 daemon，避免 CLI 与 daemon 抢 .p37/lock。
-	if res, routed, rerr := routeInit(root, name, defLine, mode); routed {
+	if res, routed, rerr := routeInit(root, name, defLine, mode, idemKey, force); routed {
 		if rerr != nil {
 			return repoFail(errw, rerr)
 		}
@@ -472,8 +485,8 @@ func cmdInit(args []string, out, errw io.Writer) int {
 
 	res, err := repo.Ensure(root, repo.EnsureOptions{
 		Mode: repo.InitMode(mode), DefaultLine: defLine, Name: name,
-		IdempotencyKey: "cli-init-" + name,
-		RepoOptions:    cfg.RepoOptions(),
+		IdempotencyKey: idemKey, Force: force,
+		RepoOptions: cfg.RepoOptions(),
 		WriteConfig: func(controlDir string) error {
 			return config.SaveControl(controlDir, cfg)
 		},
@@ -481,6 +494,10 @@ func cmdInit(args []string, out, errw io.Writer) int {
 	})
 	if err != nil {
 		return repoFail(errw, err)
+	}
+	if idemKey != "" {
+		res.Warnings = append(res.Warnings,
+			"no root idempotency index (daemon/--root not used); key is path-scoped only")
 	}
 	if jsonOut {
 		if code := writeJSON(out, errw, res); code != 0 {
@@ -504,6 +521,9 @@ func printInitResult(out io.Writer, res *repo.EnsureResult) {
 	}
 	fmt.Fprintf(out, "%s仓库 %s\n  mainline_head %s\n  version_count %d\n  default_line  %s\n",
 		state, res.Repo.Path, short(res.Repo.MainlineHead), res.Repo.VersionCount, res.Repo.DefaultLine)
+	for _, w := range res.Warnings {
+		fmt.Fprintf(out, "  warning: %s\n", w)
+	}
 }
 
 func printIntegrity(out io.Writer, in *repo.Integrity) {

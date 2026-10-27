@@ -110,7 +110,20 @@ Repo.syncMu（同步工具）
 - `repo_register(rebind=true)` 会检查目标 repo 的活跃 workspace/lease；
   有活跃项时返回 `repo_busy`，不改 registry 指针。
 
-## 7. 已知边界
+## 7. 初始化幂等
+
+- `repo_init` / `repo_register(init_if_missing)` 的 key 在 root registry 的
+  `init_idempotency` 表中原子 claim：
+  - 同 key + 同 `request_hash` + done → 返回 `result_json`；
+  - 同 key + 不同 request → `idempotency_conflict`；
+  - 同 key + in_progress（未过期）→ `idempotency_in_progress`；
+  - failed/过期 lease 的同 request → 允许重试。
+- 每个 repo 的 `.p37/init.json` 保留最近 32 个 key 的 requests map，作为
+  root 索引丢失时的同 path 兜底；跨 path 冲突在索引丢失后降级并记录 warning。
+- `p37 init` 默认不传 key；只有显式 `--idempotency-key` 才参与。strict
+  `repo_register` 忽略 key。
+
+## 8. 已知边界
 
 - `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前由上层确认
   应用空闲。

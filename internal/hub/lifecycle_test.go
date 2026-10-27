@@ -656,3 +656,76 @@ func TestInitRepoPersistentGate(t *testing.T) {
 		t.Fatalf("res=%+v", res)
 	}
 }
+
+func TestInitIdempotencyRootTable(t *testing.T) {
+	h, root := newHub(t)
+	h.SetMountPointProbe(func(string) bool { return true })
+	p1 := filepath.Join(root, "p1")
+	res1, err := h.InitRepo("p1", p1, hub.InitOptions{IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, err := h.InitRepo("p1", p1, hub.InitOptions{IdempotencyKey: "k1"})
+	if err != nil {
+		t.Fatalf("same request should idempotent: %v", err)
+	}
+	if res1.Repo.MainlineHead != res2.Repo.MainlineHead {
+		t.Fatalf("idempotent changed head: %s -> %s", res1.Repo.MainlineHead, res2.Repo.MainlineHead)
+	}
+	_, err = h.InitRepo("p1", p1, hub.InitOptions{Mode: repo.InitImport, IdempotencyKey: "k1"})
+	var ie *repo.IdemConflictError
+	if !errors.As(err, &ie) || ie.Field != "mode" {
+		t.Fatalf("mode conflict: %v", err)
+	}
+	p2 := filepath.Join(root, "p2")
+	_, err = h.InitRepo("p2", p2, hub.InitOptions{IdempotencyKey: "k1"})
+	if !errors.As(err, &ie) {
+		t.Fatalf("path conflict: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(p2, ".p37", "p37.db")); !os.IsNotExist(err) {
+		t.Fatalf("冲突不应创建 p2: %v", err)
+	}
+
+	// 重启后 root 索引仍然有效。
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h2, err := hub.New(root, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2.SetAllowNonPersistent(true)
+	h2.SetMountPointProbe(func(string) bool { return true })
+	defer func() { _ = h2.Close() }()
+	res3, err := h2.InitRepo("p1", p1, hub.InitOptions{IdempotencyKey: "k1"})
+	if err != nil || res3.Repo.MainlineHead != res1.Repo.MainlineHead {
+		t.Fatalf("restart idempotent: %v %+v", err, res3)
+	}
+	_, err = h2.InitRepo("p1", p1, hub.InitOptions{Mode: repo.InitImport, IdempotencyKey: "k1"})
+	if !errors.As(err, &ie) {
+		t.Fatalf("restart conflict: %v", err)
+	}
+}
+
+func TestInitIdempotencyFailedRetry(t *testing.T) {
+	h, root := newHub(t)
+	h.SetMountPointProbe(func(string) bool { return true })
+	path := filepath.Join(root, "p")
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "u.txt"), []byte("U"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.InitRepo("p", path, hub.InitOptions{IdempotencyKey: "kfail"})
+	var ne *repo.NotEmptyError
+	if !errors.As(err, &ne) {
+		t.Fatalf("expected repo_not_empty: %v", err)
+	}
+	if err := os.Remove(filepath.Join(path, "u.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.InitRepo("p", path, hub.InitOptions{IdempotencyKey: "kfail"}); err != nil {
+		t.Fatalf("failed key should retry same request: %v", err)
+	}
+}

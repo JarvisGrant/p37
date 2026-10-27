@@ -1,4 +1,4 @@
-# 当前状态（v0.4.3）
+# 当前状态（v0.4.4）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.3` |
+| 发布版本 | `v0.4.4` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 65 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,15 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.4.4 重点（不改 `format_ver`）**：补齐“半初始化 + 用户文件”的导入状态机
+（empty/repair 拒绝静默 repair，import 按 v0 空/非空、same/different 决定
+repair/force）；`repo_init`/`repo_import` 增加 `force`；root 级
+`init_idempotency` + per-repo `init.json` 幂等校验；`repo_health` 增加
+`user_files/root_tree_empty/history_not_empty/active_workspaces` 等
+`next_action` 依据；修复 default line land/merge/reset/revert/sync 的
+`refs/mainline` 写入，使 `/ready` 的 `refs_match` 成为可靠不变量。
+详见 [`mcp-contract.md`](mcp-contract.md) 与 [`../PROGRESS.md`](../PROGRESS.md)。
 
 **v0.4.3 重点（不改 `format_ver`）**：新增 `repo_init`，在应用卷上原子创建
 `.p37`（p37.db + v0 + 默认 line + refs），支持 empty/import/repair 三种模式；
@@ -78,7 +87,8 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 | P36 payload 换盘 | 需要重启实例 | 服务级 `systemctl restart` 不保证换盘 |
 | `p37d --stdio` | 启动时快照工具清单 | daemon 升级后客户端应重连 |
 | `repo_unregister` | 不等待已经进入执行中的 MCP 调用 | detach 前由 P36 在上层确认应用空闲 |
-| `refs/mainline` 对齐 | 只 land 到命名 line 时 ref 可能落后于 DB head | `repo_health.refs_match` 暴露；`repo_init(mode=repair)` 会把 ref 对齐到 DB head |
+| `repo_import.idempotency_key` | 保留但未接 root `init_idempotency` 表 | 需要跨重启幂等时用 `repo_init(mode=import)` |
+| root 幂等索引丢失 | 同 path 仍靠 `.p37/init.json`；跨 path 冲突降级 | 接受 warning；重启后同 path key 仍有效 |
 | 非 root OverlayFS | Ubuntu 26.04 可能 `EPERM` | 默认 `materialize=auto` 回退 copy；按 L2 容量收紧 `max_active` / `warn_disk_bytes` |
 | 自更新 | 不支持 | 升级靠替换 payload 盘，不在实例内改 `/run/p37-payload` |
 | 发布平台 | 只发布 linux/amd64 | linux/arm64 只做编译校验 |

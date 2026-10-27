@@ -25,6 +25,9 @@ type RegisterOptions struct {
 	// Rebind 允许在“同名已注册到旧路径”时把 registry 指针改到新路径。
 	// 只改控制面，不搬数据；目标路径必须已有同一 repo 身份（repo.json 或 DB）。
 	Rebind bool
+	// IdempotencyKey 只在 init_if_missing=true 且确实触发初始化时生效；
+	// strict register 忽略它。
+	IdempotencyKey string
 }
 
 // UnregisterResult 是 repo_unregister 的结果。
@@ -86,6 +89,19 @@ func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, erro
 	abs, err := h.validateRepoPath(path, true)
 	if err != nil {
 		return nil, err
+	}
+	// init_if_missing 的幂等键只在确实需要初始化时生效；完整仓库走
+	// strict register，key 被忽略（不会因为 key 冲突失败）。
+	if opt.InitIfMissing && opt.IdempotencyKey != "" && !opt.ForceRename {
+		if in, _ := repo.CheckIntegrity(abs); in == nil || !in.Initialized {
+			if _, err := h.InitRepo(name, abs, InitOptions{
+				Mode: repo.InitEmpty, DefaultLine: opt.DefaultLine,
+				Rebind: opt.Rebind, IdempotencyKey: opt.IdempotencyKey,
+			}); err != nil {
+				return nil, err
+			}
+			return h.Get(name)
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

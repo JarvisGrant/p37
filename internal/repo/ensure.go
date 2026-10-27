@@ -3,7 +3,6 @@ package repo
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -72,9 +71,10 @@ type EnsureResult struct {
 	} `json:"version"`
 
 	// 附加观测字段（CLI/日志用）。
-	Created  bool `json:"created,omitempty"`
-	Repaired bool `json:"repaired,omitempty"`
-	Imported bool `json:"imported,omitempty"`
+	Created  bool     `json:"created,omitempty"`
+	Repaired bool     `json:"repaired,omitempty"`
+	Imported bool     `json:"imported,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // PathError 表示 path 不满足初始化前置条件。
@@ -89,8 +89,9 @@ func (e *PathError) Error() string {
 
 // NotEmptyError 表示 mode=empty 时目录里存在用户文件。
 type NotEmptyError struct {
-	Path      string
-	UserFiles int
+	Path       string
+	UserFiles  int
+	NextAction string
 }
 
 func (e *NotEmptyError) Error() string {
@@ -98,6 +99,43 @@ func (e *NotEmptyError) Error() string {
 }
 
 func (e *NotEmptyError) Unwrap() error { return ErrRepoNotEmpty }
+
+// HistoryNotEmptyError 表示仓库已有后续版本或非默认 line，不能覆盖 v0。
+type HistoryNotEmptyError struct {
+	Path         string
+	VersionCount int64
+	Lines        []string
+}
+
+func (e *HistoryNotEmptyError) Error() string {
+	return fmt.Sprintf("repo: 仓库已有历史版本或命名 line，不能覆盖 v0: %s", e.Path)
+}
+
+// ErrRepoHistoryNotEmpty 是 HistoryNotEmptyError 的 sentinel。
+var ErrRepoHistoryNotEmpty = errors.New("repo: 仓库已有历史版本或命名 line")
+
+func (e *HistoryNotEmptyError) Unwrap() error { return ErrRepoHistoryNotEmpty }
+
+// BusyError 表示仓库仍有活跃工作区/租约。
+type BusyError struct {
+	Workspaces []string `json:"workspaces"`
+	Leases     []string `json:"leases"`
+}
+
+func (e *BusyError) Error() string {
+	return fmt.Sprintf("%v: %d 个工作区, %d 个租约", ErrRepoBusy, len(e.Workspaces), len(e.Leases))
+}
+
+func (e *BusyError) Unwrap() error { return ErrRepoBusy }
+
+// InitInProgressError 表示同一个幂等 key 正在被另一个请求处理。
+type InitInProgressError struct {
+	Key string
+}
+
+func (e *InitInProgressError) Error() string {
+	return fmt.Sprintf("repo: 幂等键正在处理中: %s", e.Key)
+}
 
 // DBCorruptError 表示 p37.db 损坏或结构无法恢复。
 type DBCorruptError struct {
@@ -129,18 +167,6 @@ func (e *InitBusyError) Error() string {
 }
 
 func (e *InitBusyError) Unwrap() error { return e.Cause }
-
-type initState struct {
-	Version        string `json:"version"`
-	Mode           string `json:"mode"`
-	Name           string `json:"name"`
-	RepoID         string `json:"repo_id"`
-	DefaultLine    string `json:"default_line"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
-	CreatedTS      int64  `json:"created_ts"`
-	Repaired       bool   `json:"repaired,omitempty"`
-	Imported       bool   `json:"imported,omitempty"`
-}
 
 // Ensure 初始化或修复 root 下的仓库。
 //
@@ -208,8 +234,18 @@ func Ensure(root string, opt EnsureOptions) (*EnsureResult, error) {
 		defer func() { _ = repoLock.Release() }()
 	}
 
+	prev, _ := readInitState(p37)
+	req := InitRequest{Path: root, Mode: string(opt.Mode), Name: opt.Name,
+		DefaultLine: opt.DefaultLine, Force: opt.Force}
+	if opt.IdempotencyKey != "" {
+		if rec, ok := prev.lookup(opt.IdempotencyKey); ok && rec.RequestHash != req.Hash() {
+			return nil, initConflict(opt.IdempotencyKey, rec, req)
+		}
+	}
+
 	// 已有完整仓库：幂等返回。先做只读判定，避免 repair 误伤。
-	if in, _ := CheckIntegrity(root); in != nil && in.Initialized {
+	// mode=import 例外：它需要对当前 worktree 与 v0 做一致/替换判断。
+	if in, _ := CheckIntegrity(root); in != nil && in.Initialized && opt.Mode != InitImport {
 		res, err := ResultFromDisk(root)
 		if err != nil {
 			return nil, err
@@ -226,6 +262,8 @@ func Ensure(root string, opt EnsureOptions) (*EnsureResult, error) {
 				}
 			}
 		}
+		istate := initStateFor(opt, root, res.Version.ID, string(opt.Mode), false, false, prev)
+		_ = writeInitState(p37, istate)
 		return res, nil
 	}
 
@@ -244,11 +282,9 @@ func Ensure(root string, opt EnsureOptions) (*EnsureResult, error) {
 			return nil, &DBCorruptError{Path: root, Reason: "control_dir_without_db"}
 		}
 		userFiles := CountUserFiles(root)
-		if opt.Mode == InitEmpty && userFiles > 0 {
-			return nil, &NotEmptyError{Path: root, UserFiles: userFiles}
-		}
-		if opt.Mode == InitRepair && userFiles > 0 {
-			return nil, &NotEmptyError{Path: root, UserFiles: userFiles}
+		if opt.Mode != InitImport && userFiles > 0 {
+			return nil, &NotEmptyError{Path: root, UserFiles: userFiles,
+				NextAction: "repo_init_import"}
 		}
 		if opt.Mode == InitRepair {
 			// repair 的语义是“已有 DB 但缺 head/line/refs”；没有 DB 不是
@@ -258,20 +294,21 @@ func Ensure(root string, opt EnsureOptions) (*EnsureResult, error) {
 		return buildAtomic(root, tmp, p37, opt, opt.Mode)
 	}
 
-	// 有 DB 但不完整：repair。mode=import 先 repair 认领 v0，再尝试替换空 v0。
-	res, err := repairInPlace(root, opt)
-	if err != nil {
-		return nil, err
+	if opt.Mode == InitImport {
+		return importInPlace(root, opt)
 	}
-	if opt.Mode != InitImport {
-		return res, nil
+	// empty/repair：数据本身完整、只缺 refs/root 时 repair 是安全的；
+	// 但如果 v0 为空且有用户文件，repair 会留下“文件在、版本里没有”的状态。
+	in, _ := CheckIntegrity(root)
+	uf := CountUserFiles(root)
+	if in != nil && in.DataOK && !(in.RootTreeEmpty && uf > 0) {
+		return repairInPlace(root, opt)
 	}
-	// import 到半成品：只有“唯一空 v0 + 没有工作区”才替换；否则保持保守。
-	if err := importReplaceV0(root, opt); err != nil {
-		return nil, err
+	if uf > 0 {
+		return nil, &NotEmptyError{Path: root, UserFiles: uf,
+			NextAction: "repo_init_import"}
 	}
-	res.Imported = true
-	return ResultFromDisk(root)
+	return repairInPlace(root, opt)
 }
 
 func buildAtomic(root, tmp, p37 string, opt EnsureOptions, mode InitMode) (*EnsureResult, error) {
@@ -385,12 +422,8 @@ func buildAtomic(root, tmp, p37 string, opt EnsureOptions, mode InitMode) (*Ensu
 	if err := WriteMeta(tmp, m); err != nil {
 		return nil, err
 	}
-	if err := writeInitState(tmp, initState{
-		Version: v.ID().String(), Mode: string(mode), Name: opt.Name,
-		RepoID: opt.RepoID, DefaultLine: opt.DefaultLine,
-		IdempotencyKey: opt.IdempotencyKey, CreatedTS: time.Now().UnixMilli(),
-		Imported: mode == InitImport,
-	}); err != nil {
+	st := initStateFor(opt, root, v.ID().String(), string(mode), false, mode == InitImport, nil)
+	if err := writeInitState(tmp, st); err != nil {
 		return nil, err
 	}
 	if err := syncControlDir(tmp); err != nil {
@@ -427,6 +460,71 @@ func buildAtomic(root, tmp, p37 string, opt EnsureOptions, mode InitMode) (*Ensu
 	res.Created = true
 	res.Imported = mode == InitImport
 	return res, nil
+}
+
+// importInPlace 在已有 DB 上执行 mode=import 的状态机。
+// 注意：这里不调用 repo.Open，避免 EnsureSchema/ReconcileLand 在
+// force=false 且内容不同的时候提前改写 line/head（用户要求“不改 DB”）。
+func importInPlace(root string, opt EnsureOptions) (*EnsureResult, error) {
+	p37 := filepath.Join(root, ".p37")
+	db, err := meta.Open(root)
+	if err != nil {
+		return nil, backupAndCorrupt(root, p37, "db_open_failed")
+	}
+	if ver, verr := db.UserVersion(); verr == nil {
+		if ver > meta.FormatVer {
+			_ = db.Close()
+			return nil, backupAndCorrupt(root, p37, "format_mismatch")
+		}
+		if ver > 0 && ver < meta.FormatVer {
+			if _, merr := db.MigrateIfNeeded(); merr != nil {
+				_ = db.Close()
+				return nil, backupAndCorrupt(root, p37, "format_migrate_failed")
+			}
+		}
+	}
+	if err := db.Init(root); err != nil {
+		_ = db.Close()
+		return nil, backupAndCorrupt(root, p37, "db_init_failed")
+	}
+	bs, err := cas.NewLocalFS(p37)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
+	ig, err := importIgnore(root, opt.RepoOptions)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	copt := opt.RepoOptions.Capture
+	if copt.ProbeBytes == 0 {
+		copt = capture.DefaultOptions()
+	}
+	copt.StableRetries = 0
+	r := &Repo{Root: root, DB: db, Store: store, Ignore: ig,
+		CaptureOpt: copt, redactTaskDesc: opt.RepoOptions.RedactTaskDesc}
+	res, ierr := r.ImportV0(root, opt.Force)
+	_ = r.Close()
+	if ierr != nil {
+		return nil, ierr
+	}
+	prev, _ := readInitState(p37)
+	istate := initStateFor(opt, root, res.Version, string(InitImport), res.Repaired, res.Imported, prev)
+	if err := writeInitState(p37, istate); err != nil {
+		return nil, err
+	}
+	if err := ensureIdentityAndConfig(root, p37, opt); err != nil {
+		return nil, err
+	}
+	out, err := ResultFromDisk(root)
+	if err != nil {
+		return nil, err
+	}
+	out.Repaired = res.Repaired
+	out.Imported = res.Imported
+	return out, nil
 }
 
 func repairInPlace(root string, opt EnsureOptions) (*EnsureResult, error) {
@@ -515,12 +613,9 @@ func repairInPlace(root string, opt EnsureOptions) (*EnsureResult, error) {
 	if err := ensureIdentityAndConfig(root, p37, opt); err != nil {
 		return nil, err
 	}
-	_ = writeInitState(p37, initState{
-		Version: head.String(), Mode: string(InitRepair), Name: opt.Name,
-		RepoID: opt.RepoID, DefaultLine: defaultLine,
-		IdempotencyKey: opt.IdempotencyKey, CreatedTS: time.Now().UnixMilli(),
-		Repaired: true,
-	})
+	prev, _ := readInitState(p37)
+	istate := initStateFor(opt, root, head.String(), string(InitRepair), true, false, prev)
+	_ = writeInitState(p37, istate)
 	res, err := ResultFromDisk(root)
 	if err != nil {
 		return nil, err
@@ -582,113 +677,6 @@ func chooseRepairHead(db *meta.DB, st *meta.RootState, root, defaultLine string)
 		return v.ID(), true, nil
 	}
 	return hash.ID{}, false, &DBCorruptError{Path: root, Reason: "no_unique_head"}
-}
-
-func importReplaceV0(root string, opt EnsureOptions) error {
-	p37 := filepath.Join(root, ".p37")
-	db, err := meta.Open(root)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = db.Close() }()
-	st, err := db.RootState()
-	if err != nil {
-		return err
-	}
-	if st.VersionCount != 1 {
-		return &NotEmptyError{Path: root, UserFiles: CountUserFiles(root)}
-	}
-	old := st.Repo.MainlineHead
-	if old.IsZero() {
-		if len(st.Leaves) != 1 {
-			return &DBCorruptError{Path: root, Reason: "no_unique_head"}
-		}
-		old = st.Leaves[0]
-	}
-	ov, err := db.GetVersion(old)
-	if err != nil {
-		return err
-	}
-	emptyID := (&tree.Tree{}).ID()
-	if ov.Tree != emptyID && !opt.Force {
-		return &NotEmptyError{Path: root, UserFiles: CountUserFiles(root)}
-	}
-	if err := ensureNoWorkspaces(db); err != nil {
-		return err
-	}
-	defLine := opt.DefaultLine
-	if defLine == "" {
-		defLine, _ = db.DefaultLine()
-	}
-	if defLine == "" {
-		defLine = "main"
-	}
-	if err := ensureOnlyDefaultLine(db, defLine); err != nil {
-		return err
-	}
-	bs, err := cas.NewLocalFS(p37)
-	if err != nil {
-		return err
-	}
-	store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
-	ig, err := importIgnore(root, opt.RepoOptions)
-	if err != nil {
-		return err
-	}
-	copt := opt.RepoOptions.Capture
-	if copt.ProbeBytes == 0 {
-		copt = capture.DefaultOptions()
-	}
-	copt.StableRetries = 0
-	t, err := capture.Build("", root, ig, store, nil, capture.InodeReliable(false), copt)
-	if err != nil {
-		return err
-	}
-	if err := store.Flush(); err != nil {
-		return err
-	}
-	v := version.New(hash.Zero, t.ID(), 0, AgentImporter,
-		"import "+root, time.Now().UnixMilli(), "import")
-	journal := &meta.JournalEntry{VersionID: v.ID().String(), Agent: AgentImporter,
-		TaskDesc: "import " + root, TS: v.TS, OpsJSON: "[]"}
-	if err := db.SwapRootAt(root, old, v, defLine, journal); err != nil {
-		return err
-	}
-	return writeRef(p37, v.ID())
-}
-
-func ensureOnlyDefaultLine(db *meta.DB, defaultLine string) error {
-	lines, err := db.ListLines()
-	if err != nil {
-		return err
-	}
-	for i := range lines {
-		if lines[i].Name != defaultLine {
-			return fmt.Errorf("%w: 命名 line %s 仍引用现有版本", ErrRepoNotEmpty, lines[i].Name)
-		}
-	}
-	return nil
-}
-
-func ensureNoWorkspaces(db *meta.DB) error {
-	ws, err := db.ListWorkspaces()
-	if err != nil {
-		return err
-	}
-	for i := range ws {
-		w := &ws[i]
-		if w.LandedTS != 0 {
-			continue
-		}
-		// 任何未 land 的工作区都可能引用当前 v0；broken 也不例外，先让
-		// 调用方处理，不做破坏性替换。
-		return fmt.Errorf("%w: 还有活跃工作区 %s", ErrRepoBusy, w.ID)
-	}
-	leases, _ := db.ListLeases()
-	if len(leases) > 0 {
-		return fmt.Errorf("%w: 还有 %d 个租约", ErrRepoBusy, len(leases))
-	}
-	return nil
 }
 
 func ensureIdentityAndConfig(root, controlDir string, opt EnsureOptions) error {
@@ -793,21 +781,7 @@ func writeRef(controlDir string, head hash.ID) error {
 	return bs.Flush()
 }
 
-func writeInitState(controlDir string, st initState) error {
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(controlDir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(controlDir, "init.json"), b, 0o600)
-}
-
 // initFault 是测试/验收用的确定性失败注入。
-//
-// 只有设置 P37_INIT_FAULT_AT 时生效；生产默认关闭。用它覆盖无法靠 kill -9
-// 稳定命中的初始化步骤。
 func initFault(step string) error {
 	if os.Getenv("P37_INIT_FAULT_AT") == step {
 		return fmt.Errorf("repo: injected init fault at %s", step)

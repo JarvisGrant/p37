@@ -115,7 +115,7 @@ func healthBase(in *repo.Integrity, e *hub.Entry, path string) map[string]any {
 		},
 		"durable": false, "durable_scope": "local_only",
 	}
-	warnings := []string{}
+	warnings := append([]string{}, in.Warnings...)
 	if !in.Initialized {
 		reason := in.Reason
 		if reason == "" {
@@ -133,6 +133,13 @@ func healthBase(in *repo.Integrity, e *hub.Entry, path string) map[string]any {
 		"default_line_ready": in.DefaultLineReady,
 		"mainline_head":      in.MainlineHead,
 		"version_count":      in.VersionCount,
+		"user_files":         in.UserFiles,
+		"root_count":         in.RootCount,
+		"root_tree_empty":    in.RootTreeEmpty,
+		"history_not_empty":  in.HistoryNotEmpty,
+		"active_workspaces":  in.ActiveWorkspaces,
+		"leases":             in.Leases,
+		"data_ok":            in.DataOK,
 		"repo_db_ok":         in.RepoDBOK,
 		"repo_json_ok":       in.RepoJSONOK,
 		"root_ok":            in.RootOK,
@@ -219,6 +226,13 @@ func (s *Server) addHealthDetails(out map[string]any, rr *repo.Repo, entry *hub.
 	out["default_line_ready"] = in.DefaultLineReady
 	out["mainline_head"] = st.MainlineHead.String()
 	out["version_count"] = st.VersionCount
+	out["user_files"] = in.UserFiles
+	out["root_count"] = in.RootCount
+	out["root_tree_empty"] = in.RootTreeEmpty
+	out["history_not_empty"] = in.HistoryNotEmpty
+	out["active_workspaces"] = in.ActiveWorkspaces
+	out["leases"] = in.Leases
+	out["data_ok"] = in.DataOK
 	out["repo_db_ok"] = in.RepoDBOK
 	out["repo_json_ok"] = in.RepoJSONOK
 	out["root_ok"] = in.RootOK
@@ -234,6 +248,9 @@ func (s *Server) addHealthDetails(out map[string]any, rr *repo.Repo, entry *hub.
 		"count": len(lines), "default_line": defaultLine, "heads": heads,
 	}
 	out["last_land_ts"] = st.LastLandTS
+	for _, w := range in.Warnings {
+		appendWarning(out, w)
+	}
 
 	repoInfo, _ := out["repo"].(map[string]any)
 	if repoInfo == nil {

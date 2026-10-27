@@ -150,14 +150,16 @@ func cmdRepoUnregister(root string, args []string, out, errw io.Writer) int {
 //	                          [--allow-nonpersistent] [--json]
 func cmdRepoInit(root string, args []string, out, errw io.Writer) int {
 	var (
-		name, path, defLine, mode   string
-		allowNonPersistent, jsonOut bool
+		name, path, defLine, mode, idemKey string
+		allowNonPersistent, jsonOut, force bool
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--json":
 			jsonOut = true
+		case a == "--force":
+			force = true
 		case a == "--allow-nonpersistent":
 			allowNonPersistent = true
 		case a == "--default-line" && i+1 < len(args):
@@ -170,6 +172,11 @@ func cmdRepoInit(root string, args []string, out, errw io.Writer) int {
 			i++
 		case strings.HasPrefix(a, "--mode="):
 			mode = strings.TrimPrefix(a, "--mode=")
+		case a == "--idempotency-key" && i+1 < len(args):
+			idemKey = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--idempotency-key="):
+			idemKey = strings.TrimPrefix(a, "--idempotency-key=")
 		case strings.HasPrefix(a, "-"):
 			fmt.Fprintf(errw, "未知参数 %q\n", a)
 			return 2
@@ -193,6 +200,10 @@ func cmdRepoInit(root string, args []string, out, errw io.Writer) int {
 	}
 	argsMap := map[string]any{
 		"repo": name, "path": path, "default_line": defLine, "mode": mode,
+		"force": force,
+	}
+	if idemKey != "" {
+		argsMap["idempotency_key"] = idemKey
 	}
 	if data, routed, err := routeRepoCommand(root, "repo_init", argsMap); err != nil {
 		return repoFail(errw, err)
@@ -216,8 +227,8 @@ func cmdRepoInit(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = h.Close() }()
 	res, err := h.InitRepo(name, path, hub.InitOptions{
-		Mode: repo.InitMode(mode), DefaultLine: defLine,
-		AllowNonPersistent: allowNonPersistent,
+		Mode: repo.InitMode(mode), DefaultLine: defLine, Force: force,
+		IdempotencyKey: idemKey, AllowNonPersistent: allowNonPersistent,
 	})
 	if err != nil {
 		return repoFail(errw, err)
@@ -316,7 +327,7 @@ func routeRepoCommand(root, tool string, args any) (json.RawMessage, bool, error
 // 旧 P36 镜像只调用 `p37 init <mountPath>`；如果同一 repo 已经被 p37d
 // 打开，CLI 直接修复会撞上 .p37/lock。这里向上查找 .p37/p37d.sock，
 // 有 daemon 就走 MCP repo_init，让修复在 h.mu 内完成。
-func routeInit(root, name, defLine, mode string) (*repo.EnsureResult, bool, error) {
+func routeInit(root, name, defLine, mode, idemKey string, force bool) (*repo.EnsureResult, bool, error) {
 	sock := os.Getenv("P37_DAEMON_SOCKET")
 	if sock == "" {
 		sock = findAncestorSocket(root)
@@ -334,10 +345,14 @@ func routeInit(root, name, defLine, mode string) (*repo.EnsureResult, bool, erro
 		return nil, true, fmt.Errorf("daemon_running: socket %s 存在但无法连接: %w", sock, err)
 	}
 	defer c.Close()
-	data, err := c.Call(ctx, "repo_init", map[string]any{
+	args := map[string]any{
 		"repo": name, "path": root, "default_line": defLine, "mode": mode,
-		"idempotency_key": "cli-init-" + name,
-	})
+		"force": force,
+	}
+	if idemKey != "" {
+		args["idempotency_key"] = idemKey
+	}
+	data, err := c.Call(ctx, "repo_init", args)
 	if err != nil {
 		var te *daemonclient.ToolError
 		if errors.As(err, &te) {

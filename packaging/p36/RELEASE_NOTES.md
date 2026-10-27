@@ -1,4 +1,4 @@
-# p37 @VERSION@ — 应用卷仓库初始化闭环
+# p37 @VERSION@ — 半初始化导入与幂等收紧
 
 ## 发布物
 
@@ -19,7 +19,36 @@
 }
 ```
 
-## 本版重点（v0.4.3）
+## 本版重点（v0.4.4）
+
+- **半初始化 + 用户文件不再静默 repair**：`mode=empty/repair` 检测到用户文件
+  时返回 `repo_not_empty` + `next_action=repo_init_import`，不改 DB、不动文件。
+  `repo_register(init_if_missing)` 同样规则。
+- **`mode=import` 的 v0 状态机**：`currentTree == v0Tree` 只 repair；v0 为空
+  直接导入；v0 非空且不同需要 `force=true`；worktree 空 + v0 非空只能显式
+  force 清空；历史版本/命名 line/活跃 workspace/lease 即使 force 也拒绝。
+- **`repo_init` / `repo_import` 增加 `force`**；`repo_init` 支持
+  `mode=empty|import|repair` + force 的请求幂等比较。
+- **幂等键真正校验**：root `registry.db` 新增 `init_idempotency` 表
+  （in_progress/done/failed + lease + request_hash + result_json）；每个 repo
+  的 `.p37/init.json` 保留最近 32 个 key 的 requests map 作为 root 索引丢失
+  时的同 path 兜底。同 key 不同请求返回 `idempotency_conflict`，并发返回
+  `idempotency_in_progress`。`p37 init` 默认不再生成 `cli-init-*`，新增
+  `--idempotency-key`。
+- **`repo_register(init_if_missing)` 的 key 只在确实触发 InitRepo 时生效**；
+  strict register 忽略 key，不会因冲突失败。
+- **`repo_health` 扩充初始化判定**：新增
+  `user_files/root_tree_empty/history_not_empty/active_workspaces/leases`；
+  `next_action` 覆盖 import/repair/stop_workspaces；数据完整只缺 refs/root 时
+  允许有用户文件的元数据 repair；健康缓存只缓存未初始化结果。
+- **`refs/mainline` 对齐**：default line 的 `ws_land` / `line_merge` /
+  `line_reset` / `version_revert` / `sync fetch` 都会写 refs；
+  `refs_match` 可作为 P36 `/ready` 的可靠门槛。
+- **import 事务故障注入**：`swap_after_delete` / `swap_after_insert` /
+  `swap_before_commit` 回滚旧 v0；`after_commit_before_refs` 暴露
+  DB 已提交、refs 未写的窗口，由 `repo_init(mode=repair)` 对齐。
+
+## 上一版（v0.4.3）
 
 - **新增 `repo_init`**：在已挂载的持久应用卷上原子创建完整仓库
   （`.p37/p37.db` + 空 v0 + 默认 line + `refs/mainline` + `repo.json` +
@@ -119,31 +148,40 @@
 
 ## 接口变化
 
+- 0.4.4 新增：`repo_init.force`、`repo_import.force`（已有参数语义收紧）、
+  `repo_init` 幂等键 root 表、`p37 init --idempotency-key`、
+  `repo_health` 的 `user_files/root_tree_empty/history_not_empty/
+  active_workspaces/leases`；新增错误码 `repo_history_not_empty`、
+  `idempotency_in_progress`。
 - 新增 MCP `repo_init`（推荐的应用卷入口）。
 - `repo_register` 对半初始化仓库从“静默注册”改为返回
   `repo_not_initialized`/`repo_db_corrupt`；`init_if_missing=true` 仍可用，
   但内部等价于 `repo_init(mode=empty)`，并标记 deprecated。
 - `repo_health` 新增字段 `initialized/reason/next_action/default_line_ready/
-  repo_db_ok/repo_json_ok/root_ok/refs_ok/format_ok`，并支持 `path/deep/
-  with_quota`。
+  repo_db_ok/repo_json_ok/root_ok/refs_ok/refs_match/format_ok`，并支持
+  `path/deep/with_quota`。
 - `repo_import` 新增 `force`；`repo_scan` 新增 `repair`；`repo_create` 新增
   `path`。
 - `p37 init` 新增 `--mode/--strict/--no-repair/--name/--default-line/
-  --allow-nonpersistent`；`--if-missing` 语义变为“校验 + 修复”。
+  --force/--idempotency-key/--allow-nonpersistent`；`--if-missing` 语义为
+  “校验 + 修复”，有用户文件时必须显式 `--mode=import`。
 
 ## 兼容性
 
 - 仓库格式仍为 `format_ver=2`，无需迁移；SQLite / CAS / pack / OverlayFS
   布局未改。
-- 0.4.3 可以打开 0.4.2 及更早的完整仓库；`repo_init(mode=repair)` 可修复
+- 0.4.4 可以打开 0.4.3/0.4.2 及更早的完整仓库；`repo_init(mode=repair)` 可修复
   历史半成品。
 - **最低兼容矩阵**：
   - P36：需要能返回 409 + `mounted=true` + `initialized=false`，并且
-    初始化失败不 umount；旧 P36 仍可依赖 `p37 init --if-missing` 自动修复。
+    初始化失败不 umount；`/ready` 消费 `refs_ok/refs_match`；P37 < 0.4.3 时
+    返回 `p37_version_too_old`。旧 P36 仍可依赖 `p37 init --if-missing`，
+    但“半成品 + 用户文件”需要显式 `--mode=import`。
   - P34：需要改用 `repo_init`/`repo_health`，删除 `EnsureRepoDefaultLine`；
+    有用户文件时用 `mode=import`，v0 非空且内容不同时显式 `force=true`；
     旧 P34 的 `line_create` 不带 `from` 无法创建根版本，不能修复半成品。
-  - P37：应用卷统一用 `repo_init` 或 `p37 init --if-missing`；
-    `repo_create` 不带 path 仅用于 L2 scratch。
+  - P37：应用卷统一用 `repo_init` 或 `p37 init`；`repo_create` 不带 path
+    仅用于 L2 scratch。
 
 ## P36 集成要点
 
@@ -153,8 +191,9 @@
 - 初始化失败：**保持卷挂载、不删除 `.p37`**，返回 409 + `mounted=true` +
   `initialized=false` + `next_action`；用户可点“重试初始化”。
 - P36 `/ready`：调用 `repo_health {path, with_quota:false}`，消费
-  `initialized/default_line_ready/next_action`；`initialized=false` 不是
-  p37d down。
+  `initialized/default_line_ready/refs_ok/refs_match/next_action`；
+  `initialized=false` 不是 p37d down。0.4.4 起 default line 的 land/merge/reset/
+  revert/sync 已同步 refs。
 - detach 仍为 `repo_unregister` → guest umount → 宿主 remove-device。
 - MCP 客户端使用 `/usr/local/bin/p37-mcp`（内部
   `p37d --stdio --root /srv/repos`）。

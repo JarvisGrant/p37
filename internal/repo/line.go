@@ -166,6 +166,9 @@ func (r *Repo) ResetLine(name string, target string, force bool, reason string, 
 		}
 		return nil, err
 	}
+	if err := r.syncMainlineRefIfDefault(name, tid); err != nil {
+		return nil, err
+	}
 	_ = r.DB.RecordLineReset(name, l.Head, tid, reason, force, now)
 	return r.DB.GetLine(name)
 }
@@ -537,6 +540,9 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 			}
 			return nil, err
 		}
+		if err := r.syncMainlineRefIfDefault(target, sourceHead); err != nil {
+			return nil, err
+		}
 		res := &MergeResult{Source: source, Target: target, SourceHead: sourceHead,
 			TargetHead: sourceHead, BaseVersion: targetHead, FastForward: true, CanMerge: true}
 		r.putIdem("line_merge", opt.IdempotencyKey, res)
@@ -648,6 +654,9 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 		TaskDesc: r.journalTask(task), TS: v.TS, OpsJSON: journalOps(ops),
 	}
 	if err := r.DB.CommitMerge(v, j, target, targetHead, "line_merge", opt.IdempotencyKey); err != nil {
+		return nil, err
+	}
+	if err := r.syncMainlineRefIfDefault(target, v.ID()); err != nil {
 		return nil, err
 	}
 	if mergeID != "" {
@@ -834,6 +843,9 @@ func (r *Repo) RevertTo(versionID string, targetLine string, expectedHead string
 	j := meta.JournalEntry{VersionID: v.ID().String(), Agent: "p37-revert",
 		TaskDesc: r.journalTask(msg), TS: v.TS, OpsJSON: journalOps(inv)}
 	if err := r.DB.CommitLineLand(v, j, targetLine, nil, "version_revert", idemKey, line.Head); err != nil {
+		return hash.ID{}, err
+	}
+	if err := r.syncMainlineRefIfDefault(targetLine, v.ID()); err != nil {
 		return hash.ID{}, err
 	}
 	return v.ID(), nil

@@ -9,6 +9,7 @@ import (
 	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
+	"github.com/chenyiwen/p37/internal/tree"
 )
 
 // Integrity 是仓库初始化完整性的一次只读快照。
@@ -36,9 +37,15 @@ type Integrity struct {
 	FormatVer        int    `json:"format_ver"`
 	HeadVersionOK    bool   `json:"head_version_ok"`
 	TreeOK           bool   `json:"tree_ok"`
-	// UserFiles 只在缺 DB 时统计（用于决定 repo_init 还是 repo_init_import）。
-	UserFiles  int    `json:"user_files,omitempty"`
-	BackupPath string `json:"backup_path,omitempty"`
+	// UserFiles 只在未初始化时统计（用于决定 repo_init 还是 repo_init_import）。
+	UserFiles        int      `json:"user_files,omitempty"`
+	RootCount        int      `json:"root_count,omitempty"`
+	RootTreeEmpty    bool     `json:"root_tree_empty,omitempty"`
+	HistoryNotEmpty  bool     `json:"history_not_empty,omitempty"`
+	ActiveWorkspaces int      `json:"active_workspaces,omitempty"`
+	Leases           int      `json:"leases,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
+	BackupPath       string   `json:"backup_path,omitempty"`
 }
 
 // CheckIntegrity 只读探测一个仓库目录。
@@ -92,11 +99,8 @@ func CheckIntegrity(root string) (*Integrity, error) {
 // CheckIntegrityDeep 是 CheckIntegrity 的完整版：额外检查对象树。
 func CheckIntegrityDeep(root string) (*Integrity, error) {
 	in, err := CheckIntegrity(root)
-	if err != nil || !in.Initialized {
+	if err != nil || !fileExists(filepath.Join(root, ".p37", "p37.db")) {
 		return in, err
-	}
-	if !fileExists(filepath.Join(root, ".p37", "p37.db")) {
-		return in, nil
 	}
 	db, err := meta.OpenReadOnly(root)
 	if err != nil {
@@ -106,6 +110,35 @@ func CheckIntegrityDeep(root string) (*Integrity, error) {
 		return in, nil
 	}
 	defer func() { _ = db.Close() }()
+
+	// half 仓库没有 head 时也要校验唯一 root v0 的对象树；deep 用于 attach。
+	var treeID hash.ID
+	if in.HeadVersionOK {
+		if h, perr := hash.Parse(in.MainlineHead); perr == nil {
+			if v, verr := db.GetVersion(h); verr == nil {
+				treeID = v.Tree
+			}
+		}
+	} else if in.RootCount == 1 {
+		if st, serr := db.RootState(); serr == nil && len(st.Roots) == 1 {
+			if v, verr := db.GetVersion(st.Roots[0]); verr == nil {
+				treeID = v.Tree
+			}
+		}
+	}
+	if !treeID.IsZero() {
+		if bs, berr := cas.OpenLocalFSReadOnly(filepath.Join(root, ".p37")); berr == nil {
+			store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
+			if _, terr := store.GetTree(treeID); terr != nil {
+				in.TreeOK = false
+				in.Initialized = false
+				in.Reason = "tree_object_missing"
+				in.NextAction = "repo_init_repair"
+				in.Warnings = append(in.Warnings, "head/root tree object is missing")
+				return in, nil
+			}
+		}
+	}
 	if err := evaluateIntegrity(in, db, root, true); err != nil {
 		in.Initialized = false
 		in.Reason = "tree_object_missing"
@@ -145,7 +178,35 @@ func evaluateIntegrity(in *Integrity, db *meta.DB, root string, deep bool) error
 	in.RootOK = filepath.Clean(st.Repo.Root) == filepath.Clean(root)
 	in.MainlineHead = st.Repo.MainlineHead.String()
 	in.VersionCount = st.Repo.VersionCount
-
+	in.RootCount = len(st.Roots)
+	if len(st.Roots) == 1 {
+		if v, verr := db.GetVersion(st.Roots[0]); verr == nil {
+			in.RootTreeEmpty = v.Tree == (&tree.Tree{}).ID()
+		}
+	}
+	def := st.Repo.DefaultLine
+	if def == "" {
+		def = "main"
+	}
+	for i := range st.Lines {
+		if st.Lines[i].Name != def {
+			in.HistoryNotEmpty = true
+			break
+		}
+	}
+	if st.VersionCount > 1 {
+		in.HistoryNotEmpty = true
+	}
+	if ws, werr := db.ListWorkspaces(); werr == nil {
+		for i := range ws {
+			if ws[i].LandedTS == 0 {
+				in.ActiveWorkspaces++
+			}
+		}
+	}
+	if ls, lerr := db.ListLeases(); lerr == nil {
+		in.Leases = len(ls)
+	}
 	head := st.Repo.MainlineHead
 	headVersionOK := false
 	if !head.IsZero() {
@@ -189,8 +250,11 @@ func evaluateIntegrity(in *Integrity, db *meta.DB, root string, deep bool) error
 
 	in.DataOK = in.RepoDBOK && in.FormatOK &&
 		!head.IsZero() && headVersionOK && in.VersionCount > 0 &&
-		in.DefaultLineReady && refsOK
-	in.Initialized = in.DataOK && in.RootOK
+		in.DefaultLineReady
+	in.Initialized = in.DataOK && in.RootOK && refsOK
+	if !in.Initialized {
+		in.UserFiles = CountUserFiles(root)
+	}
 
 	if deep && in.Initialized {
 		if bs, err := cas.OpenLocalFSReadOnly(filepath.Join(root, ".p37")); err == nil {
@@ -217,6 +281,12 @@ func evaluateIntegrity(in *Integrity, db *meta.DB, root string, deep bool) error
 		return nil
 	}
 
+	if in.ActiveWorkspaces > 0 || in.Leases > 0 {
+		in.NextAction = "stop_workspaces"
+		in.Warnings = append(in.Warnings,
+			"repo has active workspaces/leases; stop them before repair/import")
+		return nil
+	}
 	switch {
 	case !in.FormatOK:
 		in.Reason = "format_mismatch"
@@ -226,29 +296,51 @@ func evaluateIntegrity(in *Integrity, db *meta.DB, root string, deep bool) error
 		in.NextAction = "repo_init_repair"
 	case head.IsZero():
 		in.Reason = "mainline_head_missing"
-		in.NextAction = "repo_init_repair"
 	case !headVersionOK:
 		in.Reason = "head_version_missing"
-		in.NextAction = "repo_init_repair"
 	case st.Repo.VersionCount <= 0:
 		in.Reason = "version_count_zero"
-		in.NextAction = "repo_init_repair"
 	case defLine == nil:
 		in.Reason = "default_line_missing"
-		in.NextAction = "repo_init_repair"
 	case !lineHeadOK:
 		in.Reason = "default_line_head_missing"
-		in.NextAction = "repo_init_repair"
 	case !refsOK:
 		if in.Reason == "" {
-			in.Reason = "refs_missing_or_mismatch"
+			in.Reason = "refs_missing_or_invalid"
 		}
-		in.NextAction = "repo_init_repair"
 	default:
 		if in.Reason == "" {
 			in.Reason = "repo_not_initialized"
 		}
+	}
+
+	// 数据本身完整、只缺 refs/root 元数据：repair 是安全的，即使有用户文件。
+	// 这不涉及把文件纳入 v0，只是修 head/line/refs。
+	if in.DataOK && (!in.RefsOK || !in.RootOK) && !(in.RootTreeEmpty && in.UserFiles > 0) {
 		in.NextAction = "repo_init_repair"
+		if !in.RefsOK {
+			in.Warnings = append(in.Warnings, "refs/mainline missing or invalid; repair will align it to DB head")
+		}
+		return nil
+	}
+	if in.UserFiles > 0 {
+		if in.HistoryNotEmpty {
+			in.NextAction = "repo_init_repair"
+			in.Warnings = append(in.Warnings,
+				"repo has history/named lines; import would be unsafe, repair metadata first")
+		} else {
+			in.NextAction = "repo_init_import"
+			if !in.RootTreeEmpty {
+				in.Warnings = append(in.Warnings,
+					"worktree has files and v0 is non-empty; repo_init(mode=import) will repair if content matches, otherwise it needs force")
+			}
+		}
+	} else {
+		in.NextAction = "repo_init_repair"
+		if in.RootCount == 1 && !in.RootTreeEmpty {
+			in.Warnings = append(in.Warnings,
+				"worktree is empty but v0 is non-empty; repair preserves v0, import force would clear it")
+		}
 	}
 	return nil
 }

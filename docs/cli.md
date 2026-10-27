@@ -31,7 +31,7 @@ p37 --root <root> --repo <id|name> <命令> [参数]   # 对指定 repo 执行
 
 | 命令 | 说明 |
 |---|---|
-| `p37 init <root> [--if-missing] [--mode empty\|import\|repair] [--default-line main] [--name <name>] [--config <file>] [--allow-nonpersistent]` | 原子初始化/修复仓库；`--if-missing` 完整则跳过、半成品则修复、不存在则完整初始化；绝不覆盖已有 config |
+| `p37 init <root> [--if-missing] [--mode empty\|import\|repair] [--default-line main] [--name <name>] [--force] [--idempotency-key <key>] [--config <file>] [--allow-nonpersistent]` | 原子初始化/修复仓库；`--if-missing` 完整则跳过、半成品无用户文件则修复、有用户文件返回 `repo_not_empty`；`--force` 允许 import 替换非空 v0；默认不传幂等 key |
 | `p37 init <root> --strict` | 只校验完整性，不写库、不修复 |
 | `p37 init <root> --no-repair` | 诊断：看到半成品直接报错，不修复 |
 | `p37 import <root> <srcdir>` | 把目录树作为 v0 导入（仅空仓库） |
@@ -54,7 +54,7 @@ GC：
 
 ```bash
 p37 --root /srv/repos repo list [--json]
-p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair] [--default-line main] [--allow-nonpersistent] [--json]
+p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair] [--default-line main] [--force] [--idempotency-key <key>] [--allow-nonpersistent] [--json]
 p37 --root /srv/repos repo create <name> [--default-line main] [--remote-key rk_...] [--remote-prefix <p>] [--json]  # 不传 path 是 L2 scratch
 p37 --root /srv/repos repo info <id|name> [--json]
 p37 --root /srv/repos repo delete <id|name> [--force]
@@ -133,7 +133,7 @@ p37d --version
 | `--stdio` | 连接已有 daemon 的 unix socket，作为 stdio MCP 代理；不取仓库锁、不启动 daemon |
 | `--check` | 启动前检查；`--repo` 是完整健康检查，`--root` 是 registry 级检查 |
 | `--json` | `--check` 输出 JSON |
-| `--strict` | 把 ext4 / line 链等视为必需项 |
+| `--strict` | 把 ext4 / line 链 / 仓库完整初始化视为必需项；非 strict 允许半成品启动，由 `/ready` 返回 `initialized=false` 等待 repair。 |
 | `--connect-timeout` | `--stdio` 等待 socket 的时长 |
 
 `p37d --stdio` 在启动时快照 daemon 工具清单；daemon 升级后客户端应重连。
