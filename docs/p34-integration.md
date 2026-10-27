@@ -264,6 +264,9 @@ P36 `/ready` 应使用 `repo_health {path, with_quota:false}`，只消费
 `initialized`/`default_line_ready`/`refs_ok`/`refs_match`/`next_action`；
 未初始化是 200 而不是 p37d down。0.4.4 起 default line 的 land/merge/reset/
 revert/sync 都会同步 `refs/mainline`，`refs_match=true` 可作为就绪门槛。
+0.4.5 起若 `initialized=true, refs_ok=true, refs_match=false`，health 返回
+`reason=refs_mismatch, next_action=repo_init_repair`；调用 `repo_init(mode=repair)`
+做 refs-only repair（有活跃 workspace/lease 时先 `stop_workspaces`）。
 
 P34 不再调用 `EnsureRepoDefaultLine`（它假设 `line_create` 不带 `from` 会创建
 根版本，真实 P37 从 0.3.x 起就返回 `meta: 记录不存在`）。

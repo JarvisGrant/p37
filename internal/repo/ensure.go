@@ -255,14 +255,16 @@ func Ensure(root string, opt EnsureOptions) (*EnsureResult, error) {
 		}
 		// 只 land 到命名 line 时 refs/mainline 可能落后于 DB head；repair
 		// 场景显式对齐，避免同步/运维读到旧 ref。
-		if !in.RefsMatch && in.MainlineHead != "" {
+		repaired := !in.RefsMatch
+		if repaired && in.MainlineHead != "" {
 			if head, perr := hash.Parse(in.MainlineHead); perr == nil {
 				if werr := writeRef(p37, head); werr != nil {
 					return nil, werr
 				}
 			}
 		}
-		istate := initStateFor(opt, root, res.Version.ID, string(opt.Mode), false, false, prev)
+		res.Repaired = repaired
+		istate := initStateFor(opt, root, res.Version.ID, string(opt.Mode), repaired, false, prev)
 		_ = writeInitState(p37, istate)
 		return res, nil
 	}

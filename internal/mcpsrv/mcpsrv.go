@@ -575,6 +575,7 @@ func classify(err error) (code, msg string, detail any) {
 		if errors.As(err, &be) {
 			return "repo_busy", be.Error(), map[string]any{
 				"workspaces": be.Workspaces, "leases": be.Leases,
+				"retryable": false, "next_action": "stop_workspaces",
 			}
 		}
 		return "repo_busy", err.Error(), nil

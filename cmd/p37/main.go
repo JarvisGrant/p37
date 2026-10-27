@@ -425,17 +425,23 @@ func cmdInit(args []string, out, errw io.Writer) int {
 	}
 
 	// 已有完整仓库：保持旧语义（无 --if-missing 报 already initialized）。
-	if in, _ := repo.CheckIntegrity(root); in != nil && in.Initialized {
-		if jsonOut {
-			printJSONIntegrity(out, errw, in)
-		} else {
-			fmt.Fprintf(out, "仓库已完整初始化，跳过初始化: %s\n  mainline_head %s\n  version_count %d\n",
-				root, short(in.MainlineHead), in.VersionCount)
+	// 但 refs 落后时，--if-missing/显式 mode 要继续走 Ensure 做 refs repair。
+	if in, _ := repo.CheckIntegrity(root); in != nil && in.Initialized &&
+		(in.RefsMatch || (!ifMissing && !modeSet)) {
+		if in.RefsMatch {
+			if jsonOut {
+				printJSONIntegrity(out, errw, in)
+			} else {
+				fmt.Fprintf(out, "仓库已完整初始化，跳过初始化: %s\n  mainline_head %s\n  version_count %d\n",
+					root, short(in.MainlineHead), in.VersionCount)
+			}
+			if ifMissing {
+				return 0
+			}
+			return fail(errw, fmt.Errorf("%w: %s", repo.ErrAlreadyInitialized, root))
 		}
-		if ifMissing {
-			return 0
-		}
-		return fail(errw, fmt.Errorf("%w: %s", repo.ErrAlreadyInitialized, root))
+		return fail(errw, fmt.Errorf(
+			"repo_not_initialized: %s（reason=refs_mismatch；用 --if-missing 或 --mode=repair 对齐 refs）", root))
 	}
 	// 半初始化且显式 --no-repair 已在上面拦住；没有 --if-missing 时保持旧语义：
 	// 只要 p37.db 存在就报 already initialized，避免误改用户仓库。

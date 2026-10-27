@@ -195,7 +195,7 @@ func (h *Hub) initRepoLocked(name, abs string, opt InitOptions) (*repo.EnsureRes
 					return nil, err
 				}
 			}
-		} else {
+		} else if in.RefsMatch {
 			if existing != nil && filepath.Clean(existing.Path) != filepath.Clean(abs) {
 				if err := h.rebindTargetLocked(existing, abs); err != nil {
 					return nil, err
@@ -215,6 +215,31 @@ func (h *Hub) initRepoLocked(name, abs string, opt InitOptions) (*repo.EnsureRes
 			}
 			h.invalidateHealth(abs)
 			return res, nil
+		} else {
+			// 数据完整、refs 落后：不要 early-return；下面统一走
+			// repo.Ensure(mode=empty/repair) 做 refs-only repair。
+			if existing != nil && filepath.Clean(existing.Path) != filepath.Clean(abs) {
+				if err := h.rebindTargetLocked(existing, abs); err != nil {
+					return nil, err
+				}
+			}
+			if existing != nil && h.repos[existing.ID] != nil {
+				if err := h.dropForRepairLocked(existing, abs); err != nil {
+					return nil, err
+				}
+			} else {
+				ent := existing
+				if ent == nil {
+					ent = &Entry{ID: "", Path: abs}
+				}
+				ws, leases, _, aerr := h.repoActivityAt(ent, abs)
+				if aerr != nil {
+					return nil, aerr
+				}
+				if len(ws) > 0 || len(leases) > 0 {
+					return nil, &BusyError{Workspaces: ws, Leases: leases}
+				}
+			}
 		}
 	}
 

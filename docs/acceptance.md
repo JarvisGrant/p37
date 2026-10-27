@@ -1,4 +1,4 @@
-# 验收清单（v0.4.4 / format_ver=2）
+# 验收清单（v0.4.5 / format_ver=2）
 
 ## 自动化
 
@@ -68,6 +68,25 @@ P37_BIN=./p37 bash packaging/p36/ci/ws-contract.sh
 
 脚本用 5 个独立进程并发 `ws-ensure`，断言只产生 1 个工作区、5 个响应
 `ws_id` 相同；再并发 ensure 不变；drop 后 tombstone 可查。
+
+## v0.4.5 refs mismatch repair 验收
+
+```bash
+go test ./internal/mcpsrv -run 'TestRefsMismatch|TestStrictRegisterRejectsRefsMismatch' -count=1 -v
+go test ./cmd/p37 -run TestInitIfMissingRepairsRefs -count=1 -v
+```
+
+必须覆盖：
+
+- 初始化 repo，产生一个后续版本（v0 ancestor 仍存在），把 `.p37/refs/mainline`
+  改成 v0；
+- `repo_health`：`initialized=true`、`refs_ok=true`、`refs_match=false`、
+  `reason=refs_mismatch`、`next_action=repo_init_repair`；
+- `repo_init(mode=repair)`：`repaired=true`，DB head 不变，refs 对齐；
+- `p37 init --if-missing`：同样对齐 refs；
+- `repo_register` strict：`repo_not_initialized` + `reason=refs_mismatch`；
+  `init_if_missing=true` 先做 refs-only repair；
+- 有活跃 workspace/lease：`repo_busy` + `stop_workspaces`，refs 不变。
 
 ## v0.4.4 半初始化 + 幂等验收
 

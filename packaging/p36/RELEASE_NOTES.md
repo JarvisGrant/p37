@@ -1,4 +1,4 @@
-# p37 @VERSION@ — 半初始化导入与幂等收紧
+# p37 @VERSION@ — refs mismatch 可执行修复
 
 ## 发布物
 
@@ -19,7 +19,26 @@
 }
 ```
 
-## 本版重点（v0.4.4）
+## 本版重点（v0.4.5）
+
+- **refs mismatch 变成可执行状态**：`repo_health` 对“数据完整、refs 指向旧
+  ancestor”的仓库返回 `initialized=true`、`refs_ok=true`、`refs_match=false`、
+  `reason="refs_mismatch"`、`next_action="repo_init_repair"`，不再只给一个
+  诊断字段。
+- **`repo_init(mode=repair)` 真正修 refs**：complete+refs mismatch 不再
+  early-return；先做 activity 检查（有活跃 workspace/lease 返回 `repo_busy`），
+  再做 refs-only repair，返回 `repaired=true`，DB head/版本不变。
+- **`mode=empty` / `p37 init --if-missing` / `repo_register(init_if_missing)`**
+  同样支持 refs-only repair；strict `repo_register` 遇到 refs mismatch 返回
+  `repo_not_initialized` + `reason=refs_mismatch`，不会注册一个 `/ready`
+  不通过的仓库。
+- **`p37d --check --root`** 非 strict 允许 refs mismatch 启动并交给
+  `/ready`/repair；strict 仍失败。
+- 测试补齐：ancestor refs、health 字段、`repo_init(repair)` repaired/refs_match、
+  active workspace `repo_busy`、strict register 拒绝、CLI `--if-missing` 修复。
+- `format_ver` 不变。
+
+## 上一版（v0.4.4）
 
 - **半初始化 + 用户文件不再静默 repair**：`mode=empty/repair` 检测到用户文件
   时返回 `repo_not_empty` + `next_action=repo_init_import`，不改 DB、不动文件。
@@ -148,6 +167,10 @@
 
 ## 接口变化
 
+- 0.4.5 新增：`repo_health` 在 `initialized=true, refs_match=false` 时返回
+  `reason=refs_mismatch` + `next_action=repo_init_repair`；strict
+  `repo_register` 拒绝 refs mismatch；`repo_init(mode=repair)` 返回
+  `repaired=true`。
 - 0.4.4 新增：`repo_init.force`、`repo_import.force`（已有参数语义收紧）、
   `repo_init` 幂等键 root 表、`p37 init --idempotency-key`、
   `repo_health` 的 `user_files/root_tree_empty/history_not_empty/
@@ -174,9 +197,10 @@
   历史半成品。
 - **最低兼容矩阵**：
   - P36：需要能返回 409 + `mounted=true` + `initialized=false`，并且
-    初始化失败不 umount；`/ready` 消费 `refs_ok/refs_match`；P37 < 0.4.3 时
-    返回 `p37_version_too_old`。旧 P36 仍可依赖 `p37 init --if-missing`，
-    但“半成品 + 用户文件”需要显式 `--mode=import`。
+    初始化失败不 umount；`/ready` 消费 `refs_ok/refs_match/next_action`；
+    `refs_mismatch` 时调用 `repo_init(mode=repair)`；P37 < 0.4.3 时返回
+    `p37_version_too_old`。旧 P36 仍可依赖 `p37 init --if-missing`，但
+    “半成品 + 用户文件”需要显式 `--mode=import`。
   - P34：需要改用 `repo_init`/`repo_health`，删除 `EnsureRepoDefaultLine`；
     有用户文件时用 `mode=import`，v0 非空且内容不同时显式 `force=true`；
     旧 P34 的 `line_create` 不带 `from` 无法创建根版本，不能修复半成品。

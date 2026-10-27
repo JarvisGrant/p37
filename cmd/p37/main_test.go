@@ -11,6 +11,7 @@ import (
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/repolock"
+	"github.com/chenyiwen/p37/internal/workspace"
 )
 
 func TestMain(m *testing.M) {
@@ -238,5 +239,47 @@ func TestInitAcceptsPrecreatedEmptyControlDir(t *testing.T) {
 	}
 	if code, _, errs := runCLI("init", root); code != 0 {
 		t.Fatalf("旧 P36 预建空 .p37 应可初始化: %s", errs)
+	}
+}
+
+func TestInitIfMissingRepairsRefs(t *testing.T) {
+	root := t.TempDir()
+	if code, _, errs := runCLI("init", root); code != 0 {
+		t.Fatalf("init: %s", errs)
+	}
+	r, err := repo.Open(root, config.Default().RepoOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := r.WS.Open(workspace.OpenRequest{Parent: "mainline", TaskDesc: "refs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.WS.Dir(w.ID), "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.LandTo(w.ID, repo.LandOptions{Line: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := r.DB.RootState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v0 := st.Roots[0]
+	_ = r.Close()
+	if err := os.WriteFile(filepath.Join(root, ".p37", "refs", "mainline"),
+		[]byte(v0.String()+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in, _ := repo.CheckIntegrity(root)
+	if !in.Initialized || in.RefsMatch || in.NextAction != "repo_init_repair" {
+		t.Fatalf("before=%+v", in)
+	}
+	if code, _, errs := runCLI("init", root, "--if-missing"); code != 0 {
+		t.Fatalf("if-missing: %s", errs)
+	}
+	in, _ = repo.CheckIntegrity(root)
+	if !in.Initialized || !in.RefsMatch {
+		t.Fatalf("after=%+v", in)
 	}
 }

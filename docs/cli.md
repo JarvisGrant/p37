@@ -34,6 +34,7 @@ p37 --root <root> --repo <id|name> <命令> [参数]   # 对指定 repo 执行
 | `p37 init <root> [--if-missing] [--mode empty\|import\|repair] [--default-line main] [--name <name>] [--force] [--idempotency-key <key>] [--config <file>] [--allow-nonpersistent]` | 原子初始化/修复仓库；`--if-missing` 完整则跳过、半成品无用户文件则修复、有用户文件返回 `repo_not_empty`；`--force` 允许 import 替换非空 v0；默认不传幂等 key |
 | `p37 init <root> --strict` | 只校验完整性，不写库、不修复 |
 | `p37 init <root> --no-repair` | 诊断：看到半成品直接报错，不修复 |
+| `p37 init <root> --if-missing` | 完整且 refs 对齐则跳过；refs 落后会做 refs-only repair（`repaired=true`） |
 | `p37 import <root> <srcdir>` | 把目录树作为 v0 导入（仅空仓库） |
 | `p37 status <root>` | 仓库摘要 |
 | `p37 doctor <root>` | 部署自检（比 `--check --repo` 更严格地判定 OverlayFS） |

@@ -1,4 +1,4 @@
-# p37 MCP 契约（v0.4.4 / format_ver=2）
+# p37 MCP 契约（v0.4.5 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
 `internal/mcpsrv` 的注册为准；当前注册 65 个工具。
@@ -94,7 +94,7 @@
 
 ```json
 {
-  "p37_version": "0.4.4",
+  "p37_version": "0.4.5",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -211,8 +211,12 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
   - `version_count>1`、存在非默认 line：`repo_history_not_empty`，force 也不行；
   - 有活跃 workspace/lease：`repo_busy`，force 也不行；
   - 多个 root v0：`repo_db_corrupt` + `backup_path`，force 也不行。
-- 已完整初始化时：`mode=empty/repair` 幂等返回；`mode=import` 仍会按上面的
-  same/different 判断（same 只 repair，different 需要 force）。
+- 已完整初始化时：
+  - refs 对齐：`mode=empty/repair` 幂等返回；
+  - refs 落后（`refs_match=false`）：`mode=empty/repair` 做 refs-only repair，
+    返回 `repaired=true`，不改版本/line；
+  - `mode=import` 仍会按上面的 same/different 判断（same 只 repair，different
+    需要 force）。
 - 新仓库在 `<path>/.p37.tmp` 里完整建好后 `rename` 成 `.p37`；失败回滚，
   不留下半套 `.p37`。残留 `.p37.tmp` 会在下次初始化时清理。
 - 并发初始化用 root 级文件锁串行化：一个创建，另一个返回已初始化。
@@ -255,8 +259,12 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
 - `init_if_missing=true` **保留但已 deprecated**：内部等价于
   `repo_init(mode=empty)`，失败完整回滚；新调用方应直接用 `repo_init`。
 - `idempotency_key` 只在 `init_if_missing=true` 且确实触发初始化时传给
-  `repo_init`；仓库已完整时按 strict register 处理，key 被忽略，不会因 key
-  冲突失败。`repo_init` 的 root 级 key 规则见上节。
+  `repo_init`；仓库已完整且 refs 对齐时按 strict register 处理，key 被忽略，
+  不会因 key 冲突失败。`repo_init` 的 root 级 key 规则见上节。
+- strict register 遇到 `initialized=true, refs_match=false` 返回
+  `repo_not_initialized` + `detail.reason=refs_mismatch` +
+  `next_action=repo_init_repair`，不注册一个 `/ready` 不通过的仓库；
+  `init_if_missing=true` 会先做 refs-only repair。
 - 同名但已注册在**不同路径**：默认返回 `repo_path_mismatch`，不会静默复用旧
   路径；只有显式 `rebind=true` 才把 registry 指针改到 `path`。`rebind` 只改控制
   面，不搬数据；目标必须已有完整 `p37.db`（缺 head/line/refs 时返回
@@ -623,7 +631,7 @@ repo_health { "repo": "my-app", "deep": true }
   "active_workspaces": 0,
   "leases": 0,
   "format_ver": 2,
-  "p37_version": "0.4.4",
+  "p37_version": "0.4.5",
   "warnings": ["mainline_head_missing"]
 }
 ```
@@ -640,7 +648,7 @@ repo_health { "repo": "my-app", "deep": true }
   "refs_match": true,
   "data_ok": true,
   "repo_db_ok": true,
-  "p37_version": "0.4.4",
+  "p37_version": "0.4.5",
   "quota": {"max_active":8,"active_used":2,"active_available":6,
             "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
             "landed":0,"broken":0,"workspaces":[]},
@@ -674,9 +682,27 @@ repo_health { "repo": "my-app", "deep": true }
 - 有活跃 workspace/lease：`stop_workspaces`。
 
 `refs_ok=true` 表示 ref 存在且指向存在的 version；`refs_match=true` 表示 ref
-等于 DB head。0.4.4 起 default line 的 land/merge/reset/revert/sync 都会同步
-`refs/mainline`，P36 `/ready` 应要求两者都为 true；如果为 false，
-`repo_init(mode=repair)` 会对齐。
+等于 DB head。0.4.5 起 default line 的 land/merge/reset/revert/sync 都会同步
+`refs/mainline`，P36 `/ready` 应要求两者都为 true。
+
+refs 落后（指向仍然存在的旧 ancestor）时，`repo_health` 返回：
+
+```json
+{
+  "initialized": true,
+  "reason": "refs_mismatch",
+  "next_action": "repo_init_repair",
+  "refs_ok": true,
+  "refs_match": false,
+  "data_ok": true,
+  "warnings": ["refs/mainline does not match DB head; repo_init(mode=repair) will align it"]
+}
+```
+
+`initialized` 仍为 true（数据和 line 完整，仓库可用），但 P36 `/ready` 不能放行；
+调用 `repo_init(mode=repair)` / `p37 init --if-missing` /
+`repo_register(init_if_missing=true)` 做 refs-only repair。有活跃 workspace/lease
+时返回 `repo_busy` + `next_action=stop_workspaces`。
 
 ## 历史读取
 
@@ -757,7 +783,7 @@ invalid_argument internal not_found
 - `repo_db_corrupt`：DB 可打开但结构不可恢复（多个 root/no unique head/
   head tree 缺失/format 不匹配），或 `.p37` 存在但 DB 缺失且目录非空。
   `detail` 带 `path`、`backup_path`、`retryable=false`、
-  `next_action=repo_init_repair`。0.4.4 不自动重建，先备份再要求显式修复。
+  `next_action=repo_init_repair`。0.4.5 不自动重建，先备份再要求显式修复。
 - `repo_history_not_empty`：`repo_init(mode=import)` / `repo_import` 发现
   `version_count>1` 或存在非默认 line，不能覆盖 v0；`detail` 带
   `version_count`/`lines`，`next_action=repo_init_repair`。force 也无效。

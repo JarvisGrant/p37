@@ -40,6 +40,26 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.5 refs mismatch 可执行修复
+
+- `evaluateIntegrity`：`initialized=true && !RefsMatch` 不再只把 refs 当诊断，
+  返回 `reason=refs_mismatch`、`next_action=repo_init_repair`，`initialized`
+  保持 true（数据和 line 完整，只是 ref 指针落后）。
+- `repo.Ensure` complete 路径在 refs 落后时写 refs，返回 `repaired=true`，
+  `init.json` 也标记 repaired。
+- `Hub.initRepoLocked`：complete + refs mismatch 不再 early-return；
+  `mode=empty/repair` 先做 activity 检查（open 时 dropForRepairLocked，
+  not-open 时 repoActivityAt），有活跃 workspace/lease 返回 `repo_busy`，
+  然后走 `repo.Ensure` 做 refs-only repair。
+- `p37 init --if-missing` / 显式 `--mode=repair` 对 refs mismatch 继续走 Ensure；
+  strict `repo_register` 返回 `repo_not_initialized` + `reason=refs_mismatch`，
+  `init_if_missing=true` 自动 repair。
+- `p37d --check --root` 非 strict 允许 refs mismatch 启动并交给 `/ready`，
+  strict 仍失败。
+- 测试：ancestor refs 指向、health 字段、repo_init(repair) repaired/refs_match、
+  active workspace busy、strict register 拒绝、CLI --if-missing 修复。
+- 文档、验收与 0.4.5 版本同步；`format_ver` 不变。
+
 ## v0.4.4 半初始化导入与幂等收紧
 
 - **半初始化 + 用户文件**：`mode=empty/repair` 不再静默 repair；有用户文件时

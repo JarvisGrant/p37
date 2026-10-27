@@ -90,12 +90,17 @@ func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, erro
 	if err != nil {
 		return nil, err
 	}
-	// init_if_missing 的幂等键只在确实需要初始化时生效；完整仓库走
-	// strict register，key 被忽略（不会因为 key 冲突失败）。
-	if opt.InitIfMissing && opt.IdempotencyKey != "" && !opt.ForceRename {
-		if in, _ := repo.CheckIntegrity(abs); in == nil || !in.Initialized {
+	// init_if_missing 在“未初始化 / refs 落后”时走 InitRepo；完整且
+	// refs 对齐的仓库走 strict register，key 被忽略。
+	if opt.InitIfMissing && !opt.ForceRename {
+		in, _ := repo.CheckIntegrity(abs)
+		if in == nil || !in.Initialized || !in.RefsMatch {
+			mode := repo.InitEmpty
+			if in != nil && in.Initialized && !in.RefsMatch {
+				mode = repo.InitRepair
+			}
 			if _, err := h.InitRepo(name, abs, InitOptions{
-				Mode: repo.InitEmpty, DefaultLine: opt.DefaultLine,
+				Mode: mode, DefaultLine: opt.DefaultLine,
 				Rebind: opt.Rebind, IdempotencyKey: opt.IdempotencyKey,
 			}); err != nil {
 				return nil, err
@@ -148,6 +153,9 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 		if filepath.Clean(e.Path) == filepath.Clean(abs) {
 			in, _ := repo.CheckIntegrity(abs)
 			if in != nil && in.Initialized {
+				if !in.RefsMatch {
+					return nil, refsMismatchError(abs)
+				}
 				if err := h.ensureRepoMeta(abs, e, hasMeta); err != nil {
 					return nil, err
 				}
@@ -157,6 +165,9 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 			if in != nil && in.DataOK && !in.RootOK {
 				// 卷迁移/重挂后 DB 里的 root 还是旧路径：数据完整，自愈即可。
 				_ = updateRepoRootFile(abs)
+				if !in.RefsMatch {
+					return nil, refsMismatchError(abs)
+				}
 				if err := h.ensureRepoMeta(abs, e, hasMeta); err != nil {
 					return nil, err
 				}
@@ -191,6 +202,9 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 		if in == nil || (!in.Initialized && !in.DataOK) {
 			return nil, integrityError(abs, in)
 		}
+		if !in.RefsMatch {
+			return nil, refsMismatchError(abs)
+		}
 		if err := h.rebindTargetLocked(e, abs); err != nil {
 			return nil, err
 		}
@@ -213,6 +227,9 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 				ErrRepoNameMismatch, abs, e.Name, name)
 		}
 		in, _ := repo.CheckIntegrity(abs)
+		if in != nil && in.Initialized && !in.RefsMatch {
+			return nil, refsMismatchError(abs)
+		}
 		if in != nil && in.DataOK && !in.RootOK {
 			_ = updateRepoRootFile(abs)
 			in.Initialized = true
@@ -237,6 +254,9 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 	}
 
 	in, _ := repo.CheckIntegrity(abs)
+	if in != nil && in.Initialized && !in.RefsMatch {
+		return nil, refsMismatchError(abs)
+	}
 	if in != nil && in.DataOK && !in.RootOK {
 		_ = updateRepoRootFile(abs)
 		in.Initialized = true
@@ -279,6 +299,11 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 	}
 	h.invalidateHealth(abs)
 	return h.getEnrichedLocked(effectiveID)
+}
+
+func refsMismatchError(path string) error {
+	return &IntegrityError{Code: "repo_not_initialized", Path: path,
+		Reason: "refs_mismatch", NextAction: "repo_init_repair"}
 }
 
 // integrityError 把只读探测结果映射成结构化错误。

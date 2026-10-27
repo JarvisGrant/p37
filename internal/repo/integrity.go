@@ -272,6 +272,21 @@ func evaluateIntegrity(in *Integrity, db *meta.DB, root string, deep bool) error
 	}
 
 	if in.Initialized {
+		if !in.RefsMatch {
+			// 数据和 line 都完整，只是 refs/mainline 指向了旧版本。
+			// 保留 initialized=true（仓库可用），但给出可执行的 repair。
+			in.Reason = "refs_mismatch"
+			if in.ActiveWorkspaces > 0 || in.Leases > 0 {
+				in.NextAction = "stop_workspaces"
+				in.Warnings = append(in.Warnings,
+					"refs mismatch but repo has active workspaces/leases; stop them before repair")
+			} else {
+				in.NextAction = "repo_init_repair"
+				in.Warnings = append(in.Warnings,
+					"refs/mainline does not match DB head; repo_init(mode=repair) will align it")
+			}
+			return nil
+		}
 		in.Reason = ""
 		in.NextAction = ""
 		if !in.RepoJSONOK {

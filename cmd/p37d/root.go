@@ -187,6 +187,13 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 			it.Initialized = in.Initialized
 			it.NextAction = in.NextAction
 		}
+		if in != nil && in.Initialized && !in.RefsMatch {
+			it.NextAction = "repo_init_repair"
+			it.Error = "refs/mainline != DB head"
+			if strict {
+				it.OK = false
+			}
+		}
 		if _, err := os.Stat(filepath.Join(e.Path, ".p37", "p37.db")); err != nil {
 			it.OK = false
 			it.Error = err.Error()

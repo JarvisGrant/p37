@@ -97,7 +97,9 @@ per-repo flock，再写 registry tombstone；`.p37`、workspaces 和 repo 数据
 卷本身无法挂载/损坏才 umount。P36 `/ready` 用
 `repo_health {path, with_quota:false}` 消费 `initialized/refs_ok/refs_match/
 next_action`；default line 的 land/merge/reset/revert/sync 已同步 refs，
-`refs_match=true` 可作为就绪门槛。
+`refs_match=true` 可作为就绪门槛。若只拿到 `initialized=true, refs_match=false,
+reason=refs_mismatch`，调用 `repo_init(mode=repair)` 或 `p37 init --if-missing`
+做 refs-only repair；有活跃 workspace/lease 时先停工作区。
 
 `.p37/repo.json` 是仓库身份锚（`id` / `name` / `default_line`）：
 

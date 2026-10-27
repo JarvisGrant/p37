@@ -1,4 +1,4 @@
-# 当前状态（v0.4.4）
+# 当前状态（v0.4.5）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.4` |
+| 发布版本 | `v0.4.5` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 65 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,15 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.4.5 重点（不改 `format_ver`）**：把 `refs/mainline` 落后变成可执行的
+repair 状态：`repo_health` 返回 `initialized=true, refs_ok=true,
+refs_match=false, reason=refs_mismatch, next_action=repo_init_repair`；
+`repo_init(mode=repair)` / `p37 init --if-missing` / `repo_register(init_if_missing)`
+对 complete+refs-mismatch 的仓库执行 refs-only repair（有活跃 workspace/lease
+返回 `repo_busy`）；strict `repo_register` 拒绝 refs mismatch，避免注册一个
+`/ready` 不通过的仓库。`p37d --check --root` 非 strict 允许 refs mismatch 启动并
+交给 `/ready`/repair，strict 仍失败。详见 [`mcp-contract.md`](mcp-contract.md)。
 
 **v0.4.4 重点（不改 `format_ver`）**：补齐“半初始化 + 用户文件”的导入状态机
 （empty/repair 拒绝静默 repair，import 按 v0 空/非空、same/different 决定

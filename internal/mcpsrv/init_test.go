@@ -529,3 +529,91 @@ func TestRepoImportForceSameStateMachine(t *testing.T) {
 		t.Fatalf("import=%v", res)
 	}
 }
+
+func refsMismatchRepo(t *testing.T, hh *harness, name string) (string, string) {
+	t.Helper()
+	path := filepath.Join(hh.root, name)
+	hh.mustOK("repo_init", map[string]any{"repo": name, "path": path, "mode": "empty"})
+	w := hh.mustOK("ws_ensure", map[string]any{"repo": name, "name": name + "-v1"})
+	dir := w["dir"].(string)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hh.mustOK("ws_land", map[string]any{"repo": name, "ws_id": w["ws_id"].(string)})
+	db, err := meta.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := db.RootState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	v0 := st.Roots[0]
+	head := st.Repo.MainlineHead
+	if err := os.WriteFile(filepath.Join(path, ".p37", "refs", "mainline"),
+		[]byte(v0.String()+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path, head.String()
+}
+
+func TestRefsMismatchHealthAndRepair(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	path, head := refsMismatchRepo(t, hh, "app")
+	h := hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["initialized"] != true || h["refs_ok"] != true || h["refs_match"] != false {
+		t.Fatalf("health=%v", h)
+	}
+	if h["reason"] != "refs_mismatch" || h["next_action"] != "repo_init_repair" {
+		t.Fatalf("health=%v", h)
+	}
+	res := hh.mustOK("repo_init", map[string]any{
+		"repo": "app", "path": path, "mode": "repair"})
+	if res["repaired"] != true {
+		t.Fatalf("repair=%v", res)
+	}
+	h2 := hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h2["refs_match"] != true || h2["next_action"] != "" {
+		t.Fatalf("health after repair=%v", h2)
+	}
+	if h2["mainline_head"] != head {
+		t.Fatalf("mainline changed: %v want %s", h2["mainline_head"], head)
+	}
+}
+
+func TestRefsMismatchRepairBusy(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	path, _ := refsMismatchRepo(t, hh, "busy")
+	if _, err := hh.callSafe("ws_ensure", map[string]any{"repo": "busy", "name": "active"}); err != nil {
+		t.Fatal(err)
+	}
+	h := hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["next_action"] != "stop_workspaces" {
+		t.Fatalf("health=%v", h)
+	}
+	e := hh.mustFail("repo_init", "repo_busy", map[string]any{
+		"repo": "busy", "path": path, "mode": "repair"})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["next_action"] != "stop_workspaces" {
+		t.Fatalf("detail=%v", detail)
+	}
+}
+
+func TestStrictRegisterRejectsRefsMismatch(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	path, _ := refsMismatchRepo(t, hh, "strict")
+	e := hh.mustFail("repo_register", "repo_not_initialized", map[string]any{
+		"repo": "strict", "path": path})
+	detail, _ := e["detail"].(map[string]any)
+	if detail["reason"] != "refs_mismatch" || detail["next_action"] != "repo_init_repair" {
+		t.Fatalf("detail=%v", detail)
+	}
+	// init_if_missing 可以修复 refs。
+	hh.mustOK("repo_register", map[string]any{
+		"repo": "strict", "path": path, "init_if_missing": true})
+	h := hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["refs_match"] != true {
+		t.Fatalf("health=%v", h)
+	}
+}
