@@ -92,6 +92,26 @@ func NewLocalFS(root string) (*LocalFS, error) {
 	}, nil
 }
 
+// OpenLocalFSReadOnly 打开本地后端但不创建任何目录。
+//
+// 供 repo_health / integrity 的只读探测使用：Get/Stat 只需要 root 存在，
+// 不能因为一次 health 调用就在 .p37 下补 tmp/。
+func OpenLocalFSReadOnly(root string) (*LocalFS, error) {
+	if root == "" {
+		return nil, errors.New("cas: 本地后端 root 不能为空")
+	}
+	if _, err := os.Stat(root); err != nil {
+		return nil, err
+	}
+	return &LocalFS{
+		root:     root,
+		tmp:      filepath.Join(root, "tmp"),
+		pendingF: make(map[string]struct{}),
+		pendingD: make(map[string]struct{}),
+		noSync:   true,
+	}, nil
+}
+
 // DisableSyncForTest 关闭 fsync，仅用于基准测试对照。
 func (l *LocalFS) DisableSyncForTest() {
 	l.syncMu.Lock()

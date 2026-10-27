@@ -53,6 +53,10 @@ func runRootDaemon(root string, serveHTTP bool) error {
 		for _, sk := range res.Skipped {
 			fmt.Fprintf(os.Stderr, "p37d: registry 跳过 %s（%s）\n", sk.Path, sk.Reason)
 		}
+		for _, is := range res.Uninitialized {
+			fmt.Fprintf(os.Stderr, "p37d: repo 未完整初始化 %s（reason=%s next_action=%s）\n",
+				is.Path, is.Reason, is.NextAction)
+		}
 	}
 	// 启动时打开现有仓库：恢复 workspace 挂载，并让维护命令能看到
 	// per-repo flock。单个 repo 失败只标记 degraded，不影响其它 repo。
@@ -165,20 +169,39 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 		return 1
 	}
 	type item struct {
-		ID    string `json:"id"`
-		Name  string `json:"name"`
-		Path  string `json:"path"`
-		Lines int    `json:"lines"`
-		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Path        string `json:"path"`
+		Lines       int    `json:"lines"`
+		Initialized bool   `json:"initialized"`
+		NextAction  string `json:"next_action,omitempty"`
+		OK          bool   `json:"ok"`
+		Error       string `json:"error,omitempty"`
 	}
 	items := make([]item, 0, len(entries))
 	fail := false
 	for _, e := range entries {
 		it := item{ID: e.ID, Name: e.Name, Path: e.Path, OK: true}
+		in, _ := repo.CheckIntegrity(e.Path)
+		if in != nil {
+			it.Initialized = in.Initialized
+			it.NextAction = in.NextAction
+		}
 		if _, err := os.Stat(filepath.Join(e.Path, ".p37", "p37.db")); err != nil {
 			it.OK = false
 			it.Error = err.Error()
+		} else if in == nil || !in.Initialized {
+			if in != nil && in.FormatVer > 0 && in.FormatVer < meta.FormatVer {
+				// v1 老仓库允许启动后由 Open 自动迁移；--check 本身保持只读。
+				it.OK = true
+				it.NextAction = "migrate_on_open"
+			} else {
+				it.OK = false
+				it.Error = "repo 未完整初始化"
+				if in != nil && in.Reason != "" {
+					it.Error += ": " + in.Reason
+				}
+			}
 		}
 		if it.OK && strict {
 			r, err := h.Open(e.ID)
@@ -212,7 +235,8 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 			if !it.OK {
 				status = "[FAIL]"
 			}
-			fmt.Fprintf(out, "%s %s (%s) lines=%d %s\n", status, it.Name, it.ID, it.Lines, it.Error)
+			fmt.Fprintf(out, "%s %s (%s) lines=%d initialized=%v next=%s %s\n",
+				status, it.Name, it.ID, it.Lines, it.Initialized, it.NextAction, it.Error)
 		}
 	}
 	if fail {

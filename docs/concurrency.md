@@ -98,7 +98,19 @@ Repo.syncMu（同步工具）
 - 回收记录（tombstone）存 `idempotency_result` 的内部命名空间，默认 7 天，
   `sync_restore` 不恢复；跨 VM 后按 name/line 重新 `ws_ensure`。
 
-## 6. 已知边界
+## 6. 初始化锁
+
+- `repo_init` / `p37 init` 先拿 root 级 `<path>/.p37.init.lock`（flock），
+  再在 `.p37` 已存在时拿 daemon 同款 `.p37/lock`；并发初始化只会有一个创建，
+  另一个等待后走幂等返回。
+- 新仓库在 `<path>/.p37.tmp` 构建，rename 成 `.p37` 后再 fsync 父目录；
+  失败/崩溃留下的 `.p37.tmp` 由下一次初始化在锁内清理。
+- 已注册仓库若被 p37d 打开，CLI 会向上查找 `.p37/p37d.sock` 并把 init/repair
+  路由到 daemon，避免和 daemon 的 `.p37/lock` 打架。
+- `repo_register(rebind=true)` 会检查目标 repo 的活跃 workspace/lease；
+  有活跃项时返回 `repo_busy`，不改 registry 指针。
+
+## 7. 已知边界
 
 - `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前由上层确认
   应用空闲。

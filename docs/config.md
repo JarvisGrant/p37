@@ -158,6 +158,8 @@ max_package_bytes = 536870912
 | `P37_S3_ACCESS_KEY` / `P37_S3_SECRET_KEY` | S3 凭证；只从环境变量读 |
 | `P37_S3_SESSION_TOKEN` | 可选临时凭证 |
 | `P37_FORCE_HASH` | 测试/CI 用：关闭 stat 快路径 |
+| `P37_ALLOW_NONPERSISTENT` | 开发/CI 用：允许在非挂载点目录初始化；生产不要设置 |
+| `P37_DAEMON_SOCKET` | CLI 显式指定要路由到的 p37d socket（默认向上查找 `.p37/p37d.sock`） |
 | `P37_ALLOW_ROOT_FALLBACK` | P36 验收可选：允许 root + overlay 对照 |
 
 ## 注意

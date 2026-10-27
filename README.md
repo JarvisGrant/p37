@@ -11,7 +11,7 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**v0.4.2 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
+> 状态：**v0.4.3 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
 > `ws_land_into`、`line_merge`、历史读取、多 line 同步与恢复、应用卷热插拔
 > 生命周期均已接入。M1–M5 主体已在 P36 实例（Ubuntu 26.04 + ext4 +
 > OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；v0.3.x 的当前状态和
@@ -53,7 +53,8 @@ p37 的三个核心取舍：
 ### 单仓库
 
 ```bash
-p37 init /srv/repo
+# 开发机/非持久目录需要 --allow-nonpersistent；应用卷是真实挂载点时不要加
+p37 init /srv/repo --allow-nonpersistent
 p37 import /srv/repo ./my-project
 p37d --repo /srv/repo          # daemon；MCP 客户端还要加 --stdio 或走 HTTP
 ```
@@ -63,7 +64,7 @@ p37d --repo /srv/repo          # daemon；MCP 客户端还要加 --stdio 或走 
 ```bash
 mkdir -p /srv/repos
 p37d --root /srv/repos
-# 然后通过 MCP repo_create / line_create / ws_open / ws_land / line_merge 使用
+# 然后通过 MCP repo_init / line_create / ws_open / ws_land / line_merge 使用
 ```
 
 `/srv/repos` 下每个应用一个 repo 目录。旧 `/srv/repo` 不移动，daemon 启动时
@@ -115,7 +116,7 @@ copy。copy 模式每个工作区是一份完整树，20GB L2 上需要更保守
 `config-overlay.toml` + `p37d-root-overlay.service` 走 OverlayFS。
 
 ```bash
-make release VERSION=0.4.2       # 发布 tar + sha256
+make release VERSION=0.4.3       # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 
@@ -212,13 +213,13 @@ conflict_resolve    →  逐条决策（take_lower / take_upper / both / custom�
 ## MCP 工具面
 
 完整参数、返回字段和错误码以 [`docs/mcp-contract.md`](docs/mcp-contract.md)
-为准；当前注册 64 个工具。
+为准；当前注册 65 个工具。
 
 | 分类 | 工具 |
 |---|---|
 | 仓库只读 | `repo_status` `repo_list` `repo_info` `repo_disk_usage` `repo_health` |
 | 仓库管理 | `repo_create` `repo_delete` `repo_import` `repo_export` `repo_export_status` `repo_set_remote` |
-| 应用卷生命周期 | `repo_register` `repo_unregister` `repo_scan` |
+| 应用卷生命周期 | `repo_init` `repo_register` `repo_unregister` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
 | 工作区 | `ws_open` `ws_ensure` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
 | 整合 | `land_preview` `ws_land` `ws_land_into` `land_history` |

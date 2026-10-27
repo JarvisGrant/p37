@@ -1,4 +1,4 @@
-# 当前状态（v0.4.2）
+# 当前状态（v0.4.3）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,15 +7,22 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.2` |
+| 发布版本 | `v0.4.3` |
 | 仓库格式 | `format_ver = 2` |
-| MCP 工具 | 64 个（以 `internal/mcpsrv` 注册为准） |
+| MCP 工具 | 65 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
 | 测试 | `go test ./...` 全绿；`make cross` 通过 |
 
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.4.3 重点（不改 `format_ver`）**：新增 `repo_init`，在应用卷上原子创建
+`.p37`（p37.db + v0 + 默认 line + refs），支持 empty/import/repair 三种模式；
+`p37 init --if-missing` 改为“校验 + 修复”；`repo_register` 只注册完整仓库；
+`repo_health` 增加 `initialized/default_line_ready/next_action` 只读快路径；
+`repo_import` 改为“先构建对象树，再事务切换”，避免 head 指向已删除版本。
+详见 [`mcp-contract.md`](mcp-contract.md) 与 [`../PROGRESS.md`](../PROGRESS.md)。
 
 **v0.4.2 重点（不改 `format_ver`）**：修复 `ws_land_into` 的有效树缓存一致性
 （`workspace.ops_epoch` + `ReplaceOps` 原子替换），落盘改为「只写子改动路径 +
@@ -36,7 +43,7 @@
 | **M4 冲突** | ✅ 完成 | place、结构化冲突、resolution、候选解、不重叠行自动合并 |
 | **M5 栈与回退** | ✅ 完成 | 折叠集合、`ws_land_into`、`version_revert`、journal |
 | **多仓库 / 命名线** | ✅ 完成 | `--root`、registry、line、DAG、多 line 同步与恢复 |
-| **应用卷生命周期** | ✅ 完成 | `repo_register` / `repo_unregister` / `repo_scan`、挂载点保护、tombstone |
+| **应用卷生命周期** | ✅ 完成 | `repo_init` / `repo_register` / `repo_unregister` / `repo_scan`、原子初始化、半成品修复、挂载点保护、tombstone |
 
 ## 当前可用的端到端路径
 
@@ -71,6 +78,7 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 | P36 payload 换盘 | 需要重启实例 | 服务级 `systemctl restart` 不保证换盘 |
 | `p37d --stdio` | 启动时快照工具清单 | daemon 升级后客户端应重连 |
 | `repo_unregister` | 不等待已经进入执行中的 MCP 调用 | detach 前由 P36 在上层确认应用空闲 |
+| `refs/mainline` 对齐 | 只 land 到命名 line 时 ref 可能落后于 DB head | `repo_health.refs_match` 暴露；`repo_init(mode=repair)` 会把 ref 对齐到 DB head |
 | 非 root OverlayFS | Ubuntu 26.04 可能 `EPERM` | 默认 `materialize=auto` 回退 copy；按 L2 容量收紧 `max_active` / `warn_disk_bytes` |
 | 自更新 | 不支持 | 升级靠替换 payload 盘，不在实例内改 `/run/p37-payload` |
 | 发布平台 | 只发布 linux/amd64 | linux/arm64 只做编译校验 |

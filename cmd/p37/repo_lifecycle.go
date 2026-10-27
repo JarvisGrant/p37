@@ -15,6 +15,7 @@ import (
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/daemonclient"
 	"github.com/chenyiwen/p37/internal/hub"
+	"github.com/chenyiwen/p37/internal/repo"
 )
 
 // cmdRepoRegister 支持：
@@ -142,9 +143,95 @@ func cmdRepoUnregister(root string, args []string, out, errw io.Writer) int {
 // cmdRepoScan 支持：
 //
 //	repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--json]
+//
+// cmdRepoInit 支持：
+//
+//	repo init <name> <path> [--mode empty|import|repair] [--default-line main]
+//	                          [--allow-nonpersistent] [--json]
+func cmdRepoInit(root string, args []string, out, errw io.Writer) int {
+	var (
+		name, path, defLine, mode   string
+		allowNonPersistent, jsonOut bool
+	)
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--json":
+			jsonOut = true
+		case a == "--allow-nonpersistent":
+			allowNonPersistent = true
+		case a == "--default-line" && i+1 < len(args):
+			defLine = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--default-line="):
+			defLine = strings.TrimPrefix(a, "--default-line=")
+		case a == "--mode" && i+1 < len(args):
+			mode = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--mode="):
+			mode = strings.TrimPrefix(a, "--mode=")
+		case strings.HasPrefix(a, "-"):
+			fmt.Fprintf(errw, "未知参数 %q\n", a)
+			return 2
+		default:
+			if name == "" {
+				name = a
+			} else if path == "" {
+				path = a
+			} else {
+				fmt.Fprintf(errw, "repo init 只接受 <name> <path>，多余参数 %q\n", a)
+				return 2
+			}
+		}
+	}
+	if name == "" || path == "" {
+		fmt.Fprintln(errw, "repo init 需要 <name> <path>")
+		return 2
+	}
+	if os.Getenv("P37_ALLOW_NONPERSISTENT") == "1" {
+		allowNonPersistent = true
+	}
+	argsMap := map[string]any{
+		"repo": name, "path": path, "default_line": defLine, "mode": mode,
+	}
+	if data, routed, err := routeRepoCommand(root, "repo_init", argsMap); err != nil {
+		return repoFail(errw, err)
+	} else if routed {
+		if jsonOut {
+			return writeRawJSON(out, errw, data)
+		}
+		var res repo.EnsureResult
+		if err := json.Unmarshal(data, &res); err != nil {
+			return fail(errw, err)
+		}
+		printInitResult(out, &res)
+		return 0
+	}
+	h, err := openRepoHub(root)
+	if err != nil {
+		return repoFail(errw, err)
+	}
+	if allowNonPersistent {
+		h.SetAllowNonPersistent(true)
+	}
+	defer func() { _ = h.Close() }()
+	res, err := h.InitRepo(name, path, hub.InitOptions{
+		Mode: repo.InitMode(mode), DefaultLine: defLine,
+		AllowNonPersistent: allowNonPersistent,
+	})
+	if err != nil {
+		return repoFail(errw, err)
+	}
+	if jsonOut {
+		return writeJSON(out, errw, res)
+	}
+	printInitResult(out, res)
+	return 0
+}
+
 func cmdRepoScan(root string, args []string, out, errw io.Writer) int {
 	reconcile := true
-	var prune, dry, jsonOut bool
+	var prune, dry, repair, jsonOut bool
 	for _, a := range args {
 		switch a {
 		case "--json":
@@ -155,12 +242,14 @@ func cmdRepoScan(root string, args []string, out, errw io.Writer) int {
 			prune = true
 		case "--dry-run":
 			dry = true
+		case "--repair":
+			repair = true
 		default:
 			fmt.Fprintf(errw, "未知参数 %q\n", a)
 			return 2
 		}
 	}
-	argsMap := map[string]any{"reconcile": reconcile, "prune_missing": prune, "dry_run": dry}
+	argsMap := map[string]any{"reconcile": reconcile, "prune_missing": prune, "dry_run": dry, "repair": repair}
 	if data, routed, err := routeRepoCommand(root, "repo_scan", argsMap); err != nil {
 		return repoFail(errw, err)
 	} else if routed {
@@ -172,7 +261,7 @@ func cmdRepoScan(root string, args []string, out, errw io.Writer) int {
 		return repoFail(errw, err)
 	}
 	defer func() { _ = h.Close() }()
-	res, err := h.Scan(hub.ScanOptions{Reconcile: reconcile, PruneMissing: prune, DryRun: dry})
+	res, err := h.Scan(hub.ScanOptions{Reconcile: reconcile, PruneMissing: prune, DryRun: dry, Repair: repair})
 	if err != nil {
 		return repoFail(errw, err)
 	}
@@ -220,6 +309,73 @@ func routeRepoCommand(root, tool string, args any) (json.RawMessage, bool, error
 		return nil, true, err
 	}
 	return data, true, nil
+}
+
+// routeInit 尝试把 p37 init 路由到上层 root 的 p37d。
+//
+// 旧 P36 镜像只调用 `p37 init <mountPath>`；如果同一 repo 已经被 p37d
+// 打开，CLI 直接修复会撞上 .p37/lock。这里向上查找 .p37/p37d.sock，
+// 有 daemon 就走 MCP repo_init，让修复在 h.mu 内完成。
+func routeInit(root, name, defLine, mode string) (*repo.EnsureResult, bool, error) {
+	sock := os.Getenv("P37_DAEMON_SOCKET")
+	if sock == "" {
+		sock = findAncestorSocket(root)
+	}
+	if sock == "" {
+		return nil, false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	c, err := daemonclient.Connect(ctx, sock)
+	if err != nil {
+		if daemonAbsent(err) {
+			return nil, false, nil
+		}
+		return nil, true, fmt.Errorf("daemon_running: socket %s 存在但无法连接: %w", sock, err)
+	}
+	defer c.Close()
+	data, err := c.Call(ctx, "repo_init", map[string]any{
+		"repo": name, "path": root, "default_line": defLine, "mode": mode,
+		"idempotency_key": "cli-init-" + name,
+	})
+	if err != nil {
+		var te *daemonclient.ToolError
+		if errors.As(err, &te) {
+			// 旧 daemon 没有 repo_init / 单仓库 daemon：回退本地路径。
+			if te.Code == "invalid_argument" && strings.Contains(te.Message, "单仓库模式") {
+				return nil, false, nil
+			}
+		}
+		low := strings.ToLower(err.Error())
+		if strings.Contains(low, "unknown tool") || strings.Contains(low, "method not found") {
+			return nil, false, nil
+		}
+		return nil, true, err
+	}
+	var res repo.EnsureResult
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, true, fmt.Errorf("解析 repo_init 结果失败: %w", err)
+	}
+	return &res, true, nil
+}
+
+func findAncestorSocket(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(abs)
+	for {
+		sock := filepath.Join(dir, ".p37", "p37d.sock")
+		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			return sock
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 func daemonAbsent(err error) bool {
@@ -311,8 +467,16 @@ func printScanData(data json.RawMessage, jsonOut bool, out, errw io.Writer) int 
 	for i := range r.Skipped {
 		fmt.Fprintf(out, "skipped  %s: %s\n", r.Skipped[i].Path, r.Skipped[i].Reason)
 	}
-	fmt.Fprintf(out, "added=%d removed=%d degraded=%d skipped=%d dry_run=%v reconciled=%v\n",
-		len(r.Added), len(r.Removed), len(r.Degraded), len(r.Skipped), r.DryRun, r.Reconciled)
+	for i := range r.Uninitialized {
+		fmt.Fprintf(out, "uninit   %s: %s (next_action=%s)\n",
+			r.Uninitialized[i].Path, r.Uninitialized[i].Reason, r.Uninitialized[i].NextAction)
+	}
+	for _, p := range r.Repaired {
+		fmt.Fprintf(out, "repaired %s\n", p)
+	}
+	fmt.Fprintf(out, "added=%d removed=%d degraded=%d skipped=%d uninitialized=%d repaired=%d dry_run=%v reconciled=%v\n",
+		len(r.Added), len(r.Removed), len(r.Degraded), len(r.Skipped),
+		len(r.Uninitialized), len(r.Repaired), r.DryRun, r.Reconciled)
 	return 0
 }
 

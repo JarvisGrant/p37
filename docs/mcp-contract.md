@@ -1,7 +1,7 @@
-# p37 MCP 契约（v0.4.2 / format_ver=2）
+# p37 MCP 契约（v0.4.3 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
-`internal/mcpsrv` 的注册为准；当前注册 64 个工具。
+`internal/mcpsrv` 的注册为准；当前注册 65 个工具。
 
 ## 统一信封
 
@@ -54,7 +54,7 @@
 |---|---|
 | 仓库只读 | `repo_status` `repo_list` `repo_info` `repo_disk_usage` `repo_health` |
 | 仓库管理 | `repo_create` `repo_delete` `repo_import` `repo_export` `repo_export_status` `repo_set_remote` |
-| 应用卷生命周期 | `repo_register` `repo_unregister` `repo_scan` |
+| 应用卷生命周期 | `repo_init` `repo_register` `repo_unregister` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
 | 工作区 | `ws_open` `ws_ensure` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
 | 整合 | `land_preview` `ws_land` `ws_land_into` `land_history` |
@@ -94,7 +94,7 @@
 
 ```json
 {
-  "p37_version": "0.4.2",
+  "p37_version": "0.4.3",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -113,15 +113,22 @@
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `repo_create` | `name`, `default_line?`, `remote_key?`, `remote_prefix?`, `remote?` | 创建空 v0 与默认 line；`remote` 是 `[remote]` 配置对象 |
+| `repo_create` | `name`, `path?`, `default_line?`, `remote_key?`, `remote_prefix?`, `remote?` | 创建空 v0 与默认 line。传 `path` 等价于 `repo_init(mode=empty)`；**不传 path 是 L2 scratch，不能用于应用卷** |
 | `repo_delete` | `repo`, `force?`, `delete_remote?` | 有活跃工作区/租约时返回 `repo_busy`；挂载点返回 `repo_is_mountpoint` |
-| `repo_import` | `repo`, `dir`, `task?` | 把目录导入空仓库作为 default line 的 v0 |
+| `repo_import` | `repo`, `dir?`, `task?`, `force?` | 把目录导入空仓库作为 v0；未初始化的已注册仓库等价于 `repo_init(mode=import)` |
 | `repo_export` | `repo`, `ref`, `dest_dir`, `async?` | 把 line/version 物化到目录；`async=true` 返回 `job_id` |
 | `repo_export_status` | `job_id` | 查询异步导出任务；任务只在当前 daemon 进程内有效 |
 | `repo_set_remote` | `repo`, `remote` | 更新 per-repo `[remote]`；凭证仍只从环境变量读 |
 
 `repo_delete` 的 `delete_remote` 当前保留但未参与删除逻辑；不会删除远端包。
 `repo_import` 的 `task` 当前只作为参数保留，不写 journal。
+
+`repo_import` 的顺序是：先采集目录并构建完整对象树、flush，再在一个 SQLite
+事务里退休旧 v0/插入新 v0/更新 head 与 line，最后写 `refs/mainline`。任何一步
+失败都不会出现 “head 指向已删除版本”。已有版本时返回 `repo_not_empty`；
+只有 `force=true` 且 `version_count<=1`、没有活跃 workspace/lease 时才允许
+覆盖初始 v0。未初始化的已注册仓库等价于 `repo_init(mode=import)`（此时
+`dir` 必须等于仓库路径）。
 
 ### repo_export
 
@@ -149,13 +156,57 @@ P36 把「每应用一个持久卷」挂到 guest 的 `/srv/repos/<app>`。p37d 
 
 ```text
 attach: 宿主热加 qcow2 → guest mount /srv/repos/<app>
-        → repo_register（或 repo_scan）
+        → repo_init(mode=empty)（P36 旧镜像可继续用 p37 init --if-missing）
+        → repo_register 只在仓库已完整时成功
 detach: repo_unregister → guest umount → 宿主 remove-device
 删除卷: repo_unregister → guest umount → 宿主删卷（不要用 repo_delete）
 ```
 
 所有 registry 写操作都由运行中的 p37d 执行（Hub mutex + SQLite 事务）。CLI 在
-daemon socket 可连接时通过 MCP 路由 register/unregister/scan。
+daemon socket 可连接时通过 MCP 路由 init/register/unregister/scan。
+
+### repo_init
+
+在已挂载的持久目录上**原子**初始化一个完整仓库。这是应用卷的推荐入口；
+P36 attach、P34 首次打开和“重试初始化”都走它。
+
+```json
+{
+  "repo": "p34-59",
+  "path": "/srv/repos/p34-59",
+  "default_line": "main",
+  "mode": "empty",
+  "idempotency_key": "p34-init-p34-59"
+}
+```
+
+返回：
+
+```json
+{
+  "repo": {"name":"p34-59","path":"/srv/repos/p34-59","default_line":"main",
+           "mainline_head":"<v0>","version_count":1},
+  "line": {"name":"main","head":"<v0>"},
+  "version": {"id":"<v0>"},
+  "created": true
+}
+```
+
+- `mode=empty`：只允许空目录。`lost+found`、`workspaces`、`.p37*` 不算用户
+  文件（ext4 新卷根目录一定有 `lost+found`）。
+- `mode=import`：把目录中的用户文件作为 v0 导入；同样排除上述目录。
+- `mode=repair`：已有 `.p37/p37.db` 但缺 head/line/refs 时补齐；**认领已有的
+  唯一 root v0，不新建第二个根**。多个根/对象缺失返回 `repo_db_corrupt` +
+  `backup_path`。
+- 已完整初始化时幂等返回，不重复建 v0/line。
+- 新仓库在 `<path>/.p37.tmp` 里完整建好后 `rename` 成 `.p37`；失败回滚，
+  不留下半套 `.p37`。残留 `.p37.tmp` 会在下次初始化时清理。
+- 并发初始化用 root 级文件锁串行化：一个创建，另一个返回已初始化。
+- 幂等键持久化在 `.p37/init.json`（registry 是本地临时库）。
+- 生产环境要求 `mount_point=true`；开发/CI 可用 CLI
+  `--allow-nonpersistent` 或 `P37_ALLOW_NONPERSISTENT=1` 放宽，MCP 不暴露该字段。
+- 路径非法/不在 root/符号链接逃逸/非持久卷返回 `invalid_path`，
+  `detail.code="repo_path_invalid"`、`detail.reason` 说明具体原因。
 
 ### repo_register
 
@@ -172,14 +223,22 @@ daemon socket 可连接时通过 MCP 路由 register/unregister/scan。
 
 - `path` 必须是 root 下的绝对路径，且不能是 root 自身、root/.p37、symlink 或
   逃逸路径。
-- `path` 必须已经存在（应用卷应已挂载）；本工具不会创建目录。
-- 同 path 已注册时幂等返回已有 Entry。
+- 0.4.3 起 **只注册完整仓库**。只读校验 repo 行、`mainline_head`、`version_count`、
+  default line、`refs/mainline`、DB 可读与 root 一致；任一不满足：
+  - 没有 `.p37/p37.db` → `repo_not_initialized`，
+    `detail.next_action="repo_init"`；
+  - 有 DB 但缺 line/version/refs → `repo_not_initialized` 或
+    `repo_db_corrupt`，`detail.next_action="repo_init_repair"`。
+- 同 path 已注册且完整时幂等返回已有 Entry。
+- `init_if_missing=true` **保留但已 deprecated**：内部等价于
+  `repo_init(mode=empty)`，失败完整回滚；新调用方应直接用 `repo_init`。
 - 同名但已注册在**不同路径**：默认返回 `repo_path_mismatch`，不会静默复用旧
   路径；只有显式 `rebind=true` 才把 registry 指针改到 `path`。`rebind` 只改控制
-  面，不搬数据，目标路径必须已有同一 repo 身份（`.p37/repo.json` 或 `p37.db`）。
-- path 下没有 `.p37/p37.db`：
-  - `init_if_missing=false` → `repo_not_initialized`；
-  - `init_if_missing=true` → 使用 root 配置模板初始化，并写 `.p37/repo.json`。
+  面，不搬数据；目标必须已有完整 `p37.db`（缺 head/line/refs 时返回
+  `repo_not_initialized`），有 `.p37/repo.json` 时 repo id 必须一致。
+- `rebind=true` 会检查目标 repo 的活跃 workspace/lease；有则返回 `repo_busy`，
+  `detail` 带 `workspaces`/`leases` 与 `next_action="stop_workspaces"`，registry
+  不变。
 - 有 `.p37/p37.db` 但没有 `.p37/repo.json`：生成 `repo_<32hex>` 身份并落盘。
 - 已有 repo.json 时以其中的 id/name 为准；name 冲突返回 `repo_name_mismatch`，
   只有显式 `force_rename=true` 才会改 repo.json 的 name。
@@ -205,9 +264,12 @@ daemon socket 可连接时通过 MCP 路由 register/unregister/scan。
 ### repo_scan
 
 ```json
-{ "reconcile": true, "prune_missing": false, "dry_run": false }
+{ "reconcile": true, "prune_missing": false, "dry_run": false, "repair": false }
 ```
 
+- `repair=true` 时对检测到的半初始化仓库执行 `repo_init(mode=repair)`；
+  默认 false，daemon 启动 scan 保持非破坏性。返回 `uninitialized[]` 与
+  `repaired[]`。
 - 只扫 root 的直接子目录；跳过隐藏目录、非目录、symlink。
 - 读取每个子目录的 `.p37/repo.json`；不打开 repo、不初始化、不做重操作。
 - registry 为空或非空都能工作；未注册但 repo.json 有效的目录会加入 registry。
@@ -495,26 +557,76 @@ r = ws_land_into(child, parent_ws,
 
 ## 启动自检
 
-`repo_health(repo)` 只读聚合 `repo_info + ws_quota + sync_status + ws_list`：
+`repo_health` 是 P36 `/ready` 的廉价入口，也是 P34 的聚合只读视图：
+
+```json
+repo_health { "repo": "my-app" }
+repo_health { "path": "/srv/repos/my-app", "with_quota": false }
+repo_health { "repo": "my-app", "deep": true }
+```
+
+参数：
+
+- `repo`：已注册仓库的 id/name。`path` 优先于 `repo`，用于 attach 失败、
+  registry 还没有行时直接探测挂载点。
+- `with_quota=false`：P36 `/ready` 用。不打开 repo、不跑 EnsureSchema/migrate，
+  只做 repo.json + 只读 SQLite + 短 TTL 缓存。
+- `deep=true`：doctor 用，额外校验 head 的对象树存在。
+
+未初始化时仍返回 `ok=true`（HTTP 200），不能当成 p37d down：
 
 ```json
 {
-  "repo": {"id":"repo_...","name":"my-app","path":"/srv/repos/my-app",
-           "available":true,"degraded":false,"mount_point":true},
-  "p37_version": "0.4.2",
+  "initialized": false,
+  "reason": "mainline_head_missing",
+  "next_action": "repo_init_repair",
+  "path": "/srv/repos/p34-59",
+  "default_line": "main",
+  "default_line_ready": false,
+  "mainline_head": "0000...",
+  "version_count": 0,
+  "repo_db_ok": true,
+  "repo_json_ok": false,
+  "root_ok": true,
+  "refs_ok": false,
   "format_ver": 2,
-  "persistence": {"durable": false, "durable_scope": "local_only",
-                  "pending_packages": 0, "ahead": 0, "behind": 0, "diverged": false},
+  "p37_version": "0.4.3",
+  "warnings": ["mainline_head_missing"]
+}
+```
+
+已初始化时在原有字段上增加：
+
+```json
+{
+  "initialized": true,
+  "reason": "",
+  "next_action": "",
+  "default_line_ready": true,
+  "refs_ok": true,
+  "refs_match": true,
+  "repo_db_ok": true,
+  "p37_version": "0.4.3",
   "quota": {"max_active":8,"active_used":2,"active_available":6,
             "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
             "landed":0,"broken":0,"workspaces":[]},
   "workspaces": {"total":2,"active":2,"conflicted":0,"landed":0,
                  "broken":0,"hidden":0,"tombstones":1},
   "lines": {"count":2,"default_line":"main","heads":{"main":"v..."}},
+  "persistence": {"durable": false, "durable_scope": "local_only",
+                  "pending_packages": 0, "ahead": 0, "behind": 0, "diverged": false},
   "last_land_ts": 1792831200000,
   "warnings": []
 }
 ```
+
+判定规则：repo 行存在、`root` 与 path 一致、`mainline_head` 非零、
+`version_count>0`、default line 存在且 head 指向存在的 version、
+`refs/mainline` 存在且指向存在的 version、DB 可读、format_ver 匹配。任一不满足
+`initialized=false`，并给出 `next_action` ∈ `repo_init|repo_init_repair|repo_init_import`。
+`refs_match=false` 表示 ref 与 DB head 不同（例如只 land 到命名 line），这是
+信息字段，不单独导致 `initialized=false`；`repo_init(mode=repair)` 会把 ref
+对齐到 DB head。
 
 ## 历史读取
 
@@ -567,6 +679,7 @@ r = ws_land_into(child, parent_ws,
 
 ```text
 repo_required repo_not_found repo_exists repo_busy repo_not_initialized
+repo_not_empty repo_db_corrupt
 repo_name_mismatch repo_path_exists repo_is_mountpoint
 registry_busy
 line_not_found line_exists line_protected
@@ -587,6 +700,21 @@ invalid_argument internal not_found
 
 补充：
 
+- `repo_not_empty`：`repo_init(mode=empty)` 遇到用户文件（排除
+  `lost+found/workspaces/.p37*`）或 `repo_import` 遇到已有版本。`detail` 带
+  `path`、`user_files_count`、`retryable=false`、`next_action=repo_init_import`。
+- `repo_db_corrupt`：DB 可打开但结构不可恢复（多个 root/no unique head/
+  head tree 缺失/format 不匹配），或 `.p37` 存在但 DB 缺失且目录非空。
+  `detail` 带 `path`、`backup_path`、`retryable=false`、
+  `next_action=repo_init_repair`。0.4.3 不自动重建，先备份再要求显式修复。
+- `repo_not_initialized`：`detail.reason` 至少是
+  `repo_db_missing_or_corrupt`/`mainline_head_missing`/`default_line_missing`/
+  `refs_missing_or_invalid`，`detail.next_action` 是 `repo_init` 或
+  `repo_init_repair`；`retryable=false`。
+- `invalid_path` 在初始化场景的 `detail.code="repo_path_invalid"`，
+  `detail.reason` ∈ `outside_root|not_mounted|symlink_escape|not_persistent`。
+- `repo_busy` 在 rebind/import 场景的 `detail.next_action="stop_workspaces"`；
+  初始化锁冲突是 `retryable=true`、`step="lock"`。
 - `daemon_running` 是 CLI 的本地错误文本，不由 MCP 返回。
 - `already_landed`、`already_merged`、`already_dropped`、`already_deleted`、
   `already_unregistered` 是返回体里的布尔字段，不是错误码。

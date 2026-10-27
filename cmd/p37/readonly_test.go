@@ -44,7 +44,7 @@ func TestExecutableFromReadOnlyDir(t *testing.T) {
 	}
 
 	repoDir := t.TempDir()
-	if out, err := exec.Command(bin, "init", repoDir).CombinedOutput(); err != nil {
+	if out, err := exec.Command(bin, "init", repoDir, "--allow-nonpersistent").CombinedOutput(); err != nil {
 		t.Fatalf("从只读目录执行 init 失败: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(repoDir, ".p37", "p37.db")); err != nil {

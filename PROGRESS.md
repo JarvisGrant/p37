@@ -8,7 +8,7 @@
 > 设计规格为内部资料，不随本仓库发布；文中出现的 `§` / `附录` 编号只用于
 > 内部追溯，公开行为以当前代码和契约文档为准。
 >
-> 最近更新：2026-10-25
+> 最近更新：2026-10-27
 
 ## 当前状态速查
 
@@ -21,7 +21,7 @@
 | **M4 冲突** | ✅ 完成 | place + 冲突对象 + resolution + MCP 工具层已打通；候选解 3 条 + 重叠自动合并 |
 | **M5 栈与回退** | ✅ 完成 | 折叠集合、revert、journal；三层栈 + 分叉端到端用例齐备（并借此修掉 S20） |
 | **多仓库 / 命名线** | ✅ 完成 | `--root`、registry、line、DAG、多 line 同步与恢复 |
-| **应用卷生命周期** | ✅ 完成 | `repo_register` / `repo_unregister` / `repo_scan`、挂载点保护、tombstone |
+| **应用卷生命周期** | ✅ 完成 | `repo_init` / `repo_register` / `repo_unregister` / `repo_scan`、原子初始化、半成品修复、挂载点保护、tombstone |
 
 测试：`go test ./...` 全绿；当前约 289 个可列出测试、4.2 万行 Go（含测试）。
 交叉编译：`darwin/amd64`、`linux/amd64`、`linux/arm64` 全部通过。
@@ -39,6 +39,44 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单、闭环、冲突、revert、错误码映射。
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
+
+## v0.4.3 应用卷仓库初始化闭环
+
+### 问题
+
+新应用首次 attach 后，如果 `p37 init` 在「v0 已写、mainline_head/line/refs
+未写」之间中断，重试时 `p37 init --if-missing` 只看 `p37.db` 是否存在就跳过，
+`repo_register` 又只注册任何已存在的 DB，最终 P34 看到
+`version_count=0`、`lines=[]`；`line_create(from=main)` 报
+`version_not_found`，工作区打不开。
+
+`bad.db` 现场确认：repo 行 + 一个 root v0，但 `mainline_head=NULL`、line 空、
+refs 缺失。修复必须认领这个 v0，不能再造第二个根。
+
+### 实现
+
+- 新增内部统一入口 `repo.Ensure`，MCP `repo_init`、CLI `p37 init`、
+  `repo_register(init_if_missing=true)` 三处共用。
+- 新仓库在 `<path>/.p37.tmp` 完整构建后 rename；fsync 控制目录与父目录；
+  失败清理 tmp。root 级 init 锁 + `.p37/lock` 串行化；幂等键落
+  `.p37/init.json`。
+- `mode=empty` 的“用户文件”排除 `.p37*`、`workspaces`、`lost+found`；
+  `mode=import` 先建树后事务切换；`mode=repair` 认领唯一 root v0。
+- `p37 init --if-missing` 改为校验 + 修复；新增 `--strict`/`--no-repair`。
+- `repo_register` 只注册完整仓库，返回 `repo_not_initialized`/
+  `repo_db_corrupt` + `next_action`；`rebind` 检查目标活跃
+  workspace/lease。
+- `repo_health` 增加 `initialized/default_line_ready/next_action`，支持
+  `path/with_quota/deep`，未初始化返回 200；已打开时复用内存状态，未打开时
+  只读 SQLite + 1s TTL 缓存。
+- `repo_import` 改为“先 capture 构建对象树 → flush → SQLite 事务退休旧
+  v0/插入新 v0/更新 head/line → 写 refs”；失败不再留下 head 指向已删除版本。
+- `repo_scan` 增加 `uninitialized[]`/`repaired[]` 与 `repair=true`；
+  `p37 doctor` 增加 repo/line/version/refs 一致性检查。
+- `repo_create` 增加可选 `path`（等价 `repo_init(mode=empty)`）；不传 path
+  仍是 L2 scratch。
+- 文档同步：MCP 契约、P34 接入、CLI、配置、运维、验收、状态与发布说明。
+- 版本升到 0.4.3，`format_ver` 不变。
 
 ## v0.4.2：land_into 一致性与三方合并可观测（2026-10-25）
 

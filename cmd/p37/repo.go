@@ -29,6 +29,8 @@ func cmdRepo(root string, args []string, out, errw io.Writer) int {
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
+	case "init":
+		return cmdRepoInit(root, rest, out, errw)
 	case "register":
 		return cmdRepoRegister(root, rest, out, errw)
 	case "unregister":

@@ -8,6 +8,7 @@ package repolock
 import (
 	"errors"
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,6 +37,30 @@ func TryExclusive(path string) (*Lock, error) {
 		return nil, err
 	}
 	return &Lock{f: f}, nil
+}
+
+// Acquire 在 timeout 内等待并获取排他锁。
+//
+// timeout<=0 时退化为 TryExclusive。用于 repo_init：并发初始化应当等待
+// 第一个完成，然后走幂等返回，而不是直接失败。
+func Acquire(path string, timeout time.Duration) (*Lock, error) {
+	if timeout <= 0 {
+		return TryExclusive(path)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		l, err := TryExclusive(path)
+		if err == nil {
+			return l, nil
+		}
+		if !errors.Is(err, ErrBusy) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // Release 释放锁并关闭文件。

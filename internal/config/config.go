@@ -233,16 +233,23 @@ func SocketPath(root string, cfg Config) string {
 
 // Save 写出配置（供 init 生成模板）。
 func Save(root string, cfg Config) error {
+	return SaveControl(filepath.Join(root, ".p37"), cfg)
+}
+
+// SaveControl 把配置写到指定控制目录下的 config.toml。
+//
+// 原子初始化在 <repo>/.p37.tmp 里构建，这个入口让它不必假装有一个
+// 完整的 repo 根。
+func SaveControl(controlDir string, cfg Config) error {
 	var sb strings.Builder
 	enc := toml.NewEncoder(&sb)
 	if err := enc.Encode(cfg); err != nil {
 		return err
 	}
-	p := Path(root)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(controlDir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte(sb.String()), 0o644)
+	return os.WriteFile(filepath.Join(controlDir, "config.toml"), []byte(sb.String()), 0o644)
 }
 
 // Duration 解析时长字符串，非法时返回默认值。

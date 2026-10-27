@@ -441,22 +441,38 @@ func Init(root string, opt Options) (*Repo, error) {
 		return nil, err
 	}
 	v := version.New(hash.Zero, tid, 0, "p37-init", "init", time.Now().UnixMilli(), "init")
-	if err := r.DB.InsertVersion(v); err != nil {
+	def, _ := r.DB.DefaultLine()
+	if def == "" {
+		def = "main"
+	}
+	if err := r.DB.Bootstrap(root, v, def, nil); err != nil {
 		return nil, err
 	}
 	if err := r.writeHead(v.ID()); err != nil {
 		return nil, err
 	}
-	if err := r.DB.SetMainlineHead(v.ID(), 1, 0); err != nil {
-		return nil, err
-	}
 	return r, nil
+}
+
+// ImportOptions 控制 repo_import 的替换策略。
+type ImportOptions struct {
+	// Force 允许覆盖一个已有内容的初始 v0（仍然只允许 version_count<=1）。
+	Force bool
 }
 
 // Import 把 srcdir 的目录树作为 v0 导入（§2.1）。
 //
 // 覆盖已有的 v0（空树），因此只能在尚无后续版本时调用。
 func (r *Repo) Import(srcDir string) (hash.ID, error) {
+	return r.ImportWithOptions(srcDir, ImportOptions{})
+}
+
+// ImportWithOptions 是 Import 的显式版本。
+//
+// 正确顺序：先构建完整对象树并 flush，再进一个 SQLite 事务退休旧 v0、
+// 插入新 v0、更新 head/line，最后写 refs。任何一步失败都不会出现
+// “head 指向已删除版本”的半成品。
+func (r *Repo) ImportWithOptions(srcDir string, opt ImportOptions) (hash.ID, error) {
 	head, ok, err := r.DB.Head()
 	if err != nil {
 		return hash.ID{}, err
@@ -469,10 +485,24 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 		return hash.ID{}, err
 	}
 	if n > 1 {
-		return hash.ID{}, errors.New("repo: 只能在尚无后续版本时 import")
+		return hash.ID{}, &NotEmptyError{Path: srcDir, UserFiles: 0}
 	}
-	// 删除初始 v0，避免留下两条互不相连的根。
-	if err := r.DB.DeleteVersion(head); err != nil {
+	old, err := r.DB.GetVersion(head)
+	if err != nil {
+		return hash.ID{}, err
+	}
+	emptyID := (&tree.Tree{}).ID()
+	if old.Tree != emptyID && !opt.Force {
+		return hash.ID{}, &NotEmptyError{Path: srcDir, UserFiles: 0}
+	}
+	if err := ensureNoWorkspaces(r.DB); err != nil {
+		return hash.ID{}, err
+	}
+	def, derr := r.DB.DefaultLine()
+	if derr != nil {
+		return hash.ID{}, derr
+	}
+	if err := ensureOnlyDefaultLine(r.DB, def); err != nil {
 		return hash.ID{}, err
 	}
 
@@ -482,35 +512,38 @@ func (r *Repo) Import(srcDir string) (hash.ID, error) {
 	// 没有并发写者，显式关掉以免白等（§5.2 的适用面就是工作区采集）。
 	iopt := r.CaptureOpt
 	iopt.StableRetries = 0
-	t, err := capture.Build("", srcDir, r.Ignore, r.Store, nil,
+	ig := r.Ignore
+	if filepath.Clean(srcDir) == filepath.Clean(r.Root) {
+		// 原地导入：必须排除 p37 自己的控制目录与 ext4 的 lost+found。
+		if ig2, ierr := importIgnore(r.Root, Options{}); ierr == nil {
+			ig = ig2
+		}
+	}
+	t, err := capture.Build("", srcDir, ig, r.Store, nil,
 		capture.InodeReliable(false), iopt)
 	if err != nil {
 		return hash.ID{}, err
 	}
+	// 对象必须在推进 head 之前落盘。
+	if err := r.Store.Flush(); err != nil {
+		return hash.ID{}, err
+	}
+	if os.Getenv("P37_IMPORT_FAULT_AT") == "before_swap" {
+		return hash.ID{}, errors.New("repo: injected import fault before_swap")
+	}
 
 	v := version.New(hash.Zero, t.ID(),
 		0, AgentImporter, "import "+srcDir, time.Now().UnixMilli(), "import")
-	if err := r.DB.InsertVersion(v); err != nil {
-		return hash.ID{}, err
+	journal := &meta.JournalEntry{
+		VersionID: v.ID().String(), Agent: AgentImporter,
+		TaskDesc: r.journalTask(v.TaskDesc), TS: v.TS, OpsJSON: "[]",
 	}
-	// 写一条血缘记录：否则 blame 会把「导入」这一版报成「journal 已清理」，
-	// 而它恰恰是最需要解释来源的一版。
-	if _, err := r.DB.InsertJournal(meta.JournalEntry{
-		VersionID: v.ID().String(),
-		Agent:     AgentImporter,
-		TaskDesc:  r.journalTask(v.TaskDesc),
-		TS:        v.TS,
-		OpsJSON:   "[]",
-	}); err != nil {
+	if err := r.DB.SwapRootAt(r.Root, head, v, def, journal); err != nil {
 		return hash.ID{}, err
 	}
 	if err := r.writeHead(v.ID()); err != nil {
 		return hash.ID{}, err
 	}
-	if err := r.DB.SetMainlineHead(v.ID(), 1, 0); err != nil {
-		return hash.ID{}, err
-	}
-	_ = head
 	return v.ID(), nil
 }
 

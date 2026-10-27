@@ -22,6 +22,7 @@ func newMultiHarness(t *testing.T) (*harness, *hub.Hub) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.SetAllowNonPersistent(true)
 	srv := mcpsrv.NewWithResolver(nil, h.Open)
 	srv.Hub = h
 	ct, st := mcp.NewInMemoryTransports()

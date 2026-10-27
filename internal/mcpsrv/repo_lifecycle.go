@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/chenyiwen/p37/internal/hub"
+	"github.com/chenyiwen/p37/internal/repo"
 )
 
 // registerRepoLifecycle 注册应用卷热插拔所需的三个 registry 生命周期工具。
@@ -44,6 +45,45 @@ func (s *Server) registerRepoLifecycle() {
 				InitIfMissing: a.InitIfMissing,
 				ForceRename:   a.ForceRename,
 				Rebind:        a.Rebind,
+			})
+		})
+
+	s.register("repo_init",
+		"在指定的持久目录上原子初始化一个完整仓库（v0 + 默认 line + refs）；支持 repair/import。",
+		`{"type":"object","properties":{
+		  "repo":{"type":"string","description":"repo 名（不是 id）"},
+		  "path":{"type":"string","description":"必须位于 root 下的绝对路径，且是持久挂载卷"},
+		  "default_line":{"type":"string","default":"main"},
+		  "mode":{"type":"string","enum":["empty","import","repair"],"default":"empty"},
+		  "idempotency_key":{"type":"string"}
+		},"required":["repo","path"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			if s.Hub == nil {
+				return nil, coded("invalid_argument", "单仓库模式不支持 repo_init")
+			}
+			var a struct {
+				Repo           string `json:"repo"`
+				Path           string `json:"path"`
+				DefaultLine    string `json:"default_line"`
+				Mode           string `json:"mode"`
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			if a.Repo == "" || a.Path == "" {
+				return nil, coded("invalid_argument", "repo 和 path 不能为空")
+			}
+			mode := repo.InitMode(a.Mode)
+			if mode == "" {
+				mode = repo.InitEmpty
+			}
+			if mode != repo.InitEmpty && mode != repo.InitImport && mode != repo.InitRepair {
+				return nil, coded("invalid_argument", "mode 必须是 empty/import/repair")
+			}
+			return s.Hub.InitRepo(a.Repo, a.Path, hub.InitOptions{
+				Mode: mode, DefaultLine: a.DefaultLine,
+				IdempotencyKey: a.IdempotencyKey,
 			})
 		})
 
@@ -91,7 +131,8 @@ func (s *Server) registerRepoLifecycle() {
 		`{"type":"object","properties":{
 		  "reconcile":{"type":"boolean","default":true},
 		  "prune_missing":{"type":"boolean","default":false},
-		  "dry_run":{"type":"boolean","default":false}
+		  "dry_run":{"type":"boolean","default":false},
+		  "repair":{"type":"boolean","default":false,"description":"对半初始化仓库执行 repo_init(mode=repair)"}
 		},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			if s.Hub == nil {
@@ -101,6 +142,7 @@ func (s *Server) registerRepoLifecycle() {
 				Reconcile    *bool `json:"reconcile"`
 				PruneMissing bool  `json:"prune_missing"`
 				DryRun       bool  `json:"dry_run"`
+				Repair       bool  `json:"repair"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
@@ -113,6 +155,7 @@ func (s *Server) registerRepoLifecycle() {
 				Reconcile:    reconcile,
 				PruneMissing: a.PruneMissing,
 				DryRun:       a.DryRun,
+				Repair:       a.Repair,
 			})
 		})
 }

@@ -191,7 +191,7 @@ as_app() {
 say "初始化 legacy /srv/repo（迁移验收）"
 sudo install -d -o p36 -g p36 -m 0700 "$ROOTDIR/.p37"
 sudo install -d -o p36 -g p36 -m 0700 "$P37_TMP"
-as_app /usr/local/bin/p37 init "$LEGACY" --if-missing --config /usr/local/share/p37/config.toml
+as_app /usr/local/bin/p37 init "$LEGACY" --if-missing --allow-nonpersistent --config /usr/local/share/p37/config.toml
 
 say "创建多仓库验收 repo"
 as_app /usr/local/bin/p37 --root "$ROOTDIR" repo create "$REPO_NAME" --json | tee repo-create.json

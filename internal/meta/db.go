@@ -42,8 +42,43 @@ type DB struct {
 
 // Open 打开（或创建）仓库的元数据库。
 func Open(repoRoot string) (*DB, error) {
+	return OpenControl(filepath.Join(repoRoot, ".p37"))
+}
+
+// OpenControl 打开控制目录下的 p37.db。
+//
+// 原子初始化需要在 <repo>/.p37.tmp 里先建完整 DB，再把整个目录 rename 成
+// .p37；这条路径不能假设目录名一定是 .p37。
+func OpenControl(controlDir string) (*DB, error) {
+	return openPath(filepath.Join(controlDir, "p37.db"))
+}
+
+// OpenReadOnly 以只读方式打开仓库元数据库。
+//
+// 用于 repo_health / repo_register 的廉价完整性探测：不建表、不跑
+// EnsureSchema、不拿写锁。SQLite 的 WAL 库在只读模式下仍可能依赖 -shm；
+// 调用方需要把打开失败当作“无法探测”，而不是“仓库损坏”。
+func OpenReadOnly(repoRoot string) (*DB, error) {
 	path := filepath.Join(repoRoot, ".p37", "p37.db")
-	return openPath(path)
+	dsn := "file:" + path +
+		"?mode=ro" +
+		"&_pragma=busy_timeout(1000)" +
+		"&_pragma=query_only(1)"
+	sdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("meta: 只读打开 %s: %w", path, err)
+	}
+	// 只读探测不应把连接池放大；单连接也避免 WAL/SHM 的额外争用。
+	sdb.SetMaxOpenConns(1)
+	sdb.SetMaxIdleConns(1)
+	db := &DB{sql: sdb, path: path, wmu: make(chan struct{}, 1),
+		tombstoneTTL: DefaultTombstoneTTL}
+	db.wmu <- struct{}{}
+	if err := sdb.Ping(); err != nil {
+		_ = sdb.Close()
+		return nil, fmt.Errorf("meta: 只读 ping: %w", err)
+	}
+	return db, nil
 }
 
 func openPath(path string) (*DB, error) {

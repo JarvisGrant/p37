@@ -64,8 +64,9 @@ VM，guest 内格式化为 ext4 并挂到 `/srv/repos/<app>`。卷内就是 p37 
 attach:
   宿主把 qcow2 作为 virtio-blk 热加给运行中的 VM
   guest mount /dev/vdX /srv/repos/app-a
-  p37 --root /srv/repos repo register app-a /srv/repos/app-a [--init-if-missing]
-  # 或：p37 --root /srv/repos repo scan
+  p37 init /srv/repos/app-a --if-missing   # 旧 P36 入口；内部原子初始化/修复
+  # 或（新 P36）：MCP repo_init(mode=empty) 后再 repo_register
+  # 或：p37 --root /srv/repos repo init app-a /srv/repos/app-a
 
 detach:
   p37 --root /srv/repos repo unregister app-a
@@ -81,12 +82,19 @@ detach:
 per-repo flock，再写 registry tombstone；`.p37`、workspaces 和 repo 数据全部
 保留。卷重新挂载后执行 `repo_register` 即可恢复，id/name 不变。
 
-`repo_register` 不会创建目录，也不会移动/复制数据。它要求 path 已存在且位于
-`/srv/repos` 下。path 下没有 `.p37/p37.db` 时：
+0.4.3 起 `repo_register` **只注册完整仓库**，不再创建半初始化 DB。path 下没有
+`.p37/p37.db` 或 DB 缺 head/line/refs 时：
 
-- 默认返回 `repo_not_initialized`；
-- `--init-if-missing` 使用 `/srv/repos/.p37/config.toml` 模板初始化，并写
-  `.p37/repo.json`。
+- 默认返回 `repo_not_initialized`/`repo_db_corrupt`，`detail.next_action` 指向
+  `repo_init`/`repo_init_repair`；
+- `--init-if-missing` 仍保留（deprecated），内部等价于
+  `repo_init(mode=empty)`；完整失败会回滚；
+- 新代码建议先 `repo_init` 或 `p37 init --if-missing`，成功后再 register。
+
+**初始化失败时 P36 必须保持卷挂载、不删 `.p37`**，返回 409 +
+`mounted=true` + `initialized=false` + `next_action`；用户可重试 repair。只有
+卷本身无法挂载/损坏才 umount。P36 `/ready` 用
+`repo_health {path, with_quota:false}` 消费 `initialized`。
 
 `.p37/repo.json` 是仓库身份锚（`id` / `name` / `default_line`）：
 

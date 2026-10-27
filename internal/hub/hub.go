@@ -102,6 +102,14 @@ type Hub struct {
 	// mountProbe 可注入，单测不需要真实挂载点。默认使用 mountmgr.IsMountPoint。
 	mountProbe func(string) bool
 
+	// allowNonPersistent 允许开发机/CI 在没有真实挂载点时初始化。
+	// 生产环境默认 false；可通过 P37_ALLOW_NONPERSISTENT=1 或测试注入放宽。
+	allowNonPersistent bool
+
+	// healthCache 是 repo_health 的短 TTL 缓存（key=path）。
+	healthMu    sync.Mutex
+	healthCache map[string]healthCacheEntry
+
 	// recoverWarnings 记录 registry 重建时的多候选选择，供启动日志展示。
 	recoverWarnings []string
 }
@@ -146,10 +154,15 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)
 	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{},
-		mountProbe: mountmgr.IsMountPoint}
+		mountProbe:         mountmgr.IsMountPoint,
+		allowNonPersistent: os.Getenv("P37_ALLOW_NONPERSISTENT") == "1",
+		healthCache:        map[string]healthCacheEntry{}}
 	h.recoverRegistry()
 	return h, nil
 }
+
+// SetAllowNonPersistent 放宽持久挂载点检查（测试/开发机用）。
+func (h *Hub) SetAllowNonPersistent(v bool) { h.allowNonPersistent = v }
 
 // SetMountPointProbe 注入挂载点判断（测试用）。nil 恢复默认实现。
 func (h *Hub) SetMountPointProbe(fn func(string) bool) {
@@ -523,20 +536,6 @@ func (h *Hub) UpdateRemote(ref, remoteKey, remotePrefix string) error {
 
 // CleanName 供 CLI 诊断。
 func CleanName(s string) string { return strings.TrimSpace(s) }
-
-type repoMeta struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	DefaultLine string `json:"default_line"`
-}
-
-func writeRepoMeta(path string, m repoMeta) error {
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(path, ".p37", "repo.json"), b, 0o600)
-}
 
 // recoverRegistry 在 registry 丢失时从各 repo 的 .p37/repo.json 重建。
 //

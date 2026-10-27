@@ -36,8 +36,11 @@ const usage = `p37 —— AI 原生版本控制系统
   p37 --root <root> --repo <id|name> <命令> [参数]       对指定 repo 执行
 
 初始化与运维：
-  init <root> [--if-missing] [--config <file>]
-                                  创建空仓库；--if-missing 幂等；--config 首次模板
+  init <root> [--if-missing] [--mode empty|import|repair] [--default-line main]
+              [--name <name>] [--config <file>] [--allow-nonpersistent]
+                                  原子初始化/修复仓库；--if-missing 校验+修复
+  init <root> --strict | --no-repair
+                                  只校验 / 诊断，不修复
   import <root> <srcdir>          把目录树作为 v0 导入
   status <root>                   打印仓库摘要
   doctor <root>                   运行部署自检（附录 G.4）
@@ -76,12 +79,13 @@ const usage = `p37 —— AI 原生版本控制系统
 
 多仓库维护：
   p37 --root /srv/repos repo list [--json]
+  p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair] [--json]
   p37 --root /srv/repos repo create <name> [--default-line main] [--json]
   p37 --root /srv/repos repo info <id|name> [--json]
   p37 --root /srv/repos repo delete <id|name> [--force]
   p37 --root /srv/repos repo register <name> <path> [--init-if-missing] [--default-line main] [--rebind] [--json]
   p37 --root /srv/repos repo unregister <id|name> [--force] [--json]
-  p37 --root /srv/repos repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--json]
+  p37 --root /srv/repos repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--repair] [--json]
 
 其它：
   version
@@ -277,15 +281,23 @@ func fail(errw io.Writer, err error) int {
 //
 // flag 可以出现在 root 前后，方便引导脚本按需拼装。
 func cmdInit(args []string, out, errw io.Writer) int {
-	ifMissing := false
-	template := ""
-	root := ""
-
+	var (
+		ifMissing, strict, noRepair, allowNonPersistent, jsonOut, modeSet, nameSet bool
+		template, root, name, defLine, mode                                        string
+	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--if-missing":
 			ifMissing = true
+		case a == "--strict":
+			strict = true
+		case a == "--no-repair":
+			noRepair = true
+		case a == "--allow-nonpersistent":
+			allowNonPersistent = true
+		case a == "--json":
+			jsonOut = true
 		case a == "--config":
 			if i+1 >= len(args) {
 				fmt.Fprintln(errw, "--config 需要 <file>")
@@ -295,6 +307,37 @@ func cmdInit(args []string, out, errw io.Writer) int {
 			i++
 		case strings.HasPrefix(a, "--config="):
 			template = strings.TrimPrefix(a, "--config=")
+		case a == "--name":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errw, "--name 需要 <name>")
+				return 2
+			}
+			name = args[i+1]
+			nameSet = true
+			i++
+		case strings.HasPrefix(a, "--name="):
+			name = strings.TrimPrefix(a, "--name=")
+			nameSet = true
+		case a == "--default-line":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errw, "--default-line 需要 <name>")
+				return 2
+			}
+			defLine = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--default-line="):
+			defLine = strings.TrimPrefix(a, "--default-line=")
+		case a == "--mode":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errw, "--mode 需要 empty|import|repair")
+				return 2
+			}
+			mode = args[i+1]
+			modeSet = true
+			i++
+		case strings.HasPrefix(a, "--mode="):
+			mode = strings.TrimPrefix(a, "--mode=")
+			modeSet = true
 		case a == "-h" || a == "--help":
 			fmt.Fprint(out, usage)
 			return 0
@@ -313,28 +356,89 @@ func cmdInit(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "init 需要 <root>")
 		return 2
 	}
+	root = filepath.Clean(root)
+	if name == "" {
+		name = filepath.Base(root)
+	}
+	if !nameSet {
+		// 已有 repo.json 时以身份锚为准，避免目录 basename 与 repo 名不同
+		// 时把 --if-missing 变成 repo_name_mismatch。
+		if m, merr := repo.ReadMeta(root); merr == nil && m != nil && m.Name != "" {
+			name = m.Name
+		} else {
+			name = repo.SanitizeName(name)
+		}
+	}
+	if defLine == "" {
+		defLine = "main"
+	}
+	if mode == "" {
+		mode = string(repo.InitEmpty)
+	}
+	if os.Getenv("P37_ALLOW_NONPERSISTENT") == "1" {
+		allowNonPersistent = true
+	}
+	if strict && noRepair {
+		fmt.Fprintln(errw, "--strict 与 --no-repair 只能二选一")
+		return 2
+	}
+	if mode != string(repo.InitEmpty) && mode != string(repo.InitImport) && mode != string(repo.InitRepair) {
+		fmt.Fprintf(errw, "--mode 必须是 empty|import|repair\n")
+		return 2
+	}
 
-	dbPath := filepath.Join(root, ".p37", "p37.db")
-	cfgPath := config.Path(root)
+	// --strict / --no-repair 是诊断路径：只读，不路由到 daemon（避免触发 repair）。
+	if strict || noRepair {
+		in, err := repo.CheckIntegrity(root)
+		if err != nil {
+			return fail(errw, err)
+		}
+		if jsonOut {
+			if code := writeJSON(out, errw, in); code != 0 {
+				return code
+			}
+		} else {
+			printIntegrity(out, in)
+		}
+		if in.Initialized {
+			return 0
+		}
+		if noRepair {
+			return fail(errw, fmt.Errorf("repo_not_initialized: %s（reason=%s next_action=%s）",
+				root, in.Reason, in.NextAction))
+		}
+		return fail(errw, fmt.Errorf("repo_not_initialized: %s（reason=%s next_action=%s）",
+			root, in.Reason, in.NextAction))
+	}
 
-	// 幂等模式：仓库已存在就原样返回，连模板都不读，避免覆盖现有配置。
-	if _, err := os.Stat(dbPath); err == nil {
+	// 已有完整仓库：保持旧语义（无 --if-missing 报 already initialized）。
+	if in, _ := repo.CheckIntegrity(root); in != nil && in.Initialized {
+		if jsonOut {
+			printJSONIntegrity(out, errw, in)
+		} else {
+			fmt.Fprintf(out, "仓库已完整初始化，跳过初始化: %s\n  mainline_head %s\n  version_count %d\n",
+				root, short(in.MainlineHead), in.VersionCount)
+		}
 		if ifMissing {
-			fmt.Fprintf(out, "仓库已存在，跳过初始化: %s\n", root)
 			return 0
 		}
 		return fail(errw, fmt.Errorf("%w: %s", repo.ErrAlreadyInitialized, root))
 	}
-
-	// 只有 config 没有 db 的半初始化仓库：拒绝覆盖，避免把用户配置冲掉。
-	if ifMissing {
-		if _, err := os.Stat(cfgPath); err == nil {
-			return fail(errw, fmt.Errorf(
-				"仓库不完整：%s 存在但 %s 缺失；拒绝覆盖现有配置", cfgPath, dbPath))
-		}
+	// 半初始化且显式 --no-repair 已在上面拦住；没有 --if-missing 时保持旧语义：
+	// 只要 p37.db 存在就报 already initialized，避免误改用户仓库。
+	if !ifMissing && !modeSet && fileExists(filepath.Join(root, ".p37", "p37.db")) {
+		return fail(errw, fmt.Errorf("%w: %s", repo.ErrAlreadyInitialized, root))
 	}
 
+	// 允许旧 P36 镜像在“已有半成品”时自动修复；新代码统一走 repo.Ensure。
 	cfg := config.Default()
+	if cfgPath := config.Path(root); template == "" {
+		if _, err := os.Stat(cfgPath); err == nil {
+			if loaded, lerr := config.Load(root); lerr == nil {
+				cfg = loaded
+			}
+		}
+	}
 	if template != "" {
 		loaded, err := config.LoadTemplate(template)
 		if err != nil {
@@ -347,9 +451,6 @@ func cmdInit(args []string, out, errw io.Writer) int {
 			"配置模板 format_ver=%d，本程序支持 %d", cfg.Repo.FormatVer, formatVer))
 	}
 	cfg.Repo.FormatVer = formatVer
-
-	// 模板没写 socket 时补默认值；相对路径统一相对仓库根，避免 daemon 的
-	// cwd 不同导致监听位置漂移。
 	switch {
 	case cfg.Daemon.Socket == "":
 		cfg.Daemon.Socket = filepath.Join(root, ".p37", "p37d.sock")
@@ -357,22 +458,66 @@ func cmdInit(args []string, out, errw io.Writer) int {
 		cfg.Daemon.Socket = filepath.Join(root, cfg.Daemon.Socket)
 	}
 
-	r, err := repo.Init(root, repo.Options{Materialize: cfg.MountMode()})
-	if err != nil {
-		return fail(errw, err)
+	// 如果上层 root 有 p37d，路由到 daemon，避免 CLI 与 daemon 抢 .p37/lock。
+	if res, routed, rerr := routeInit(root, name, defLine, mode); routed {
+		if rerr != nil {
+			return repoFail(errw, rerr)
+		}
+		if jsonOut {
+			return writeJSON(out, errw, res)
+		}
+		printInitResult(out, res)
+		return 0
 	}
-	defer func() { _ = r.Close() }()
 
-	if err := config.Save(root, cfg); err != nil {
-		return fail(errw, err)
-	}
-	st, err := r.Status()
+	res, err := repo.Ensure(root, repo.EnsureOptions{
+		Mode: repo.InitMode(mode), DefaultLine: defLine, Name: name,
+		IdempotencyKey: "cli-init-" + name,
+		RepoOptions:    cfg.RepoOptions(),
+		WriteConfig: func(controlDir string) error {
+			return config.SaveControl(controlDir, cfg)
+		},
+		MountProbe: mountmgr.IsMountPoint, EnforcePersistent: !allowNonPersistent,
+	})
 	if err != nil {
-		return fail(errw, err)
+		return repoFail(errw, err)
 	}
-	fmt.Fprintf(out, "已初始化仓库 %s\n  初始版本 %s\n  配置     %s\n",
-		root, short(st.MainlineHead.String()), config.Path(root))
+	if jsonOut {
+		if code := writeJSON(out, errw, res); code != 0 {
+			return code
+		}
+	} else {
+		printInitResult(out, res)
+	}
 	return 0
+}
+
+func printInitResult(out io.Writer, res *repo.EnsureResult) {
+	state := "已初始化"
+	switch {
+	case res.Repaired:
+		state = "已修复"
+	case res.Imported:
+		state = "已导入"
+	case res.Created:
+		state = "已初始化"
+	}
+	fmt.Fprintf(out, "%s仓库 %s\n  mainline_head %s\n  version_count %d\n  default_line  %s\n",
+		state, res.Repo.Path, short(res.Repo.MainlineHead), res.Repo.VersionCount, res.Repo.DefaultLine)
+}
+
+func printIntegrity(out io.Writer, in *repo.Integrity) {
+	status := "未初始化"
+	if in.Initialized {
+		status = "已初始化"
+	}
+	fmt.Fprintf(out, "仓库 %s\n  状态           %s\n  reason         %s\n  next_action    %s\n  mainline_head  %s\n  version_count  %d\n  default_line   %s (ready=%v)\n",
+		in.Path, status, in.Reason, in.NextAction, short(in.MainlineHead), in.VersionCount,
+		in.DefaultLine, in.DefaultLineReady)
+}
+
+func printJSONIntegrity(out, errw io.Writer, in *repo.Integrity) {
+	_ = writeJSON(out, errw, in)
 }
 
 func cmdImport(root, src string, out, errw io.Writer) int {
@@ -463,6 +608,23 @@ func cmdDoctor(root string, out, errw io.Writer) int {
 		report("workspaces/ 可写", false, err.Error())
 	} else {
 		report("workspaces/ 可写", true, wsDir)
+	}
+
+	// 1b. 初始化完整性（repo/head/line/refs/对象树）。
+	if in, ierr := repo.CheckIntegrityDeep(root); ierr != nil {
+		report("仓库初始化", false, ierr.Error())
+	} else {
+		detail := fmt.Sprintf("mainline_head=%s version_count=%d default_line=%s",
+			short(in.MainlineHead), in.VersionCount, in.DefaultLine)
+		if !in.Initialized {
+			detail += fmt.Sprintf(" reason=%s next_action=%s", in.Reason, in.NextAction)
+		}
+		report("仓库初始化", in.Initialized, detail)
+		if in.Initialized {
+			report("line/refs 一致性", in.DefaultLineReady && in.RefsOK,
+				fmt.Sprintf("default_line_ready=%v refs_ok=%v refs_match=%v",
+					in.DefaultLineReady, in.RefsOK, in.RefsMatch))
+		}
 	}
 
 	// 2. 同一文件系统（OverlayFS 的 lower/upper/work 必须同 FS）。
@@ -1377,4 +1539,9 @@ func countTreeFiles(r *repo.Repo, root hash.ID) (int, error) {
 		n++
 	}
 	return n, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

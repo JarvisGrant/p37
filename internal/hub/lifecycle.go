@@ -2,7 +2,6 @@ package hub
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 
 	sqlite "modernc.org/sqlite"
 
-	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
 )
@@ -40,6 +38,18 @@ type ScanOptions struct {
 	Reconcile    bool
 	PruneMissing bool
 	DryRun       bool
+	// Repair 为真时对检测到的半初始化仓库执行 InitRepoAt(mode=repair)。
+	// 默认 false：daemon 启动 scan 必须保持非破坏性。
+	Repair bool
+}
+
+// ScanIssue 描述一个检测到但未修复的初始化问题。
+type ScanIssue struct {
+	ID         string `json:"id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Path       string `json:"path"`
+	Reason     string `json:"reason"`
+	NextAction string `json:"next_action"`
 }
 
 // ScanSkip 描述 scan 跳过的候选目录。
@@ -52,38 +62,52 @@ type ScanSkip struct {
 
 // ScanResult 是 repo_scan 的返回。
 type ScanResult struct {
-	Added      []Entry    `json:"added"`
-	Removed    []Entry    `json:"removed"`
-	Degraded   []Entry    `json:"degraded"`
-	Skipped    []ScanSkip `json:"skipped"`
-	Reconciled bool       `json:"reconciled"`
-	DryRun     bool       `json:"dry_run"`
+	Added         []Entry     `json:"added"`
+	Removed       []Entry     `json:"removed"`
+	Degraded      []Entry     `json:"degraded"`
+	Skipped       []ScanSkip  `json:"skipped"`
+	Uninitialized []ScanIssue `json:"uninitialized"`
+	Repaired      []string    `json:"repaired"`
+	Reconciled    bool        `json:"reconciled"`
+	DryRun        bool        `json:"dry_run"`
 }
 
 const registryCols = `id,name,path,remote_key,remote_prefix,default_line,created_ts,deleted_ts,degraded,degraded_msg`
 
 // RegisterPath 把一个已存在的目录注册为 repo（不移动、不复制数据）。
+//
+// 0.4.3 起只注册“完整仓库”：已有 p37.db 但缺 head/line/refs 时返回
+// repo_not_initialized，detail 带 next_action=repo_init_repair，不再静默注册
+// 一个半成品。init_if_missing=true 仍保留，内部走统一 InitRepo。
 func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, error) {
 	if !nameRE.MatchString(name) {
 		return nil, fmt.Errorf("%w: %q（只允许小写字母数字 . _ -，1-64 字符）", ErrInvalidName, name)
-	}
-	defLine := opt.DefaultLine
-	if defLine == "" {
-		defLine = "main"
 	}
 	abs, err := h.validateRepoPath(path, true)
 	if err != nil {
 		return nil, err
 	}
-
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.registerPathLocked(name, abs, opt)
+}
 
+func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry, error) {
+	defLine := opt.DefaultLine
+	if defLine == "" {
+		defLine = "main"
+	}
 	metaInfo, metaErr := readRepoMeta(abs)
+	hasMeta := metaErr == nil
 	if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: 读取 .p37/repo.json 失败: %v", ErrInvalidPath, metaErr)
 	}
-	hasMeta := metaErr == nil
+	// v1 -> v2：老仓库可能因为缺列被只读探测判成未初始化。保留 0.4.2 的
+	// 升级行为：注册时自动走 repair/migrate，而不是要求先手工 p37 migrate。
+	if in, _ := repo.CheckIntegrity(abs); in != nil &&
+		in.FormatVer > 0 && in.FormatVer < meta.FormatVer {
+		opt.InitIfMissing = true
+	}
 
 	effectiveID := ""
 	effectiveName := name
@@ -103,37 +127,55 @@ func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, erro
 		}
 	}
 
-	// 已注册：同 name 或同 path 幂等返回已有 Entry。
+	// 同名已存在。
 	if e, _ := h.entryByFieldLocked("name", name, false); e != nil {
 		if filepath.Clean(e.Path) == filepath.Clean(abs) {
-			if err := h.ensureRepoMeta(e.Path, e, hasMeta); err != nil {
+			in, _ := repo.CheckIntegrity(abs)
+			if in != nil && in.Initialized {
+				if err := h.ensureRepoMeta(abs, e, hasMeta); err != nil {
+					return nil, err
+				}
+				h.enrichEntry(e)
+				return e, nil
+			}
+			if in != nil && in.DataOK && !in.RootOK {
+				// 卷迁移/重挂后 DB 里的 root 还是旧路径：数据完整，自愈即可。
+				_ = updateRepoRootFile(abs)
+				if err := h.ensureRepoMeta(abs, e, hasMeta); err != nil {
+					return nil, err
+				}
+				h.enrichEntry(e)
+				return e, nil
+			}
+			if !opt.InitIfMissing {
+				return nil, integrityError(abs, in)
+			}
+			res, err := h.initRepoLocked(name, abs, InitOptions{
+				Mode: repo.InitEmpty, DefaultLine: effectiveDefault,
+				Force: opt.ForceRename, AllowNonPersistent: h.allowNonPersistent,
+			})
+			if err != nil {
 				return nil, err
 			}
-			h.enrichEntry(e)
-			return e, nil
+			_ = res
+			return h.getEnrichedLocked(name)
 		}
-		// 同名不同路径：绝不能静默复用旧 Entry。旧版本会把新挂载的卷忽略，
-		// 继续把数据写到即将被销毁的 L2 路径。
+		// 同名不同路径：必须显式 rebind，绝不静默复用旧路径。
 		if !opt.Rebind {
 			return nil, &PathMismatchError{Name: name, ExistingID: e.ID,
 				ExistingPath: e.Path, RequestedPath: abs,
 				Reason: "use_rebind_or_unregister_then_register"}
-		}
-		if h.repos[e.ID] != nil || h.repos[e.Name] != nil {
-			return nil, fmt.Errorf("%w: repo %s 正在运行，先 unregister 或重启 daemon 再 rebind",
-				ErrRepoBusy, e.Name)
-		}
-		hasDB := fileExists(filepath.Join(abs, ".p37", "p37.db"))
-		if !hasMeta && !hasDB {
-			return nil, fmt.Errorf("%w: rebind 目标 %s 缺少 .p37/repo.json 与 p37.db（P37 不搬数据）",
-				ErrRepoNotInitialized, abs)
 		}
 		if hasMeta && metaInfo.ID != "" && e.ID != "" && metaInfo.ID != e.ID {
 			return nil, &PathMismatchError{Name: name, ExistingID: e.ID,
 				ExistingPath: e.Path, RequestedPath: abs,
 				Reason: "target_repo_id_mismatch"}
 		}
-		if err := h.rebindPathLocked(e, abs); err != nil {
+		in, _ := repo.CheckIntegrity(abs)
+		if in == nil || (!in.Initialized && !in.DataOK) {
+			return nil, integrityError(abs, in)
+		}
+		if err := h.rebindTargetLocked(e, abs); err != nil {
 			return nil, err
 		}
 		e.Path = abs
@@ -143,132 +185,110 @@ func (h *Hub) RegisterPath(name, path string, opt RegisterOptions) (*Entry, erro
 		if err := h.ensureRepoMeta(abs, e, hasMeta); err != nil {
 			return nil, err
 		}
-		// 目标 repo 的 DB 自愈 repo.root。
 		_ = updateRepoRootFile(abs)
 		h.enrichEntry(e)
 		return e, nil
 	}
+
+	// 同 path 已有其它 name。
 	if e, _ := h.entryByFieldLocked("path", abs, false); e != nil {
-		if e.Name == name || !opt.ForceRename {
-			if err := h.ensureRepoMeta(e.Path, e, hasMeta); err != nil {
+		if e.Name != name && !opt.ForceRename {
+			return nil, fmt.Errorf("%w: path=%s 已注册为 %q，调用方 name=%q（显式 force_rename 才能改名）",
+				ErrRepoNameMismatch, abs, e.Name, name)
+		}
+		in, _ := repo.CheckIntegrity(abs)
+		if in != nil && in.DataOK && !in.RootOK {
+			_ = updateRepoRootFile(abs)
+			in.Initialized = true
+		}
+		if in == nil || !in.Initialized {
+			if !opt.InitIfMissing {
+				return nil, integrityError(abs, in)
+			}
+			if _, err := h.initRepoLocked(e.Name, abs, InitOptions{
+				Mode: repo.InitEmpty, DefaultLine: effectiveDefault,
+				Force: opt.ForceRename, AllowNonPersistent: h.allowNonPersistent,
+			}); err != nil {
 				return nil, err
 			}
-			h.enrichEntry(e)
-			return e, nil
+			return h.getEnrichedLocked(e.Name)
 		}
-		// force_rename：继续走更新路径，tx 里改 name。
 		effectiveID = e.ID
-	}
-	if effectiveID != "" {
-		if e, _ := h.entryByIDLocked(effectiveID, false); e != nil {
-			if filepath.Clean(e.Path) != filepath.Clean(abs) {
-				return nil, fmt.Errorf("%w: id=%s 已注册到 %s", ErrRepoPathExists, effectiveID, e.Path)
-			}
-			if e.Name == name || !opt.ForceRename {
-				h.enrichEntry(e)
-				return e, nil
-			}
+		effectiveName = e.Name
+		if opt.ForceRename {
+			effectiveName = name
 		}
 	}
 
-	dbPath := filepath.Join(abs, ".p37", "p37.db")
-	hasDB := fileExists(dbPath)
-	if !hasDB {
+	in, _ := repo.CheckIntegrity(abs)
+	if in != nil && in.DataOK && !in.RootOK {
+		_ = updateRepoRootFile(abs)
+		in.Initialized = true
+	}
+	if in == nil || !in.Initialized {
 		if !opt.InitIfMissing {
-			return nil, fmt.Errorf("%w: %s（init_if_missing=true 才能初始化）", ErrRepoNotInitialized, abs)
+			return nil, integrityError(abs, in)
 		}
-		if effectiveID == "" {
-			// 有 tombstone 时复用原 id，避免重启后出现两条身份。
-			if e, _ := h.entryByFieldLocked("path", abs, true); e != nil {
-				effectiveID = e.ID
-			} else {
-				id, err := NewID()
-				if err != nil {
-					return nil, err
-				}
-				effectiveID = id
-			}
-		}
-		createdP37 := !fileExists(filepath.Join(abs, ".p37"))
-		if err := h.initRepoAt(abs, effectiveID, effectiveName, effectiveDefault); err != nil {
-			if createdP37 {
-				_ = os.RemoveAll(filepath.Join(abs, ".p37"))
-			}
+		res, err := h.initRepoLocked(name, abs, InitOptions{
+			Mode: repo.InitEmpty, DefaultLine: effectiveDefault,
+			Force: opt.ForceRename, AllowNonPersistent: h.allowNonPersistent,
+		})
+		if err != nil {
 			return nil, err
 		}
-		hasMeta = true
-	} else {
-		if effectiveID == "" {
-			if e, _ := h.entryByFieldLocked("path", abs, true); e != nil {
-				effectiveID = e.ID
-			} else {
-				id, err := NewID()
-				if err != nil {
-					return nil, err
-				}
-				effectiveID = id
-			}
-		}
-		if !hasMeta || opt.ForceRename {
-			if err := writeRepoMeta(abs, repoMeta{ID: effectiveID, Name: effectiveName, DefaultLine: effectiveDefault}); err != nil {
+		_ = res
+		return h.getEnrichedLocked(effectiveName)
+	}
+
+	if effectiveID == "" {
+		if e, _ := h.entryByFieldLocked("path", abs, true); e != nil {
+			effectiveID = e.ID
+		} else if e, _ := h.entryByFieldLocked("name", effectiveName, true); e != nil {
+			effectiveID = e.ID
+		} else {
+			id, err := NewID()
+			if err != nil {
 				return nil, err
 			}
+			effectiveID = id
 		}
 	}
-
-	now := time.Now().UnixMilli()
-	var active *Entry
-	err = h.registryTx(func(tx *sql.Tx) error {
-		if e, qerr := queryEntry(tx,
-			`SELECT `+registryCols+` FROM repo WHERE deleted_ts=0 AND (id=? OR name=? OR path=?) ORDER BY id LIMIT 1`,
-			effectiveID, effectiveName, abs); qerr == nil {
-			// 同 id/name/path 都按幂等处理；同 path 的 force_rename 继续更新。
-			sameName := e.Name == effectiveName
-			sameID := e.ID == effectiveID
-			samePath := e.Path == abs
-			if sameName || (!opt.ForceRename && (sameID || samePath)) {
-				active = e
-				return nil
-			}
-			if !samePath {
-				return fmt.Errorf("%w: %s", ErrRepoPathExists, e.Path)
-			}
-		} else if !errors.Is(qerr, sql.ErrNoRows) {
-			return qerr
+	if !hasMeta || opt.ForceRename {
+		if err := writeRepoMeta(abs, repoMeta{ID: effectiveID, Name: effectiveName, DefaultLine: effectiveDefault}); err != nil {
+			return nil, err
 		}
-
-		// 清掉会挡 UNIQUE(name)/UNIQUE(path) 的其它 tombstone。
-		if _, err := tx.Exec(`DELETE FROM repo WHERE deleted_ts<>0 AND (name=? OR path=?) AND id<>?`,
-			effectiveName, abs, effectiveID); err != nil {
-			return wrapRegistryErr(err)
-		}
-		res, err := tx.Exec(
-			`UPDATE repo SET name=?, path=?, default_line=?, deleted_ts=0, degraded=0, degraded_msg=''
-			   WHERE id=?`, effectiveName, abs, effectiveDefault, effectiveID)
-		if err != nil {
-			return wrapRegistryErr(err)
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			return nil
-		}
-		_, err = tx.Exec(
-			`INSERT INTO repo(id,name,path,default_line,created_ts) VALUES(?,?,?,?,?)`,
-			effectiveID, effectiveName, abs, effectiveDefault, now)
-		return wrapRegistryErr(err)
-	})
-	if err != nil {
+	}
+	if err := h.upsertEntryLocked(effectiveID, effectiveName, abs, effectiveDefault); err != nil {
 		return nil, err
 	}
-	if active != nil {
-		h.enrichEntry(active)
-		return active, nil
+	h.invalidateHealth(abs)
+	return h.getEnrichedLocked(effectiveID)
+}
+
+// integrityError 把只读探测结果映射成结构化错误。
+func integrityError(path string, in *repo.Integrity) error {
+	code := "repo_not_initialized"
+	reason := "repo_db_missing_or_corrupt"
+	next := "repo_init"
+	backup := ""
+	if in != nil {
+		if in.NextAction != "" {
+			next = in.NextAction
+		}
+		if in.Reason != "" {
+			reason = in.Reason
+		}
+		dbExists := fileExists(filepath.Join(path, ".p37", "p37.db"))
+		if (dbExists && !in.RepoDBOK) || in.Reason == "repo_db_unreadable" ||
+			in.Reason == "multiple_root_versions" || in.Reason == "no_unique_head" ||
+			in.Reason == "head_tree_missing" || in.Reason == "format_mismatch" ||
+			in.Reason == "control_dir_without_db" {
+			code = "repo_db_corrupt"
+		}
+		backup = in.BackupPath
 	}
-	e2, err := h.lookupLocked(effectiveID)
-	if err != nil {
-		return nil, err
-	}
-	h.enrichEntry(e2)
-	return e2, nil
+	return &IntegrityError{Code: code, Path: path, Reason: reason,
+		NextAction: next, BackupPath: backup, Retryable: false}
 }
 
 // rebindPathLocked 只更新 registry 指针，不移动任何数据。
@@ -413,7 +433,8 @@ func (h *Hub) Scan(opt ScanOptions) (*ScanResult, error) {
 	}
 
 	res := &ScanResult{Added: []Entry{}, Removed: []Entry{}, Degraded: []Entry{},
-		Skipped: []ScanSkip{}, Reconciled: opt.Reconcile && !opt.DryRun, DryRun: opt.DryRun}
+		Skipped: []ScanSkip{}, Uninitialized: []ScanIssue{}, Repaired: []string{},
+		Reconciled: opt.Reconcile && !opt.DryRun, DryRun: opt.DryRun}
 	plannedID := map[string]bool{}
 	plannedName := map[string]bool{}
 
@@ -462,6 +483,20 @@ func (h *Hub) Scan(opt ScanOptions) (*ScanResult, error) {
 				Path: path, Reason: reason})
 			continue
 		}
+		if in, _ := repo.CheckIntegrity(path); in == nil || (!in.Initialized && !in.DataOK) {
+			issue := ScanIssue{ID: mi.ID, Name: mi.Name, Path: path,
+				Reason: "repo_not_initialized", NextAction: "repo_init_repair"}
+			if in != nil {
+				if in.Reason != "" {
+					issue.Reason = in.Reason
+				}
+				if in.NextAction != "" {
+					issue.NextAction = in.NextAction
+				}
+			}
+			res.Uninitialized = append(res.Uninitialized, issue)
+			continue
+		}
 		if plannedID[mi.ID] || plannedName[mi.Name] {
 			res.Skipped = append(res.Skipped, ScanSkip{ID: mi.ID, Name: mi.Name,
 				Path: path, Reason: "duplicate_repo_json"})
@@ -497,6 +532,31 @@ func (h *Hub) Scan(opt ScanOptions) (*ScanResult, error) {
 			de.DegradedMsg = "缺少 .p37/repo.json"
 			de.Available = true
 			res.Degraded = append(res.Degraded, de)
+		}
+		if in, _ := repo.CheckIntegrity(e.Path); in != nil && !in.Initialized {
+			res.Uninitialized = append(res.Uninitialized, ScanIssue{
+				ID: e.ID, Name: e.Name, Path: e.Path,
+				Reason: in.Reason, NextAction: in.NextAction,
+			})
+		}
+	}
+
+	if opt.Repair && !opt.DryRun {
+		for _, is := range res.Uninitialized {
+			name := is.Name
+			if name == "" {
+				name = filepath.Base(is.Path)
+			}
+			if _, err := h.initRepoLocked(name, is.Path, InitOptions{
+				Mode: repo.InitRepair, AllowNonPersistent: h.allowNonPersistent,
+			}); err != nil {
+				res.Skipped = append(res.Skipped, ScanSkip{
+					ID: is.ID, Name: name, Path: is.Path,
+					Reason: "repair_failed: " + err.Error(),
+				})
+				continue
+			}
+			res.Repaired = append(res.Repaired, is.Path)
 		}
 	}
 
@@ -626,36 +686,19 @@ func (h *Hub) validateRepoPath(path string, mustExist bool) (string, error) {
 }
 
 // initRepoAt 初始化目录并写入 repo.json。调用方必须持有 h.mu。
+//
+// 这是 repo_create 的 L2 scratch 路径：明确不要求挂载点（mounted=false），
+// 但仍然走统一的原子初始化，避免留下半套 .p37。
 func (h *Hub) initRepoAt(path, id, name, defaultLine string) error {
 	if defaultLine == "" {
 		defaultLine = "main"
 	}
-	if err := os.MkdirAll(path, 0o750); err != nil {
-		return err
-	}
-	opt := h.cfg.RepoOptions()
-	opt.RemountWorkspaces = false
-	r, err := repo.Init(path, opt)
-	if err != nil {
-		return err
-	}
-	if defaultLine != "main" {
-		head, _, _ := r.Head()
-		if _, err := r.CreateLine(defaultLine, head.String(), true); err == nil {
-			_ = r.DB.SetDefaultLine(defaultLine)
-			_ = r.DB.DeleteLine("main", time.Now().UnixMilli())
-		}
-	}
-	if err := r.Close(); err != nil {
-		return err
-	}
-	_ = os.Chmod(path, 0o750)
-	_ = os.Chmod(filepath.Join(path, ".p37"), 0o700)
-	// 把根配置作为该 repo 的默认配置落盘，后续 repo.Open 才能保持一致。
-	if err := config.Save(path, h.cfg); err != nil {
-		return err
-	}
-	return writeRepoMeta(path, repoMeta{ID: id, Name: name, DefaultLine: defaultLine})
+	_, err := repo.Ensure(path, repo.EnsureOptions{
+		Mode: repo.InitEmpty, DefaultLine: defaultLine, Name: name, RepoID: id,
+		RepoOptions: h.cfg.RepoOptions(), WriteConfig: h.writeConfig,
+		MountProbe: h.isMountPoint, EnforcePersistent: false,
+	})
+	return err
 }
 
 func workspaceActive(state string) bool {
@@ -753,25 +796,12 @@ func wrapRegistryErr(err error) error {
 	return err
 }
 
-func readRepoMeta(path string) (*repoMeta, error) {
-	b, err := os.ReadFile(filepath.Join(path, ".p37", "repo.json"))
-	if err != nil {
-		return nil, err
-	}
-	var m repoMeta
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
-	}
-	if m.ID == "" || m.Name == "" {
-		return nil, errors.New("repo.json 缺少 id/name")
-	}
-	if !nameRE.MatchString(m.Name) {
-		return nil, fmt.Errorf("repo.json name 非法: %q", m.Name)
-	}
-	if m.DefaultLine == "" {
-		m.DefaultLine = "main"
-	}
-	return &m, nil
+type repoMeta = repo.Meta
+
+func readRepoMeta(path string) (*repoMeta, error) { return repo.ReadMeta(path) }
+
+func writeRepoMeta(path string, m repoMeta) error {
+	return repo.WriteMeta(filepath.Join(path, ".p37"), m)
 }
 
 func fileExists(path string) bool {

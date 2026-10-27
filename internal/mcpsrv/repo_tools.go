@@ -41,14 +41,15 @@ func (s *Server) registerRepoLineRead() {
 			return es, nil
 		})
 
-	s.register("repo_create", "创建一个新仓库（含空 v0 与默认 line）。",
-		`{"type":"object","properties":{"name":{"type":"string"},"default_line":{"type":"string"},"remote_key":{"type":"string"},"remote_prefix":{"type":"string"},"remote":{"type":"object"},"idempotency_key":{"type":"string"}},"required":["name"],"additionalProperties":false}`,
+	s.register("repo_create", "创建一个新仓库（含空 v0 与默认 line）。传 path 时等价于 repo_init(mode=empty)；不传 path 是 L2 scratch，不能用于应用卷。",
+		`{"type":"object","properties":{"name":{"type":"string"},"path":{"type":"string","description":"可选；应用卷必须传持久挂载路径"},"default_line":{"type":"string"},"remote_key":{"type":"string"},"remote_prefix":{"type":"string"},"remote":{"type":"object"},"idempotency_key":{"type":"string"}},"required":["name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			if s.Hub == nil {
 				return nil, coded("repo_exists", "单仓库模式不支持 repo_create")
 			}
 			var a struct {
 				Name           string          `json:"name"`
+				Path           string          `json:"path"`
 				DefaultLine    string          `json:"default_line"`
 				RemoteKey      string          `json:"remote_key"`
 				RemotePrefix   string          `json:"remote_prefix"`
@@ -58,7 +59,19 @@ func (s *Server) registerRepoLineRead() {
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
-			e, err := s.Hub.CreateEx(a.Name, a.DefaultLine, a.RemoteKey, a.RemotePrefix)
+			var e *hub.Entry
+			var err error
+			if a.Path != "" {
+				if _, err = s.Hub.InitRepo(a.Name, a.Path, hub.InitOptions{
+					Mode: repo.InitEmpty, DefaultLine: a.DefaultLine,
+					IdempotencyKey: a.IdempotencyKey,
+				}); err != nil {
+					return nil, err
+				}
+				e, err = s.Hub.Get(a.Name)
+			} else {
+				e, err = s.Hub.CreateEx(a.Name, a.DefaultLine, a.RemoteKey, a.RemotePrefix)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -99,10 +112,40 @@ func (s *Server) registerRepoLineRead() {
 					out := entryInfo(e)
 					out["root"] = e.Path
 					out["status"] = "unavailable"
+					out["initialized"] = false
+					out["repo_db_ok"] = false
+					out["default_line_ready"] = false
+					out["next_action"] = "repo_init"
 					out["p37_version"] = Version
 					out["persistence"] = map[string]any{
 						"truth_source": "local_repo",
 						"local":        map[string]any{"root": e.Path, "available": false},
+						"durable":      false, "durable_scope": "local_only",
+					}
+					return out, nil
+				}
+				// 半初始化仓库不能走 repoFor（Open 会尝试自愈并可能写库）；
+				// 先用只读完整性探测，未初始化就返回 registry-only 视图。
+				if in, _ := s.Hub.Health(repoArg(raw), "", false); in != nil && !in.Initialized {
+					out := entryInfo(e)
+					out["root"] = e.Path
+					out["status"] = "uninitialized"
+					out["initialized"] = false
+					out["reason"] = in.Reason
+					out["next_action"] = in.NextAction
+					out["default_line"] = in.DefaultLine
+					out["default_line_ready"] = false
+					out["mainline_head"] = in.MainlineHead
+					out["version_count"] = in.VersionCount
+					out["repo_db_ok"] = in.RepoDBOK
+					out["repo_json_ok"] = in.RepoJSONOK
+					out["refs_ok"] = in.RefsOK
+					out["root_ok"] = in.RootOK
+					out["p37_version"] = Version
+					out["lines"] = []any{}
+					out["persistence"] = map[string]any{
+						"truth_source": "local_repo",
+						"local":        map[string]any{"root": e.Path, "available": true, "mount_point": e.Mounted},
 						"durable":      false, "durable_scope": "local_only",
 					}
 					return out, nil
@@ -116,6 +159,7 @@ func (s *Server) registerRepoLineRead() {
 			if err != nil {
 				return nil, err
 			}
+			in := repo.IntegrityOpen(rr)
 			rawLines, _ := rr.Lines()
 			lines := make([]meta.LineView, 0, len(rawLines))
 			for i := range rawLines {
@@ -142,6 +186,10 @@ func (s *Server) registerRepoLineRead() {
 				"root": st.Root, "default_line": def, "mainline_head": st.MainlineHead.String(),
 				"version_count": st.VersionCount, "epoch": st.Epoch,
 				"workspace_count": visible, "format_ver": st.FormatVer,
+				"initialized": in.Initialized, "default_line_ready": in.DefaultLineReady,
+				"repo_db_ok": in.RepoDBOK, "repo_json_ok": in.RepoJSONOK,
+				"root_ok": in.RootOK, "refs_ok": in.RefsOK,
+				"next_action": in.NextAction, "reason": in.Reason,
 				"p37_version": Version,
 				"lines":       lines,
 				"persistence": persistenceView(rr),
@@ -206,25 +254,57 @@ func (s *Server) registerRepoLineRead() {
 			return map[string]any{"repo": repoArg(raw), "root": rr.Root, "disk_bytes": bytes}, nil
 		})
 
-	s.register("repo_import", "把目录导入空仓库作为默认 line 的 v0。",
-		`{"type":"object","properties":{"repo":{"type":"string"},"dir":{"type":"string"},"task":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","dir"],"additionalProperties":false}`,
+	s.register("repo_import", "把目录导入空仓库作为 v0。未初始化的已注册仓库等价于 repo_init(mode=import)。",
+		`{"type":"object","properties":{"repo":{"type":"string"},"dir":{"type":"string"},"task":{"type":"string"},"force":{"type":"boolean","default":false},"idempotency_key":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
-			if err != nil {
-				return nil, err
-			}
 			var a struct {
-				Dir  string `json:"dir"`
-				Task string `json:"task"`
+				Dir   string `json:"dir"`
+				Task  string `json:"task"`
+				Force bool   `json:"force"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
-			id, err := rr.Import(a.Dir)
+			// 未初始化的已注册仓库：走统一 InitRepo(mode=import)。
+			if s.Hub != nil {
+				if e, gerr := s.Hub.Get(repoArg(raw)); gerr == nil {
+					if in, _ := s.Hub.Health(e.Name, "", false); in != nil && !in.Initialized {
+						dir := a.Dir
+						if dir == "" {
+							dir = e.Path
+						}
+						if filepath.Clean(dir) != filepath.Clean(e.Path) {
+							return nil, codedDetail("invalid_argument", map[string]any{
+								"path": e.Path, "next_action": "repo_init_import",
+								"retryable": false,
+							}, "未初始化仓库只能原地导入；dir 必须等于 %s", e.Path)
+						}
+						res, err := s.Hub.InitRepo(e.Name, e.Path, hub.InitOptions{
+							Mode: repo.InitImport, DefaultLine: e.DefaultLine,
+						})
+						if err != nil {
+							return nil, err
+						}
+						return map[string]any{
+							"version_id": res.Version.ID, "dir": e.Path,
+							"initialized": true, "imported": true,
+						}, nil
+					}
+				}
+			}
+			rr, err := s.repoFor(repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"version_id": id.String(), "dir": a.Dir}, nil
+			dir := a.Dir
+			if dir == "" {
+				dir = rr.Root
+			}
+			id, err := rr.ImportWithOptions(dir, repo.ImportOptions{Force: a.Force})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"version_id": id.String(), "dir": dir}, nil
 		})
 
 	s.register("repo_set_remote", "设置/更新仓库远端配置（凭证仍只从环境变量读）。",

@@ -22,6 +22,7 @@ func newHub(t *testing.T) (*hub.Hub, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.SetAllowNonPersistent(true)
 	t.Cleanup(func() { _ = h.Close() })
 	return h, root
 }
@@ -602,5 +603,56 @@ func TestRecoverRegistryPrefersMatchingBasename(t *testing.T) {
 	}
 	if len(h.RecoverWarnings()) == 0 {
 		t.Fatal("多候选应产生 RecoverWarnings")
+	}
+}
+
+func TestRebindBusyWithActiveWorkspace(t *testing.T) {
+	h, root := newHub(t)
+	oldPath := filepath.Join(root, "repo_old")
+	externalRepo(t, oldPath, mountmgr.ModeCopy)
+	if _, err := h.RegisterPath("app", oldPath, hub.RegisterOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := h.Open("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.WS.Open(workspace.OpenRequest{Parent: "mainline", TaskDesc: "busy"}); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(root, "app")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.RegisterPath("app", newPath, hub.RegisterOptions{Rebind: true})
+	if !errors.Is(err, hub.ErrRepoBusy) {
+		t.Fatalf("期望 repo_busy，实际: %v", err)
+	}
+	if got, _ := h.Get("app"); got == nil || filepath.Clean(got.Path) != filepath.Clean(oldPath) {
+		t.Fatalf("busy 时不应改 registry: %+v", got)
+	}
+}
+
+func TestInitRepoPersistentGate(t *testing.T) {
+	h, root := newHub(t)
+	h.SetAllowNonPersistent(false)
+	h.SetMountPointProbe(func(string) bool { return false })
+	if _, err := h.InitRepo("app", filepath.Join(root, "app"), hub.InitOptions{}); !errors.Is(err, hub.ErrInvalidPath) {
+		var pe *repo.PathError
+		if !errors.As(err, &pe) || pe.Reason != "not_persistent" {
+			t.Fatalf("期望 not_persistent，实际: %v", err)
+		}
+	}
+	h.SetMountPointProbe(func(string) bool { return true })
+	path := filepath.Join(root, "persist")
+	if err := os.MkdirAll(filepath.Join(path, "lost+found"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.InitRepo("persist", path, hub.InitOptions{Mode: repo.InitEmpty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Repo.VersionCount != 1 {
+		t.Fatalf("res=%+v", res)
 	}
 }

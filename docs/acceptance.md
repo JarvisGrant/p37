@@ -1,4 +1,4 @@
-# 验收清单（v0.4.2 / format_ver=2）
+# 验收清单（v0.4.3 / format_ver=2）
 
 ## 自动化
 
@@ -68,6 +68,37 @@ P37_BIN=./p37 bash packaging/p36/ci/ws-contract.sh
 
 脚本用 5 个独立进程并发 `ws-ensure`，断言只产生 1 个工作区、5 个响应
 `ws_id` 相同；再并发 ensure 不变；drop 后 tombstone 可查。
+
+## v0.4.3 仓库初始化验收
+
+```bash
+go test ./internal/repo -run 'TestEnsure|TestStrict|TestImportFailure' -count=1 -v
+go test ./internal/mcpsrv -run 'TestRepoInit|TestRepoHealthUninitialized|TestRepoRegisterEmpty|TestRepoRegisterInitIfMissing|TestRepoImportUninitialized|TestRepoScanRepair' -count=1 -v
+go test ./cmd/p37 -run 'TestInit|TestInitImportAndRepairFlags|TestInitAcceptsPrecreatedEmptyControlDir' -count=1 -v
+go test ./internal/hub -run 'TestRegisterPath|TestRebind|TestScan' -count=1 -v
+```
+
+真机/沙盒必须额外覆盖：
+
+1. 干净 ext4 持久目录 + `p37 init --if-missing`：`version_count=1`、
+   `line_list` 有 main、`mainline_head` 非零、`.p37` 在 `/srv/repos/p34-<id>` 内、
+   `lost+found` 不影响 empty 判定。
+2. 在 Init 的建库后/写 v0 后/写 refs 后/SetMainlineHead 前/rename 前/父 fsync 前
+   注入失败：重跑 `p37 init --if-missing` 必须 repair 成功，不出现第二个 v0。
+3. 用 `bad.db`（repo 行 + 一个 root v0，无 line/head/refs）做 fixture：
+   repair 认领该 v0，不新建根。
+4. 半成品 + `--strict`/`--no-repair`：返回 `repo_not_initialized`/
+   `repo_db_corrupt`，DB 不变。
+5. 两个并发 `repo_init`/`p37 init`：一个创建，一个幂等返回；DB 无重复 v0/line。
+6. `repo_import` 失败注入：旧 v0/head 仍可用，不出现 head 指向已删除版本。
+7. `repo_health {path, with_quota:false}` 对半成品返回 200 +
+   `initialized=false` + `next_action`，不写库、不 migrate。
+8. P36 attach 初始化失败：卷保持挂载，409 + `mounted=true` +
+   `initialized=false`，可重试 repair；不 umount、不删 `.p37`。
+9. VM stop/start 同 volumeId 重挂：`repo_info`/`line_list` 仍在，
+   `version_count` 不变。
+10. `repo_register(rebind=true)` 有活跃 workspace/lease：`repo_busy`，
+    registry 不变。
 
 ## v0.4.2 land_into 一致性验收
 

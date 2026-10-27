@@ -66,6 +66,11 @@ func coded(code, format string, args ...any) *CodedError {
 	return &CodedError{Code: code, Msg: fmt.Sprintf(format, args...)}
 }
 
+// codedDetail 构造一个带 detail 的错误码。
+func codedDetail(code string, detail any, format string, args ...any) *CodedError {
+	return &CodedError{Code: code, Msg: fmt.Sprintf(format, args...), Detail: detail}
+}
+
 // Server 包装 MCP server 与仓库。
 type Server struct {
 	// R 是单仓库模式下的默认仓库；多仓库模式下由 Resolve 按 repo 参数路由。
@@ -332,7 +337,66 @@ func classify(err error) (code, msg string, detail any) {
 		return ce.Code, ce.Msg, ce.Detail
 	}
 
+	var ie *hub.IntegrityError
+	if errors.As(err, &ie) {
+		return ie.Code, err.Error(), map[string]any{
+			"repo": "", "path": ie.Path, "reason": ie.Reason,
+			"next_action": ie.NextAction, "retryable": ie.Retryable,
+			"step": ie.Step, "backup_path": ie.BackupPath,
+		}
+	}
+	var pe *repo.PathError
+	if errors.As(err, &pe) {
+		return "invalid_path", err.Error(), map[string]any{
+			"path": pe.Path, "reason": pe.Reason, "retryable": false,
+			"next_action": "", "code": "repo_path_invalid",
+		}
+	}
+	var ne *repo.NotEmptyError
+	if errors.As(err, &ne) {
+		return "repo_not_empty", err.Error(), map[string]any{
+			"path": ne.Path, "user_files_count": ne.UserFiles,
+			"retryable": false, "next_action": "repo_init_import",
+		}
+	}
+	var de *repo.DBCorruptError
+	if errors.As(err, &de) {
+		return "repo_db_corrupt", err.Error(), map[string]any{
+			"path": de.Path, "backup_path": de.BackupPath, "reason": de.Reason,
+			"retryable": false, "next_action": "repo_init_repair",
+		}
+	}
+	var be *repo.InitBusyError
+	if errors.As(err, &be) {
+		return "repo_busy", err.Error(), map[string]any{
+			"path": be.Path, "reason": "init_lock_busy", "retryable": true,
+			"next_action": "retry_init", "step": "lock",
+		}
+	}
+
 	switch {
+	case errors.Is(err, repo.ErrRepoNameMismatch):
+		return "repo_name_mismatch", err.Error(), map[string]any{"retryable": false}
+	case errors.Is(err, repo.ErrRepoNotEmpty):
+		return "repo_not_empty", err.Error(), map[string]any{
+			"retryable": false, "next_action": "repo_init_import",
+		}
+	case errors.Is(err, repo.ErrRepoBusy):
+		return "repo_busy", err.Error(), map[string]any{
+			"retryable": false, "next_action": "stop_workspaces",
+		}
+	case errors.Is(err, repo.ErrInvalidRepoName):
+		return "invalid_argument", err.Error(), nil
+	case errors.Is(err, repo.ErrDBMissing):
+		return "repo_not_initialized", err.Error(), map[string]any{
+			"reason": "repo_db_missing_or_corrupt", "retryable": false,
+			"next_action": "repo_init",
+		}
+	case errors.Is(err, repo.ErrDBCorrupt):
+		return "repo_db_corrupt", err.Error(), map[string]any{
+			"reason": "repo_db_missing_or_corrupt", "retryable": false,
+			"next_action": "repo_init_repair",
+		}
 	case errors.Is(err, repo.ErrLineNotFound):
 		return "line_not_found", err.Error(), nil
 	case errors.Is(err, repo.ErrLineExists):

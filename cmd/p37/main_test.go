@@ -9,8 +9,15 @@ import (
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/meta"
+	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/repolock"
 )
+
+func TestMain(m *testing.M) {
+	// 开发机/CI 的 temp 目录不是挂载点；生产校验仍默认开启。
+	_ = os.Setenv("P37_ALLOW_NONPERSISTENT", "1")
+	os.Exit(m.Run())
+}
 
 func runCLI(args ...string) (int, string, string) {
 	var out, errw bytes.Buffer
@@ -173,5 +180,59 @@ func TestVersionIsParseable(t *testing.T) {
 		if !strings.Contains(out, key) {
 			t.Errorf("版本输出缺少 %s: %q", key, out)
 		}
+	}
+}
+
+func TestInitImportAndRepairFlags(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := runCLI("init", root); code == 0 {
+		t.Fatalf("非空目录 mode=empty 应失败: %s", errs)
+	}
+	if code, _, errs := runCLI("init", root, "--mode=import"); code != 0 {
+		t.Fatalf("mode=import 失败: %s", errs)
+	}
+	if code, _, errs := runCLI("init", root, "--strict"); code != 0 {
+		t.Fatalf("完整仓库 --strict 失败: %s", errs)
+	}
+
+	// 人为制造半成品：删 line 与 refs。
+	db, err := meta.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteLine("main", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, ".p37", "refs", "mainline")); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runCLI("init", root, "--strict"); code == 0 {
+		t.Fatal("--strict 不应修复半成品")
+	}
+	if code, _, _ := runCLI("init", root, "--no-repair"); code == 0 {
+		t.Fatal("--no-repair 不应修复半成品")
+	}
+	if code, _, errs := runCLI("init", root, "--if-missing"); code != 0 {
+		t.Fatalf("--if-missing 应修复半成品: %s", errs)
+	}
+	in, err := repo.CheckIntegrity(root)
+	if err != nil || !in.Initialized {
+		t.Fatalf("repair 后 integrity=%+v err=%v", in, err)
+	}
+}
+
+func TestInitAcceptsPrecreatedEmptyControlDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".p37"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := runCLI("init", root); code != 0 {
+		t.Fatalf("旧 P36 预建空 .p37 应可初始化: %s", errs)
 	}
 }

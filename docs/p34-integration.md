@@ -1,14 +1,43 @@
 # P34 接入示例
 
-## 1. 新建应用仓库
+## 1. 新建应用仓库（应用卷）
+
+P34 **不再**用 `repo_create` 建应用卷仓库，也不再复制 `.p37`。P36 attach 后
+卷已挂载到 `/srv/repos/p34-<projectID>`；首次打开/重试初始化时调用：
 
 ```json
-POST tools/call repo_create
-{ "name": "my-app", "default_line": "main",
-  "remote": { "enabled": true, "backend": "s3",
-              "endpoint": "https://...", "region": "auto",
-              "bucket": "p37", "prefix": "users/u1/apps",
-              "path_style": true } }
+POST tools/call repo_init
+{
+  "repo": "p34-59",
+  "path": "/srv/repos/p34-59",
+  "default_line": "main",
+  "mode": "empty",
+  "idempotency_key": "p34-init-p34-59"
+}
+→ {
+  "repo": {"name":"p34-59","path":"/srv/repos/p34-59",
+           "default_line":"main","mainline_head":"<v0>","version_count":1},
+  "line": {"name":"main","head":"<v0>"},
+  "version": {"id":"<v0>"}
+}
+```
+
+- 成功后才 `line_create(from="main")` 建会话线；不要再用 `line_create` 去补
+  默认线（P37 0.4.3 的 `line_create` 不带 `from` 仍是“读默认 line head”，
+  不会创建根版本）。
+- `mode` 选择：
+  - `empty`：空卷（新应用）。`lost+found`/`workspaces`/`.p37*` 不算用户文件；
+  - `import`：卷里已有用户文件，作为 v0 导入；
+  - `repair`：`repo_health.initialized=false` 时修复半初始化仓库（认领已有 v0）。
+- `repo_health {path, with_quota:false}` 返回 `initialized=false` 时按
+  `next_action` 走 `repo_init` / `repo_init_repair` / `repo_init_import`。
+- 远端配置在仓库完整后用 `repo_set_remote` 写（凭证仍只从环境变量读）：
+
+```json
+repo_set_remote { "repo": "p34-59", "remote": {
+  "enabled": true, "backend": "s3", "endpoint": "https://...",
+  "region": "auto", "bucket": "p37", "prefix": "users/u1/apps",
+  "path_style": true } }
 ```
 
 凭证只从环境变量读取：
@@ -16,6 +45,9 @@ POST tools/call repo_create
 ```text
 P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 ```
+
+`repo_create` 不带 `path` 仍然存在，但它是 **L2 scratch**（`mounted=false`），
+严禁用于应用卷。
 
 ## 2. 每个会话一条 line
 
@@ -218,9 +250,15 @@ on ws_not_found: 最多重试一次（新 key），仍失败则上报
 
 ## 启动自检
 
-会话/VM 启动时优先调用一次 `repo_health(repo)`，它聚合 repo 路径/挂载、
-`persistence`、`quota`、workspace 计数、line heads 与 warnings；比
-`repo_info + ws_quota + sync_status + ws_list` 少 3~4 次往返。
+会话/VM 启动时优先调用一次 `repo_health(repo)`，它聚合 repo 初始化完整性、
+路径/挂载、`persistence`、`quota`、workspace 计数、line heads 与 warnings；
+比 `repo_info + ws_quota + sync_status + ws_list` 少 3~4 次往返。
+
+P36 `/ready` 应使用 `repo_health {path, with_quota:false}`，只消费
+`initialized`/`default_line_ready`/`next_action`；未初始化是 200 而不是 p37d down。
+
+P34 不再调用 `EnsureRepoDefaultLine`（它假设 `line_create` 不带 `from` 会创建
+根版本，真实 P37 从 0.3.x 起就返回 `meta: 记录不存在`）。
 
 应用卷迁移（旧 `repo_<hash>` → `/srv/repos/<name>`）见
 [`operations.md`](operations.md) 的“应用卷迁移”章节；`repo_register` 对同名

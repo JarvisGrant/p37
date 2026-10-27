@@ -1,4 +1,4 @@
-# p37 @VERSION@ — land_into 一致性修复
+# p37 @VERSION@ — 应用卷仓库初始化闭环
 
 ## 发布物
 
@@ -19,7 +19,35 @@
 }
 ```
 
-## 本版重点（v0.4.2）
+## 本版重点（v0.4.3）
+
+- **新增 `repo_init`**：在已挂载的持久应用卷上原子创建完整仓库
+  （`.p37/p37.db` + 空 v0 + 默认 line + `refs/mainline` + `repo.json` +
+  `config.toml`），支持 `mode=empty|import|repair`。新目录先在 `.p37.tmp`
+  完整构建，fsync 后 rename；失败不再留下半套 `.p37`。
+- **半初始化仓库可修复**：`repair` 认领已有的唯一 root v0，补
+  `mainline_head`/line/refs，不新建第二个根；多个根/对象缺失返回
+  `repo_db_corrupt` + `backup_path`。
+- **`p37 init --if-missing` 改为“校验 + 修复”**：不再以 `p37.db` 是否存在
+  作为跳过条件；完整跳过、半成品修复、不存在完整初始化。新增 `--strict`
+  （只校验）与 `--no-repair`（诊断）。
+- **`repo_register` 只注册完整仓库**：缺 DB/head/line/refs 时返回
+  `repo_not_initialized` 或 `repo_db_corrupt`，`detail.next_action` 指向
+  `repo_init`/`repo_init_repair`；`init_if_missing=true` 保留但 deprecated。
+- **`repo_health` 成为 P36 `/ready` 的廉价入口**：新增
+  `initialized/default_line_ready/repo_db_ok/next_action`；支持
+  `path`（未注册时按挂载点探测）、`with_quota=false`（不打开 repo、不跑
+  EnsureSchema/migrate）与 `deep=true`（doctor 用）。
+- **`repo_import` 事务切换**：先构建对象树并 flush，再在一个 SQLite 事务里
+  退休旧 v0/插入新 v0/更新 head/line，最后写 refs；失败不会出现 head 指向
+  已删除版本。未初始化的已注册仓库等价于 `repo_init(mode=import)`。
+- **`repo_scan` / `p37 doctor` 复用完整性校验**：scan 默认只报告
+  `uninitialized[]`，`repair=true` 才修复；doctor 输出 repo/line/version/refs
+  一致性。
+- **`repo_create` 增加 `path`**：传 path 等价于 `repo_init(mode=empty)`；
+  不传 path 仍是 L2 scratch（`mounted=false`），文档明确不能用于应用卷。
+
+## 上一版（v0.4.2）
 
 - **修复子会话 land 回退父改动**：`ws_effective_tree` 缓存原来用 `len(ops)`
   当版本号且 `Sync` 不失效缓存；同一批文件再改一次时命中旧树，`ApplyTree`
@@ -91,44 +119,45 @@
 
 ## 接口变化
 
-MCP 工具名、参数 Schema、返回字段没有变化。只有一个行为变化：
-
-```text
-ws_land(expected_ws_ops_epoch = <旧值>)  → target_moved
-```
-
-`expected_ws_ops_epoch` 省略或为 0 时不校验；传当前值正常 land。这样调用方可以
-真正用 `land_preview` 返回的 `ws_ops_epoch` 做乐观并发保护。
-
-`expected_ws_tree`、`expected_head`、`expected_parent_tree` 的语义不变。
+- 新增 MCP `repo_init`（推荐的应用卷入口）。
+- `repo_register` 对半初始化仓库从“静默注册”改为返回
+  `repo_not_initialized`/`repo_db_corrupt`；`init_if_missing=true` 仍可用，
+  但内部等价于 `repo_init(mode=empty)`，并标记 deprecated。
+- `repo_health` 新增字段 `initialized/reason/next_action/default_line_ready/
+  repo_db_ok/repo_json_ok/root_ok/refs_ok/format_ok`，并支持 `path/deep/
+  with_quota`。
+- `repo_import` 新增 `force`；`repo_scan` 新增 `repair`；`repo_create` 新增
+  `path`。
+- `p37 init` 新增 `--mode/--strict/--no-repair/--name/--default-line/
+  --allow-nonpersistent`；`--if-missing` 语义变为“校验 + 修复”。
 
 ## 兼容性
 
-- 仓库格式仍为 `format_ver=2`，无需迁移。
-- SQLite / OverlayFS / CAS / pack 格式未改。
-- 已有仓库、工作区、同步包可直接使用。
-- 普通 MCP 客户端（不传 `expected_ws_ops_epoch`）行为不变。
-- 传了过期 `expected_ws_ops_epoch` 的客户端会开始得到 `target_moved`；这是
-  有意的并发保护，不是回归。
-- 单仓库模式 `p37d --repo <root>` 与多仓库模式 `p37d --root <root>` 均不变。
+- 仓库格式仍为 `format_ver=2`，无需迁移；SQLite / CAS / pack / OverlayFS
+  布局未改。
+- 0.4.3 可以打开 0.4.2 及更早的完整仓库；`repo_init(mode=repair)` 可修复
+  历史半成品。
+- **最低兼容矩阵**：
+  - P36：需要能返回 409 + `mounted=true` + `initialized=false`，并且
+    初始化失败不 umount；旧 P36 仍可依赖 `p37 init --if-missing` 自动修复。
+  - P34：需要改用 `repo_init`/`repo_health`，删除 `EnsureRepoDefaultLine`；
+    旧 P34 的 `line_create` 不带 `from` 无法创建根版本，不能修复半成品。
+  - P37：应用卷统一用 `repo_init` 或 `p37 init --if-missing`；
+    `repo_create` 不带 path 仅用于 L2 scratch。
 
 ## P36 集成要点
 
-- 平台胶水放在 **L1**，不改 L0；只有 `p37`/`p37d` 在 payload。
-- payload：ext4、label `P37PAYLOAD`、固定 96 MiB、只读挂载到
-  `/run/p37-payload`。
-- P36 设备顺序：`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；按 label 挂载。
-- 默认多仓库：根目录 `/srv/repos`（`p36:p36`，`0750`），
-  `p37d --root /srv/repos`；旧 `/srv/repo` 原地注册为 `default`。
-- 应用卷：guest 挂到 `/srv/repos/<app>`，卷内就是 p37 repo 根。
-  attach → `repo register`；detach → `repo unregister` → guest umount →
-  宿主 remove-device。
+- 应用卷 attach：guest mount 后调用 `p37 init <mountPath> --if-missing`
+  （旧镜像）或 MCP `repo_init(mode=empty)`（新镜像）；成功后再
+  `repo_register`。
+- 初始化失败：**保持卷挂载、不删除 `.p37`**，返回 409 + `mounted=true` +
+  `initialized=false` + `next_action`；用户可点“重试初始化”。
+- P36 `/ready`：调用 `repo_health {path, with_quota:false}`，消费
+  `initialized/default_line_ready/next_action`；`initialized=false` 不是
+  p37d down。
+- detach 仍为 `repo_unregister` → guest umount → 宿主 remove-device。
 - MCP 客户端使用 `/usr/local/bin/p37-mcp`（内部
   `p37d --stdio --root /srv/repos`）。
-- `p37d --check --repo <root>` 是完整健康检查；`p37d --check --root <dir>` 是
-  registry/DB/line 链检查。`p37-run` 启动前调用非 strict 的 `--check --root`。
-
-部署细节与验收步骤见仓库 `packaging/p36/README.md` 与 `VERIFY.md`。
 
 ## 已知限制
 

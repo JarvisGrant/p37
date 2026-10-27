@@ -23,7 +23,7 @@ p37 --root <root> --repo <id|name> <命令> [参数]   # 对指定 repo 执行
 - `--root` 与 `--repo` 可以写成 `--root=/srv/repos` 形式。
 - 多仓库模式除 `repo` 子命令外必须提供 `--repo`；CLI 会先把 id/name 解析成
   路径，再执行命令。
-- `p37 --root ... init` 被拒绝；请用 `repo create`。
+- `p37 --root ... init` 被拒绝；多仓库请用 `repo init <name> <path>`（应用卷）或 `repo create`（L2 scratch）。
 - CLI 不会自动启动 daemon。daemon 持锁时，`gc` 会拒绝；其他写命令应在维护
   窗口执行（见 [`operations.md`](operations.md)）。
 
@@ -31,7 +31,9 @@ p37 --root <root> --repo <id|name> <命令> [参数]   # 对指定 repo 执行
 
 | 命令 | 说明 |
 |---|---|
-| `p37 init <root> [--if-missing] [--config <file>]` | 创建空仓库；`--if-missing` 幂等，绝不覆盖已有 config |
+| `p37 init <root> [--if-missing] [--mode empty\|import\|repair] [--default-line main] [--name <name>] [--config <file>] [--allow-nonpersistent]` | 原子初始化/修复仓库；`--if-missing` 完整则跳过、半成品则修复、不存在则完整初始化；绝不覆盖已有 config |
+| `p37 init <root> --strict` | 只校验完整性，不写库、不修复 |
+| `p37 init <root> --no-repair` | 诊断：看到半成品直接报错，不修复 |
 | `p37 import <root> <srcdir>` | 把目录树作为 v0 导入（仅空仓库） |
 | `p37 status <root>` | 仓库摘要 |
 | `p37 doctor <root>` | 部署自检（比 `--check --repo` 更严格地判定 OverlayFS） |
@@ -52,12 +54,13 @@ GC：
 
 ```bash
 p37 --root /srv/repos repo list [--json]
-p37 --root /srv/repos repo create <name> [--default-line main] [--remote-key rk_...] [--remote-prefix <p>] [--json]
+p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair] [--default-line main] [--allow-nonpersistent] [--json]
+p37 --root /srv/repos repo create <name> [--default-line main] [--remote-key rk_...] [--remote-prefix <p>] [--json]  # 不传 path 是 L2 scratch
 p37 --root /srv/repos repo info <id|name> [--json]
 p37 --root /srv/repos repo delete <id|name> [--force]
 p37 --root /srv/repos repo register <name> <path> [--init-if-missing] [--default-line main] [--json]
 p37 --root /srv/repos repo unregister <id|name> [--force] [--json]
-p37 --root /srv/repos repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--json]
+p37 --root /srv/repos repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--repair] [--json]
 ```
 
 `register` / `unregister` / `scan` 在 socket 可连接时通过 daemon 执行；socket
