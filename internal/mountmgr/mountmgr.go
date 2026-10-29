@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
@@ -100,6 +101,24 @@ func New(repoRoot string, opt Options) (*Manager, error) {
 	} {
 		if err := safefs.HardenDir(d); err != nil {
 			return nil, err
+		}
+	}
+	// 把磁盘上已有的基底目录登记进来：daemon 重启后 bases 这张表是空的，
+	// 旧基底既不会被 BaseCacheSize 统计，也不会被 PruneBases/Evict 回收，
+	// 会随每次会话永久堆积（P36 用户数据包里表现为「删不掉的 20MB」）。
+	basesDir := filepath.Join(repoRoot, ".p37", "overlay", "bases")
+	if des, err := os.ReadDir(basesDir); err == nil {
+		for _, de := range des {
+			if !de.IsDir() || strings.HasSuffix(de.Name(), ".tmp") {
+				continue
+			}
+			id, perr := hash.Parse(de.Name())
+			if perr != nil {
+				continue
+			}
+			m.bases[id] = filepath.Join(basesDir, de.Name())
+			m.seq++
+			m.lastUse[id] = m.seq
 		}
 	}
 	return m, nil
@@ -364,11 +383,17 @@ func (m *Manager) ensureBase(treeID hash.ID, src ContentSource) (string, error) 
 
 	m.mu.Lock()
 	if dir, ok := m.bases[treeID]; ok {
-		m.inUse[treeID]++
-		m.seq++
-		m.lastUse[treeID] = m.seq
-		m.mu.Unlock()
-		return dir, nil
+		// 目录可能被外部清理（gc/PruneBases）删掉；不要凭内存表直接返回
+		// 一个不存在的 lowerdir，否则 overlay 会以 ENOENT 失败。
+		if _, err := os.Stat(dir); err == nil {
+			m.inUse[treeID]++
+			m.seq++
+			m.lastUse[treeID] = m.seq
+			m.mu.Unlock()
+			return dir, nil
+		}
+		delete(m.bases, treeID)
+		delete(m.lastUse, treeID)
 	}
 	m.mu.Unlock()
 
@@ -421,8 +446,79 @@ func (m *Manager) releaseBase(wsID string) {
 	m.mu.Unlock()
 }
 
-// Evict 在超过缓存上限时淘汰最久未用的基底。被引用的基底不淘汰。
-func (m *Manager) Evict() (int64, error) {
+// PruneBases 删除不再被任何工作区引用的 overlay 基底目录。
+//
+// keep 是调用方（repo.Open）从 workspace 表读出的 base_tree 集合；inUse 是
+// 当前进程内已挂载工作区的引用。两者都不命中的基底直接删掉——它们是纯
+// 派生数据，下次 ws_open 会按需重建。
+//
+// 必须配合 baseMu：与 ensureBase 的首次物化互斥，避免刚 rename 的基底被删。
+// 只应在 daemon 打开仓库（RemountWorkspaces）时调用；CLI 进程调用会删掉
+// 正在运行的 daemon 的缓存，虽然 keep 能保护活跃工作区，但没有必要冒这个险。
+func (m *Manager) PruneBases(keep map[hash.ID]bool) (removed int, removedBytes int64, err error) {
+	m.baseMu.Lock()
+	defer m.baseMu.Unlock()
+
+	basesDir := filepath.Join(m.repoRoot, ".p37", "overlay", "bases")
+	des, rerr := os.ReadDir(basesDir)
+	if rerr != nil {
+		if errors.Is(rerr, os.ErrNotExist) {
+			return 0, 0, nil
+		}
+		return 0, 0, rerr
+	}
+	var errs []error
+	for _, de := range des {
+		if !de.IsDir() {
+			continue
+		}
+		name := de.Name()
+		dir := filepath.Join(basesDir, name)
+		// 中断物化留下的 <hash>.tmp：没有引用价值。只清 1 小时前的，
+		// 避免误删另一个进程正在 materialize 的临时目录。
+		if strings.HasSuffix(name, ".tmp") {
+			if fi, ierr := de.Info(); ierr == nil && time.Since(fi.ModTime()) < time.Hour {
+				continue
+			}
+			total := dirSize(dir)
+			if derr := os.RemoveAll(dir); derr != nil {
+				errs = append(errs, derr)
+				continue
+			}
+			removed++
+			removedBytes += total
+			continue
+		}
+		id, perr := hash.Parse(name)
+		if perr != nil {
+			continue
+		}
+		m.mu.Lock()
+		inUse := m.inUse[id]
+		m.mu.Unlock()
+		if keep[id] || inUse > 0 {
+			continue
+		}
+		total := dirSize(dir)
+		if derr := os.RemoveAll(dir); derr != nil {
+			errs = append(errs, derr)
+			continue
+		}
+		m.mu.Lock()
+		delete(m.bases, id)
+		delete(m.lastUse, id)
+		m.mu.Unlock()
+		removed++
+		removedBytes += total
+	}
+	return removed, removedBytes, errors.Join(errs...)
+}
+
+// EvictExcept 删除未被 keep/inUse 引用的基底（gc --prune 的维护动作）。
+// keep 由调用方按“未落地/仍挂载的 workspace”构建；被引用的基底不淘汰。
+func (m *Manager) EvictExcept(keep map[hash.ID]bool) (int64, error) {
+	m.baseMu.Lock()
+	defer m.baseMu.Unlock()
 	m.mu.Lock()
 	type cand struct {
 		id  hash.ID
@@ -431,7 +527,7 @@ func (m *Manager) Evict() (int64, error) {
 	}
 	var cands []cand
 	for id, dir := range m.bases {
-		if m.inUse[id] > 0 {
+		if m.inUse[id] > 0 || keep[id] {
 			continue
 		}
 		cands = append(cands, cand{id: id, use: m.lastUse[id], dir: dir})
@@ -456,6 +552,9 @@ func (m *Manager) Evict() (int64, error) {
 	}
 	return freed, nil
 }
+
+// Evict 是 EvictExcept(nil) 的兼容包装（删除所有未被引用的基底）。
+func (m *Manager) Evict() (int64, error) { return m.EvictExcept(nil) }
 
 // BaseCacheSize 返回已物化基底的总字节数。
 func (m *Manager) BaseCacheSize() int64 {
@@ -495,4 +594,12 @@ func isEmptyOrAbsent(dir string) bool {
 }
 
 // Unmount 卸载一个 overlay 工作区（不动 upper 层，§4.6）。
-func (m *Manager) Unmount(wsID string) error { return m.unmountOverlay(wsID) }
+func (m *Manager) Unmount(wsID string) error {
+	err := m.unmountOverlay(wsID)
+	if err == nil {
+		// Hub.Unregister 走这里；必须释放 ensureBase 累加的引用计数，
+		// 否则同进程后续 Evict/PruneBases 会把这个基底当成 still in use。
+		m.releaseBase(wsID)
+	}
+	return err
+}

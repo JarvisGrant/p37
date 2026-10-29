@@ -884,9 +884,24 @@ func cmdGC(root string, args []string, out, errw io.Writer) int {
 			rep.StatCacheCleared)
 	}
 
-	// 基底缓存 LRU（§4.8）。
-	if freed, err := r.MM.Evict(); err == nil && freed > 0 {
-		fmt.Fprintf(out, "已淘汰 overlay 基底缓存 %s\n", humanBytes(freed))
+	// 基底缓存回收（§4.8）。必须在 --prune 且未 --force 时执行：
+	// --force 可能是在 daemon 仍运行时使用，删基底会让挂载中的 overlay 读到
+	// 已删除的 lowerdir；dry-run 更不能真的删。
+	if prune && !force {
+		keep := map[hash.ID]bool{}
+		if all, lerr := r.WS.List(); lerr == nil {
+			for i := range all {
+				w := &all[i]
+				if w.LandedTS == 0 || r.MM.IsMounted(w.ID) {
+					keep[w.BaseTree] = true
+				}
+			}
+		}
+		if freed, err := r.MM.EvictExcept(keep); err == nil && freed > 0 {
+			fmt.Fprintf(out, "已淘汰 overlay 基底缓存 %s\n", humanBytes(freed))
+		}
+	} else if !prune {
+		fmt.Fprintln(out, "（overlay 基底缓存只在 --prune 且未 --force 时回收）")
 	}
 
 	// 打包（§9 P2）：把松散小对象合并进 pack 文件。与其它回收一致，

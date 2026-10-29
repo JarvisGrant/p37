@@ -8,9 +8,9 @@ systemd / L1 胶水细节见 [`../packaging/p36/README.md`](../packaging/p36/REA
 ### 1.1 发布物
 
 ```bash
-make release VERSION=0.4.5
-# dist/p37-linux-amd64-0.4.5.tar.gz
-# dist/p37-linux-amd64-0.4.5.tar.gz.sha256
+make release VERSION=0.4.6
+# dist/p37-linux-amd64-0.4.6.tar.gz
+# dist/p37-linux-amd64-0.4.6.tar.gz.sha256
 make p36-bootstrap
 # dist/p36-bootstrap/...
 ```
@@ -147,7 +147,7 @@ auth_token = "<token>"
 | `repo_is_mountpoint` | 对应用卷挂载点调用 `repo_delete` | 走 `repo_unregister → guest umount → 宿主删卷` |
 | `repo_not_initialized` | path 下没有 p37 DB，或 DB 缺 head/line/refs | 读 `detail.next_action`：无用户文件用 `repo_init_repair`；有用户文件用 `repo_init(mode=import)`；旧 P36 可继续 `p37 init`（有用户文件时需显式 `--mode=import`） |
 | `repo_not_empty` | `repo_init(mode=empty)` 遇到用户文件，或 import 覆盖已有版本 | 用 `mode=import`，或显式 `repo_import(force=true)`；不要删用户文件 |
-| `repo_db_corrupt` | DB 可打开但结构不可恢复（多根/对象缺失/format 不匹配） | 先看 `detail.backup_path`；0.4.5 不自动重建，需显式 `repo_init(mode=repair)` 或人工处理 |
+| `repo_db_corrupt` | DB 可打开但结构不可恢复（多根/对象缺失/format 不匹配） | 先看 `detail.backup_path`；0.4.5 起不自动重建，需显式 `repo_init(mode=repair)` 或人工处理 |
 | `quota_exceeded` | `max_active`/`max_hidden`/`max_depth`/`max_fanout` 达到上限 | 读 `ws_quota`，先 `ws_drop`/`ws_reap`；不要把它当成模型空转 |
 | `land_queue_full` | 并发 land 超过 `land_queue_max` | 退避重试；检查是否有工作区长时间卡住 |
 | `sync_in_progress` | 同 repo 已有同步在跑 | 等待或检查是否有残留进程 |

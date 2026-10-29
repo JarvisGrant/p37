@@ -1,4 +1,4 @@
-# p37 @VERSION@ — refs mismatch 可执行修复
+# p37 @VERSION@ — overlay 基底缓存回收
 
 ## 发布物
 
@@ -19,7 +19,25 @@
 }
 ```
 
-## 本版重点（v0.4.5）
+## 本版重点（v0.4.6）
+
+- **daemon 重启后旧基底不再永久堆积**：`mountmgr.New` 启动时扫描
+  `<repo>/.p37/overlay/bases/`，把磁盘上已有基底登记进内存表。此前表是空的，
+  旧基底既不计入 `BaseCacheSize`，也不会被 `Evict` 回收。
+- **打开仓库时清理孤儿基底**：新增 `PruneBases(keep)`；`repo.Open` 在 daemon 模式
+  （`RemountWorkspaces=true`）下调用，`keep` 只保护未落地（`landed_ts=0`）或仍
+  挂载的工作区。已落地且已卸载的基底会被删除，下一次 `ws_open` 按需重建。
+- **`gc --prune` 不再误删**：改用 `EvictExcept(keep)`，只在 `--prune` 且未
+  `--force` 时执行；dry-run 与 daemon 运行时的 `--force` 不再清空基底缓存。
+- **引用计数修复**：`Manager.Unmount` 现在调用 `releaseBase`，避免 unmount 后
+  `inUse` 只增不减、导致 `Evict/PruneBases` 永远认为基底仍在使用。
+- **安全兜底**：`ensureBase` 命中内存表时先 `stat` 目录；外部清理后不会返回
+  不存在的 lowerdir。中断物化留下的 `.tmp` 只清理超过 1 小时的目录，避免误删
+  并发物化。
+- 测试：`internal/mountmgr/prune_test.go` 覆盖已有基底登记、保留引用、清孤儿/
+  `.tmp`；`go test ./...` 全绿。`format_ver` 不变。
+
+## 上一版（v0.4.5）
 
 - **refs mismatch 变成可执行状态**：`repo_health` 对“数据完整、refs 指向旧
   ancestor”的仓库返回 `initialized=true`、`refs_ok=true`、`refs_match=false`、

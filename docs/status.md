@@ -1,4 +1,4 @@
-# 当前状态（v0.4.5）
+# 当前状态（v0.4.6）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.5` |
+| 发布版本 | `v0.4.6` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 65 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,12 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.4.6 重点（不改 `format_ver`）**：修复 daemon 重启后 `.p37/overlay/bases`
+基底缓存永久不回收的问题：`New` 启动时登记磁盘上已有基底；daemon 打开仓库时
+按“未落地/仍挂载”的 workspace 保留集清理孤儿基底；`gc --prune` 改用
+`EvictExcept(keep)` 且不再在 dry-run/`--force` 时删除；`Unmount` 释放基底引用
+计数；`ensureBase` 命中内存表时先 `stat`，避免删除后返回不存在的 lowerdir。
 
 **v0.4.5 重点（不改 `format_ver`）**：把 `refs/mainline` 落后变成可执行的
 repair 状态：`repo_health` 返回 `initialized=true, refs_ok=true,

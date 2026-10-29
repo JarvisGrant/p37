@@ -40,6 +40,18 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.6 overlay 基底缓存回收
+
+- `mountmgr.New` 启动时扫描 `.p37/overlay/bases/`，把磁盘上已有基底登记进内存表；
+  此前 daemon 重启后表为空，旧基底既不计入 `BaseCacheSize`，也不会被 `Evict` 回收。
+- 新增 `mountmgr.PruneBases(keep)`：删除没有工作区 `base_tree` 引用、且当前进程
+  `inUse=0` 的基底目录，以及中断物化留下超过 1 小时的 `.tmp`；`repo.Open` 在 daemon
+  模式（`RemountWorkspaces=true`）下调用，`keep` 只保护未落地（`landed_ts=0`）或
+  仍处于挂载状态的工作区。`gc --prune` 改用 `EvictExcept(keep)`，只在未 `--force`
+  时执行，不再清空整个缓存。
+- `ensureBase` 命中内存表时先 `stat` 目录，避免外部清理后返回不存在的 lowerdir。
+- 测试：`internal/mountmgr/prune_test.go`（已有基底登记、保留引用、清孤儿/.tmp）。
+
 ## v0.4.5 refs mismatch 可执行修复
 
 - `evaluateIntegrity`：`initialized=true && !RefsMatch` 不再只把 refs 当诊断，

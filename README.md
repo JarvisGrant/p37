@@ -11,10 +11,10 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**v0.4.5 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
+> 状态：**v0.4.6 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
 > `ws_land_into`、`line_merge`、历史读取、多 line 同步与恢复、应用卷热插拔
 > 生命周期均已接入。M1–M5 主体已在 P36 实例（Ubuntu 26.04 + ext4 +
-> OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；v0.3.x 的当前状态和
+> OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；当前状态和
 > 已知缺口见 [`docs/status.md`](docs/status.md)，历史实现记录见
 > [`PROGRESS.md`](PROGRESS.md)。
 
@@ -116,7 +116,7 @@ copy。copy 模式每个工作区是一份完整树，20GB L2 上需要更保守
 `config-overlay.toml` + `p37d-root-overlay.service` 走 OverlayFS。
 
 ```bash
-make release VERSION=0.4.5       # 发布 tar + sha256
+make release VERSION=0.4.6       # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 

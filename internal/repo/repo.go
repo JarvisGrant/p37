@@ -205,6 +205,27 @@ func Open(root string, opt Options) (*Repo, error) {
 		return nil, err
 	}
 
+	// 常驻 daemon 打开仓库时，清掉上次会话遗留的 overlay 基底缓存。
+	// 基底是纯派生数据；活跃工作区的 base_tree 从 DB 读出保护，绝不会删
+	// 正在被 lowerdir 引用的目录。CLI 进程不执行，避免和运行中的 daemon 打架。
+	if opt.RemountWorkspaces {
+		if wsList, werr := db.ListWorkspaces(); werr == nil {
+			keep := make(map[hash.ID]bool, len(wsList))
+			for _, w := range wsList {
+				// 保护未落地的 workspace；已落地但仍有 overlay 挂载的也保护。
+				// 已落地且已卸载的行不应再钉住基底缓存（否则缓存永远清不掉）。
+				if w.LandedTS == 0 || mm.IsMounted(w.ID) {
+					keep[w.BaseTree] = true
+				}
+			}
+			if removed, bytes, perr := mm.PruneBases(keep); perr != nil {
+				log.Printf("repo: prune overlay bases: %v", perr)
+			} else if removed > 0 {
+				log.Printf("repo: pruned %d overlay bases (%d bytes)", removed, bytes)
+			}
+		}
+	}
+
 	ig := opt.Ignore
 	if ig == nil {
 		extra := opt.ExtraIgnore
