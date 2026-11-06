@@ -1,4 +1,4 @@
-# p37 @VERSION@ — overlay 基底缓存回收
+# p37 @VERSION@ — detach 生命周期与 repo 注册可见性
 
 ## 发布物
 
@@ -19,7 +19,25 @@
 }
 ```
 
-## 本版重点（v0.4.6）
+## 本版重点（v0.4.7）
+
+- **`repo_quiesce` / `repo_resume`**：把“关闭 repo 的 DB/overlay/flock”和
+  “从 registry 隐藏”拆开。P36 detach 的顺序改为
+  `repo_quiesce → guest umount → repo_unregister`；umount 失败时
+  `repo_resume`，registry 保持可见，不再留下“VM 还在运行、repo 却
+  repo_not_found”的中间态。
+- **`repo_health.registered`**：新增 registry 视角字段。repo 被
+  `repo_unregister` 后，即使磁盘数据完整、`initialized=true`，该字段也是
+  `false`；P36 `/ready` 不应再把这种状态判为 ready。
+- **`repo_register` 作为 tombstone 恢复入口**：显式 `repo_register`（可带
+  `rebind=true`）会把 `deleted_ts` 置回 0，id/name 保持不变；P36/P34 可在
+  umount 失败或发现 `registered=false` 时自动恢复。
+- **CLI**：新增 `p37 --root <root> repo quiesce <id|name> [--force]` 和
+  `repo resume <id|name>`，与 MCP 工具同源。
+- `format_ver` 不变；旧版 P37 不返回 `registered` 时调用方应按
+  `registered=true` 兼容。
+
+## 上一版（v0.4.6）
 
 - **daemon 重启后旧基底不再永久堆积**：`mountmgr.New` 启动时扫描
   `<repo>/.p37/overlay/bases/`，把磁盘上已有基底登记进内存表。此前表是空的，

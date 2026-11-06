@@ -53,7 +53,7 @@ func TestRepoLifecycleToolsListed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"repo_register": false, "repo_unregister": false, "repo_scan": false}
+	want := map[string]bool{"repo_register": false, "repo_unregister": false, "repo_quiesce": false, "repo_resume": false, "repo_scan": false}
 	for _, tool := range res.Tools {
 		if _, ok := want[tool.Name]; !ok {
 			continue
@@ -180,6 +180,42 @@ func TestRepoUnregisterBusyAndForce(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(path, ".p37", "p37.db")); err != nil {
 		t.Fatalf("数据应保留: %v", err)
+	}
+}
+
+func TestRepoQuiesceResumeAndHealthRegistered(t *testing.T) {
+	hh, _ := newMultiHarness(t)
+	path := filepath.Join(hh.root, "app-q")
+	prepareExternalRepo(t, path, "app-q", true)
+	hh.mustOK("repo_register", map[string]any{"repo": "app-q", "path": path})
+
+	h := hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["registered"] != true {
+		t.Fatalf("registered health=%v", h)
+	}
+
+	q := hh.mustOK("repo_quiesce", map[string]any{"repo": "app-q"})
+	if q["quiesced"] != true || q["already_quiesced"] != false {
+		t.Fatalf("quiesce=%v", q)
+	}
+	h = hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["registered"] != true {
+		t.Fatalf("quiesce 后应保持 registered: %v", h)
+	}
+	// 已 quiesce 的 repo 仍可通过 line_list 重新打开。
+	hh.mustOK("line_list", map[string]any{"repo": "app-q"})
+	hh.mustOK("repo_resume", map[string]any{"repo": "app-q"})
+
+	hh.mustOK("repo_unregister", map[string]any{"repo": "app-q"})
+	h = hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["registered"] != false {
+		t.Fatalf("unregister 后 registered 应为 false: %v", h)
+	}
+	// repo_register 显式恢复 tombstone。
+	hh.mustOK("repo_register", map[string]any{"repo": "app-q", "path": path})
+	h = hh.mustOK("repo_health", map[string]any{"path": path, "with_quota": false})
+	if h["registered"] != true {
+		t.Fatalf("repo_register 后 registered 应为 true: %v", h)
 	}
 }
 

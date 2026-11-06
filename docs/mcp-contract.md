@@ -1,7 +1,7 @@
-# p37 MCP 契约（v0.4.6 / format_ver=2）
+# p37 MCP 契约（v0.4.7 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
-`internal/mcpsrv` 的注册为准；当前注册 65 个工具。
+`internal/mcpsrv` 的注册为准；当前注册 67 个工具。
 
 ## 统一信封
 
@@ -54,7 +54,7 @@
 |---|---|
 | 仓库只读 | `repo_status` `repo_list` `repo_info` `repo_disk_usage` `repo_health` |
 | 仓库管理 | `repo_create` `repo_delete` `repo_import` `repo_export` `repo_export_status` `repo_set_remote` |
-| 应用卷生命周期 | `repo_init` `repo_register` `repo_unregister` `repo_scan` |
+| 应用卷生命周期 | `repo_init` `repo_register` `repo_unregister` `repo_quiesce` `repo_resume` `repo_scan` |
 | 命名线 | `line_create` `line_list` `line_info` `line_delete` `line_protect` `line_reset` `line_log` `line_compare` `line_graph` `line_merge` |
 | 工作区 | `ws_open` `ws_ensure` `ws_list` `ws_info` `ws_sync` `ws_diff` `ws_rebase` `ws_drop` `ws_quota` `ws_reap` `ws_disk_usage` `ws_lease` `lease_query` |
 | 整合 | `land_preview` `ws_land` `ws_land_into` `land_history` |
@@ -94,7 +94,7 @@
 
 ```json
 {
-  "p37_version": "0.4.6",
+  "p37_version": "0.4.7",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -162,12 +162,19 @@ P36 把「每应用一个持久卷」挂到 guest 的 `/srv/repos/<app>`。p37d 
 attach: 宿主热加 qcow2 → guest mount /srv/repos/<app>
         → repo_init(mode=empty)（P36 旧镜像可继续用 p37 init --if-missing）
         → repo_register 只在仓库已完整时成功
-detach: repo_unregister → guest umount → 宿主 remove-device
-删除卷: repo_unregister → guest umount → 宿主删卷（不要用 repo_delete）
+detach: repo_quiesce → guest umount → repo_unregister → 宿主 remove-device
+        （umount 失败时 repo_resume，registry 保持可见，不能留 tombstone）
+删除卷: repo_quiesce → guest umount → repo_unregister → 宿主删卷（不要用 repo_delete）
 ```
 
+`repo_quiesce` / `repo_unregister` 的分工：前者只关闭 DB/overlay/锁，registry
+仍可见；后者才写 tombstone。P36 必须先 quiesce、再 umount、成功后才 unregister；
+如果 umount 失败，调用 `repo_resume` 恢复，避免“VM 还在运行、repo 却
+repo_not_found”的中间态。旧版 P37 没有 quiesce 时，P36 可退回
+`repo_unregister`，但必须在 umount 失败时用 `repo_register` 回滚。
+
 所有 registry 写操作都由运行中的 p37d 执行（Hub mutex + SQLite 事务）。CLI 在
-daemon socket 可连接时通过 MCP 路由 init/register/unregister/scan。
+daemon socket 可连接时通过 MCP 路由 init/register/unregister/quiesce/resume/scan。
 
 ### repo_init
 
@@ -293,6 +300,33 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
 - 注销是 tombstone：daemon 重启或 `repo_scan` 不会自动复活；重新挂载后用
   `repo_register` 显式恢复（id/name 保持不变）。
 - 失败时 registry 行保持可见，可直接重试。
+
+### repo_quiesce
+
+```json
+{ "repo": "app-a", "force": false }
+```
+
+- 关闭 repo 的 overlay workspace、SQLite 和 per-repo flock，但**不写 tombstone**；
+  `repo_list` / `repo_health.registered` 仍为 true。
+- 用于应用卷 detach：`repo_quiesce → guest umount → repo_unregister`。
+- `force=false` 时遇到 active/conflicted/rebasing/integrating workspace 或 lease
+  返回 `repo_busy`；`force=true` 会先卸载 workspace。
+- 不存在时幂等成功，返回 `already_quiesced=true`。
+- 返回 `{quiesced, already_quiesced, repo, id, name, path}`。
+
+### repo_resume
+
+```json
+{ "repo": "app-a" }
+```
+
+- 重新打开一个已 quiesce 的 repo；registry 必须仍可见（未被 unregister）。
+- 幂等：已经打开时直接返回 Entry；repo 已 unregister 或路径不存在返回
+  `repo_not_found`。
+- 用于 `repo_quiesce` 后 guest umount 失败的回滚，避免 registry 已关闭但
+  卷仍在挂载的中间态。
+- 返回与 `repo_register` 相同的 Entry。
 
 ### repo_scan
 
@@ -610,6 +644,7 @@ repo_health { "repo": "my-app", "deep": true }
 
 ```json
 {
+  "registered": false,
   "initialized": false,
   "reason": "mainline_head_missing",
   "next_action": "repo_init_repair",
@@ -631,7 +666,7 @@ repo_health { "repo": "my-app", "deep": true }
   "active_workspaces": 0,
   "leases": 0,
   "format_ver": 2,
-  "p37_version": "0.4.6",
+  "p37_version": "0.4.7",
   "warnings": ["mainline_head_missing"]
 }
 ```
@@ -640,6 +675,7 @@ repo_health { "repo": "my-app", "deep": true }
 
 ```json
 {
+  "registered": true,
   "initialized": true,
   "reason": "",
   "next_action": "",
@@ -648,7 +684,7 @@ repo_health { "repo": "my-app", "deep": true }
   "refs_match": true,
   "data_ok": true,
   "repo_db_ok": true,
-  "p37_version": "0.4.6",
+  "p37_version": "0.4.7",
   "quota": {"max_active":8,"active_used":2,"active_available":6,
             "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
             "landed":0,"broken":0,"workspaces":[]},
@@ -661,6 +697,12 @@ repo_health { "repo": "my-app", "deep": true }
   "warnings": []
 }
 ```
+
+`registered=false` 表示磁盘数据可能完整，但 registry 已经把该 repo 隐藏
+（`repo_unregister` tombstone）。此时 `line/version/ws` 工具都会返回
+`repo_not_found`，P36 `/ready` 不能只凭 `initialized=true` 判 ready；应先
+`repo_register`（可带 `rebind=true`）恢复。`registered` 字段从 0.4.7 起提供；
+旧版 p37 不返回该字段时调用方应按 `registered=true` 兼容。
 
 判定规则：repo 行存在、`root` 与 path 一致、`mainline_head` 非零、
 `version_count>0`、default line 存在且 head 指向存在的 version、

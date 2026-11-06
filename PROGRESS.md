@@ -40,6 +40,24 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.4.7 detach 生命周期与 repo 注册可见性
+
+- 新增 MCP/CLI `repo_quiesce` / `repo_resume`：quiesce 关闭 repo 的
+  overlay workspace、SQLite 和 flock，但保留 registry 行；resume 重新打开。
+  P36 detach 改为 `quiesce → umount → unregister`，umount 失败则 resume，
+  避免留下“VM 运行中、repo 却 unregistered”的中间态。
+- `repo_health` 新增 `registered`：registry 视角与磁盘完整性分开；被
+  `repo_unregister` 的 repo 即使 `initialized=true` 也返回
+  `registered=false`。
+- `repo_register` 继续支持 tombstone 恢复（`deleted_ts=0`，id/name 不变），
+  作为 P36/P34 在 umount 失败或 `registered=false` 时的显式修复入口。
+- 新增 Hub `Quiesce` / `Resume` / `GetByPath`；`Unregister` 抽出
+  `stopWorkspacesLocked`，两条路径共享活跃 workspace/lease 检查与 overlay
+  卸载逻辑。
+- 测试：`internal/hub` 覆盖 quiesce 保持 registry、resume、未知 repo 幂等；
+  `internal/mcpsrv` 覆盖 `registered`、quiesce/resume、unregister 后
+  `registered=false`、repo_register 恢复。`format_ver` 不变。
+
 ## v0.4.6 overlay 基底缓存回收
 
 - `mountmgr.New` 启动时扫描 `.p37/overlay/bases/`，把磁盘上已有基底登记进内存表；

@@ -32,7 +32,7 @@ const usage = `p37 —— AI 原生版本控制系统
 
 用法：
   p37 <命令> [参数]
-  p37 --root <root> repo <list|create|info|delete|register|unregister|scan> ...   多仓库维护
+  p37 --root <root> repo <list|create|info|delete|register|unregister|quiesce|resume|scan> ...   多仓库维护
   p37 --root <root> --repo <id|name> <命令> [参数]       对指定 repo 执行
 
 初始化与运维：

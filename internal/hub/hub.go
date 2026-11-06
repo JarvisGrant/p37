@@ -306,6 +306,30 @@ func (h *Hub) Get(ref string) (*Entry, error) {
 	return e, nil
 }
 
+// GetByPath 按 registry 中的挂载路径查已注册 repo（不含 tombstone）。
+//
+// 用于 repo_health(path=...)：P36 /ready 只拿到 mountPath 时也能判断
+// repo 是否仍在 registry 中可见，而不是只凭磁盘数据误判 ready。
+func (h *Hub) GetByPath(path string) (*Entry, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	abs, err := h.validateRepoPath(path, false)
+	if err != nil {
+		return nil, err
+	}
+	row := h.db.QueryRow(
+		`SELECT `+registryCols+` FROM repo WHERE path=? AND deleted_ts=0`, abs)
+	e, err := scanEntry(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	h.enrichEntry(e)
+	return e, nil
+}
+
 // List 返回全部 repo。
 func (h *Hub) List() ([]Entry, error) {
 	rows, err := h.db.Query(

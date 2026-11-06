@@ -140,6 +140,103 @@ func cmdRepoUnregister(root string, args []string, out, errw io.Writer) int {
 	return printUnregisterData(b, jsonOut, out, errw)
 }
 
+// cmdRepoQuiesce 支持：
+//
+//	repo quiesce <id|name> [--force] [--json]
+func cmdRepoQuiesce(root string, args []string, out, errw io.Writer) int {
+	var ref string
+	var force, jsonOut bool
+	for _, a := range args {
+		switch {
+		case a == "--json":
+			jsonOut = true
+		case a == "--force":
+			force = true
+		case strings.HasPrefix(a, "-"):
+			fmt.Fprintf(errw, "未知参数 %q\n", a)
+			return 2
+		default:
+			if ref != "" {
+				fmt.Fprintf(errw, "repo quiesce 只接受一个 <id|name>，多余参数 %q\n", a)
+				return 2
+			}
+			ref = a
+		}
+	}
+	if ref == "" {
+		fmt.Fprintln(errw, "repo quiesce 需要 <id|name>")
+		return 2
+	}
+	argsMap := map[string]any{"repo": ref, "force": force}
+	if data, routed, err := routeRepoCommand(root, "repo_quiesce", argsMap); err != nil {
+		return repoFail(errw, err)
+	} else if routed {
+		return printQuiesceData(data, jsonOut, out, errw)
+	}
+
+	h, err := openRepoHub(root)
+	if err != nil {
+		return repoFail(errw, err)
+	}
+	defer func() { _ = h.Close() }()
+	res, err := h.Quiesce(ref, force)
+	if err != nil {
+		return repoFail(errw, err)
+	}
+	payload := map[string]any{"quiesced": true, "already_quiesced": res.Already, "repo": ref}
+	if res.Entry != nil {
+		payload["id"] = res.Entry.ID
+		payload["name"] = res.Entry.Name
+		payload["path"] = res.Entry.Path
+	}
+	b, _ := json.Marshal(payload)
+	return printQuiesceData(b, jsonOut, out, errw)
+}
+
+// cmdRepoResume 支持：
+//
+//	repo resume <id|name> [--json]
+func cmdRepoResume(root string, args []string, out, errw io.Writer) int {
+	var ref string
+	var jsonOut bool
+	for _, a := range args {
+		switch {
+		case a == "--json":
+			jsonOut = true
+		case strings.HasPrefix(a, "-"):
+			fmt.Fprintf(errw, "未知参数 %q\n", a)
+			return 2
+		default:
+			if ref != "" {
+				fmt.Fprintf(errw, "repo resume 只接受一个 <id|name>，多余参数 %q\n", a)
+				return 2
+			}
+			ref = a
+		}
+	}
+	if ref == "" {
+		fmt.Fprintln(errw, "repo resume 需要 <id|name>")
+		return 2
+	}
+	if data, routed, err := routeRepoCommand(root, "repo_resume", map[string]any{"repo": ref}); err != nil {
+		return repoFail(errw, err)
+	} else if routed {
+		return printRegisterData(data, jsonOut, out, errw)
+	}
+
+	h, err := openRepoHub(root)
+	if err != nil {
+		return repoFail(errw, err)
+	}
+	defer func() { _ = h.Close() }()
+	e, err := h.Resume(ref)
+	if err != nil {
+		return repoFail(errw, err)
+	}
+	b, _ := json.Marshal(e)
+	return printRegisterData(b, jsonOut, out, errw)
+}
+
 // cmdRepoScan 支持：
 //
 //	repo scan [--no-reconcile] [--prune-missing] [--dry-run] [--json]
@@ -458,6 +555,27 @@ func printUnregisterData(data json.RawMessage, jsonOut bool, out, errw io.Writer
 		return 0
 	}
 	fmt.Fprintf(out, "unregistered %s (%s)\n", r.Name, r.ID)
+	return 0
+}
+
+func printQuiesceData(data json.RawMessage, jsonOut bool, out, errw io.Writer) int {
+	if jsonOut {
+		return writeRawJSON(out, errw, data)
+	}
+	var r struct {
+		Already bool   `json:"already_quiesced"`
+		Repo    string `json:"repo"`
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return fail(errw, err)
+	}
+	if r.Already {
+		fmt.Fprintf(out, "already quiesced %s\n", r.Repo)
+		return 0
+	}
+	fmt.Fprintf(out, "quiesced %s (%s)\n", r.Name, r.ID)
 	return 0
 }
 

@@ -36,6 +36,12 @@ type UnregisterResult struct {
 	Already bool
 }
 
+// QuiesceResult 是 repo_quiesce 的结果。
+type QuiesceResult struct {
+	Entry   *Entry
+	Already bool
+}
+
 // ScanOptions 控制 repo_scan。
 type ScanOptions struct {
 	Reconcile    bool
@@ -373,19 +379,10 @@ func (h *Hub) ensureRepoMeta(path string, e *Entry, hasMeta bool) error {
 	return writeRepoMeta(path, repoMeta{ID: e.ID, Name: e.Name, DefaultLine: e.DefaultLine})
 }
 
-// Unregister 关闭 repo 并把它从 registry 可见集合中移除（保留全部数据）。
-func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	e, err := h.lookupLocked(ref)
-	if errors.Is(err, sql.ErrNoRows) {
-		return &UnregisterResult{Already: true}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
+// stopWorkspacesLocked 检查并卸载 repo 的活跃 overlay 工作区。
+// force=false 时遇到活跃 workspace/lease 返回 BusyError；force=true 时强制卸载。
+// 返回已打开的 repo（可能为 nil）。调用方必须持有 h.mu。
+func (h *Hub) stopWorkspacesLocked(e *Entry, force bool) (*repo.Repo, error) {
 	r := h.repos[e.ID]
 	if r == nil && fileExists(filepath.Join(e.Path, ".p37", "p37.db")) {
 		var oerr error
@@ -400,39 +397,57 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 			r = nil
 		}
 	}
+	if r == nil {
+		return nil, nil
+	}
+	all, lerr := r.WS.List()
+	if lerr != nil {
+		return nil, lerr
+	}
+	busyWS := make([]string, 0)
+	for i := range all {
+		w := &all[i]
+		if workspaceActive(w.State) {
+			busyWS = append(busyWS, w.ID)
+		}
+	}
+	leases, _ := r.DB.ListLeases()
+	busyLeases := make([]string, 0, len(leases))
+	for i := range leases {
+		busyLeases = append(busyLeases, leases[i].WsID+":"+leases[i].Path)
+	}
+	if !force && (len(busyWS) > 0 || len(busyLeases) > 0) {
+		return nil, &BusyError{Workspaces: busyWS, Leases: busyLeases}
+	}
+	// 关闭/detach 前必须把所有 overlay 工作区卸掉，否则应用卷无法安全 umount。
+	for i := range all {
+		w := &all[i]
+		mounted := w.Materialize == meta.MaterializeOverlay &&
+			(w.Mounted || r.MM.IsMounted(w.ID))
+		if !mounted {
+			continue
+		}
+		if err := r.MM.Unmount(w.ID); err != nil {
+			return nil, fmt.Errorf("hub: 卸载工作区 %s 失败: %w", w.ID, err)
+		}
+	}
+	return r, nil
+}
 
-	if r != nil {
-		all, lerr := r.WS.List()
-		if lerr != nil {
-			return nil, lerr
-		}
-		busyWS := make([]string, 0)
-		for i := range all {
-			w := &all[i]
-			if workspaceActive(w.State) {
-				busyWS = append(busyWS, w.ID)
-			}
-		}
-		leases, _ := r.DB.ListLeases()
-		busyLeases := make([]string, 0, len(leases))
-		for i := range leases {
-			busyLeases = append(busyLeases, leases[i].WsID+":"+leases[i].Path)
-		}
-		if !force && (len(busyWS) > 0 || len(busyLeases) > 0) {
-			return nil, &BusyError{Workspaces: busyWS, Leases: busyLeases}
-		}
-		// 注销前必须把所有 overlay 工作区卸掉，否则应用卷无法安全 detach。
-		for i := range all {
-			w := &all[i]
-			mounted := w.Materialize == meta.MaterializeOverlay &&
-				(w.Mounted || r.MM.IsMounted(w.ID))
-			if !mounted {
-				continue
-			}
-			if err := r.MM.Unmount(w.ID); err != nil {
-				return nil, fmt.Errorf("hub: 卸载工作区 %s 失败: %w", w.ID, err)
-			}
-		}
+// Unregister 关闭 repo 并把它从 registry 可见集合中移除（保留全部数据）。
+func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	e, err := h.lookupLocked(ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &UnregisterResult{Already: true}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := h.stopWorkspacesLocked(e, force); err != nil {
+		return nil, err
 	}
 	if err := h.dropCachedLocked(e); err != nil {
 		return nil, err
@@ -450,6 +465,56 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 		return nil, err
 	}
 	return &UnregisterResult{Entry: e}, nil
+}
+
+// Quiesce 关闭 repo 的 DB/overlay/锁，但保留 registry 行可见（不写 tombstone）。
+//
+// 这是应用卷 detach 的安全顺序：
+//  1. repo_quiesce：关闭 P37 持有的 SQLite/overlay/flock；
+//  2. guest umount；
+//  3. 成功后再 repo_unregister；失败则 repo_resume，repo 仍保持 registered。
+//
+// 这样即使 umount 因 busy 失败，也不会留下“VM 还在跑、repo 却 unregistered”的中间态。
+func (h *Hub) Quiesce(ref string, force bool) (*QuiesceResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	e, err := h.lookupLocked(ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &QuiesceResult{Already: true}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := h.stopWorkspacesLocked(e, force); err != nil {
+		return nil, err
+	}
+	if err := h.dropCachedLocked(e); err != nil {
+		return nil, err
+	}
+	return &QuiesceResult{Entry: e}, nil
+}
+
+// Resume 重新打开一个已 quiesce 的 repo（registry 必须仍可见）。
+// 幂等：已经打开时直接返回；repo 已 unregister 或路径不存在时返回错误。
+func (h *Hub) Resume(ref string) (*Entry, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	e, err := h.lookupLocked(ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, ref)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if h.repos[e.ID] == nil {
+		if _, err := h.openLocked(e.ID, true); err != nil {
+			return nil, err
+		}
+	}
+	h.enrichEntry(e)
+	return e, nil
 }
 
 // Scan 按 root 下实际存在的 repo.json 与 registry 做 reconcile。

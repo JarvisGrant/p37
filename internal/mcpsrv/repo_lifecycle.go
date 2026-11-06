@@ -129,6 +129,64 @@ func (s *Server) registerRepoLifecycle() {
 			return out, nil
 		})
 
+	s.register("repo_quiesce",
+		"关闭 repo 的 DB/overlay/锁但保留 registry 可见；用于 detach 前 quiesce，umount 成功后再 repo_unregister。",
+		`{"type":"object","properties":{
+		  "repo":{"type":"string","description":"repo id 或 name"},
+		  "force":{"type":"boolean","default":false}
+		},"required":["repo"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			if s.Hub == nil {
+				return nil, coded("invalid_argument", "单仓库模式不支持 repo_quiesce")
+			}
+			var a struct {
+				Repo  string `json:"repo"`
+				Force bool   `json:"force"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			if a.Repo == "" {
+				return nil, coded("invalid_argument", "repo 不能为空")
+			}
+			res, err := s.Hub.Quiesce(a.Repo, a.Force)
+			if err != nil {
+				return nil, err
+			}
+			out := map[string]any{
+				"quiesced":         true,
+				"already_quiesced": res.Already,
+				"repo":             a.Repo,
+			}
+			if res.Entry != nil {
+				out["id"] = res.Entry.ID
+				out["name"] = res.Entry.Name
+				out["path"] = res.Entry.Path
+			}
+			return out, nil
+		})
+
+	s.register("repo_resume",
+		"重新打开一个已 quiesce 的 repo；registry 必须仍可见。",
+		`{"type":"object","properties":{
+		  "repo":{"type":"string","description":"repo id 或 name"}
+		},"required":["repo"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			if s.Hub == nil {
+				return nil, coded("invalid_argument", "单仓库模式不支持 repo_resume")
+			}
+			var a struct {
+				Repo string `json:"repo"`
+			}
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, coded("invalid_argument", "参数解析失败: %v", err)
+			}
+			if a.Repo == "" {
+				return nil, coded("invalid_argument", "repo 不能为空")
+			}
+			return s.Hub.Resume(a.Repo)
+		})
+
 	s.register("repo_scan",
 		"扫描 root 下的直接子目录，把已挂载/已初始化的 repo 与 registry 做 reconcile。",
 		`{"type":"object","properties":{

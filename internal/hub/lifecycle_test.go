@@ -57,6 +57,49 @@ func writeMeta(t *testing.T, path, id, name, line string) {
 	}
 }
 
+func TestQuiesceKeepsRegistryAndResume(t *testing.T) {
+	h, root := newHub(t)
+	path := filepath.Join(root, "app-q")
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RegisterPath("app-q", path, hub.RegisterOptions{InitIfMissing: true}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := h.Get("app-q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.Quiesce("app-q", false)
+	if err != nil {
+		t.Fatalf("quiesce: %v", err)
+	}
+	if res.Already || res.Entry == nil || res.Entry.ID != before.ID {
+		t.Fatalf("quiesce result=%+v", res)
+	}
+	// quiesce 不能写 tombstone：repo 仍然可见，repo_health.registered 仍为 true。
+	if e, err := h.Get("app-q"); err != nil || e.ID != before.ID {
+		t.Fatalf("quiesce 后 repo 应保持 registered: e=%+v err=%v", e, err)
+	}
+	if _, err := h.Resume("app-q"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if e, err := h.Get("app-q"); err != nil || e.ID != before.ID {
+		t.Fatalf("resume 后 repo 应可用: e=%+v err=%v", e, err)
+	}
+}
+
+func TestQuiesceUnknownRepoIsIdempotent(t *testing.T) {
+	h, _ := newHub(t)
+	res, err := h.Quiesce("missing", false)
+	if err != nil {
+		t.Fatalf("quiesce missing: %v", err)
+	}
+	if !res.Already {
+		t.Fatalf("missing repo should be already_quiesced: %+v", res)
+	}
+}
+
 func TestRegisterPathInitIfMissing(t *testing.T) {
 	h, root := newHub(t)
 	path := filepath.Join(root, "app-a")

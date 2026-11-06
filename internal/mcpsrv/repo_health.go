@@ -47,6 +47,7 @@ func (s *Server) registerRepoHealth() {
 				}
 				in := repo.IntegrityOpen(s.R)
 				out := healthBase(in, nil, s.R.Root)
+				out["registered"] = true
 				if in.Initialized {
 					s.addHealthDetails(out, s.R, nil)
 				}
@@ -57,13 +58,25 @@ func (s *Server) registerRepoHealth() {
 			if err != nil {
 				return nil, err
 			}
+			// registered 是 registry 视角，不是磁盘完整性视角：repo 被
+			// repo_unregister 后数据仍然完整，但 line/version 工具已经不可用。
+			// P36 /ready 必须能区分“数据在但未注册”和“真正 ready”。
+			registered := false
 			var entry *hub.Entry
 			if a.Repo != "" {
 				if e, gerr := s.Hub.Get(a.Repo); gerr == nil {
 					entry = e
+					registered = true
+				}
+			}
+			if entry == nil && a.Path != "" {
+				if e, gerr := s.Hub.GetByPath(a.Path); gerr == nil {
+					entry = e
+					registered = true
 				}
 			}
 			out := healthBase(in, entry, in.Path)
+			out["registered"] = registered
 			if in.Initialized && withQuota && a.Repo != "" &&
 				entry != nil && filepath.Clean(entry.Path) != filepath.Clean(in.Path) {
 				appendWarning(out, "repo path changed; quota skipped until rebind/re-register")

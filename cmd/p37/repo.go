@@ -22,7 +22,7 @@ func cmdRepo(root string, args []string, out, errw io.Writer) int {
 		return 2
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(errw, "用法: p37 --root <root> repo <list|create|info|delete|register|unregister|scan> ...")
+		fmt.Fprintln(errw, "用法: p37 --root <root> repo <list|create|info|delete|register|unregister|quiesce|resume|scan> ...")
 		return 2
 	}
 
@@ -35,6 +35,10 @@ func cmdRepo(root string, args []string, out, errw io.Writer) int {
 		return cmdRepoRegister(root, rest, out, errw)
 	case "unregister":
 		return cmdRepoUnregister(root, rest, out, errw)
+	case "quiesce":
+		return cmdRepoQuiesce(root, rest, out, errw)
+	case "resume":
+		return cmdRepoResume(root, rest, out, errw)
 	case "scan":
 		return cmdRepoScan(root, rest, out, errw)
 	}
