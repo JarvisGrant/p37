@@ -19,8 +19,11 @@
 }
 ```
 
-## 本版重点（v0.4.10）
+## 本版重点（v0.4.11）
 
+- **补齐 line merge / line reset 事件**：`MergeLines` 发 `version_landed`，
+  `ResetLine` / `RevertTo` 发 `version_reverted`；所有会推进 head 的路径都能
+  触发 P36 刷新用量。
 - **已有仓库无需重建也能收到事件**：`P37_EVENT_SOCKET` 环境变量覆盖各 repo
   自己的 `.p37/config.toml`；L1 的 `p37d.service` 已设置
   `P37_EVENT_SOCKET=/srv/repos/.p36/p37-events.sock`。旧仓库的 config 没有
@@ -41,6 +44,11 @@
 - 事件只做 best-effort：socket 不存在/对端断开不影响 repo 操作。
 - 修复 CI 慢机上的 `TestStabilizeNoDelayWhenNothingRecent` 抖动。
 - `format_ver` 不变；旧 P36 可忽略 `repo_usage` 和事件。
+
+## 上一版（v0.4.10）
+
+- `P37_EVENT_SOCKET` 环境变量覆盖 repo config，已有仓库无需重建。
+- 修复 CI 慢机稳定点测试抖动。
 
 ## 上一版（v0.4.9）
 

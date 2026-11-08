@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
+	"github.com/chenyiwen/p37/internal/events"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/op"
@@ -170,6 +171,7 @@ func (r *Repo) ResetLine(name string, target string, force bool, reason string, 
 		return nil, err
 	}
 	_ = r.DB.RecordLineReset(name, l.Head, tid, reason, force, now)
+	r.emit(events.VersionReverted, tid.String(), "")
 	return r.DB.GetLine(name)
 }
 
@@ -671,6 +673,7 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 	res.VersionID = v.ID()
 	res.TargetHead = v.ID()
 	r.putIdem("line_merge", opt.IdempotencyKey, res)
+	r.emit(events.VersionLanded, v.ID().String(), "")
 	return res, nil
 }
 
@@ -848,6 +851,7 @@ func (r *Repo) RevertTo(versionID string, targetLine string, expectedHead string
 	if err := r.syncMainlineRefIfDefault(targetLine, v.ID()); err != nil {
 		return hash.ID{}, err
 	}
+	r.emit(events.VersionReverted, v.ID().String(), "")
 	return v.ID(), nil
 }
 
