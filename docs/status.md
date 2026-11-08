@@ -21,7 +21,9 @@
 `object_index` 聚合 objects/db/refs/config/durable/workspaces，P36 不再需要从
 卷外 NBD/mount/find 测量；新增 `[events] unix_socket` 语义事件，在 workspace
 变化、land/merge、revert、sync_pull、import、gc 完成后通知本机消费方，事件只
-带“哪个 repo 变了”，不带数据。事件是 best-effort，不影响 repo 操作。
+带“哪个 repo 变了”，不带数据。保留版本数从 200 降到 50，`P37_KEEP_VERSIONS`
+覆盖已有 repo；旧版本对象仍需 `p37 gc --prune` 才释放。事件是 best-effort，
+不影响 repo 操作。
 
 **v0.4.6 重点（不改 `format_ver`）**：修复 daemon 重启后 `.p37/overlay/bases`
 基底缓存永久不回收的问题：`New` 启动时登记磁盘上已有基底；daemon 打开仓库时
