@@ -1,4 +1,4 @@
-# 当前状态（v0.4.11）
+# 当前状态（v0.4.12）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.11` |
+| 发布版本 | `v0.4.12` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -17,7 +17,7 @@
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
 
-**v0.4.11 重点（不改 `format_ver`）**：新增只读 `repo_usage`，用
+**v0.4.12 重点（不改 `format_ver`）**：新增只读 `repo_usage`，用
 `object_index` 聚合 objects/db/refs/config/durable/workspaces，P36 不再需要从
 卷外 NBD/mount/find 测量；新增 `[events] unix_socket` 语义事件，在 workspace
 变化、land/merge、revert、sync_pull、import、gc 完成后通知本机消费方，事件只

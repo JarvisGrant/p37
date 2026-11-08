@@ -19,8 +19,9 @@
 }
 ```
 
-## 本版重点（v0.4.11）
+## 本版重点（v0.4.12）
 
+- **保留版本数从 200 降到 50**：`retention.keep_versions` 默认值和 P36 L1 模板都改为 50；`P37_KEEP_VERSIONS` 环境变量覆盖已有 repo 的旧 config。
 - **补齐 line merge / line reset 事件**：`MergeLines` 发 `version_landed`，
   `ResetLine` / `RevertTo` 发 `version_reverted`；所有会推进 head 的路径都能
   触发 P36 刷新用量。
@@ -44,6 +45,10 @@
 - 事件只做 best-effort：socket 不存在/对端断开不影响 repo 操作。
 - 修复 CI 慢机上的 `TestStabilizeNoDelayWhenNothingRecent` 抖动。
 - `format_ver` 不变；旧 P36 可忽略 `repo_usage` 和事件。
+
+## 上一版（v0.4.11）
+
+- 补齐 line merge / line reset 事件。
 
 ## 上一版（v0.4.10）
 

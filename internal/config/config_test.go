@@ -130,8 +130,9 @@ func TestRepoOptionsExportsStableDelayForWorkspaces(t *testing.T) {
 	}
 }
 
-func TestEventSocketEnvOverridesRepoConfig(t *testing.T) {
+func TestEnvOverridesRepoConfig(t *testing.T) {
 	t.Setenv("P37_EVENT_SOCKET", "/srv/repos/.p36/p37-events.sock")
+	t.Setenv("P37_KEEP_VERSIONS", "50")
 	cfg, err := Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +140,11 @@ func TestEventSocketEnvOverridesRepoConfig(t *testing.T) {
 	if cfg.Events.UnixSocket != "/srv/repos/.p36/p37-events.sock" {
 		t.Fatalf("events.unix_socket = %q", cfg.Events.UnixSocket)
 	}
-	if cfg.RepoOptions().EventsSocket != "/srv/repos/.p36/p37-events.sock" {
-		t.Fatalf("RepoOptions.EventsSocket = %q", cfg.RepoOptions().EventsSocket)
+	if cfg.Retention.KeepVersions != 50 {
+		t.Fatalf("retention.keep_versions = %d", cfg.Retention.KeepVersions)
+	}
+	opt := cfg.RepoOptions()
+	if opt.EventsSocket != "/srv/repos/.p36/p37-events.sock" || opt.GC.KeepVersions != 50 {
+		t.Fatalf("RepoOptions = %+v", opt)
 	}
 }

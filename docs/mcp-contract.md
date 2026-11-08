@@ -1,4 +1,4 @@
-# p37 MCP 契约（v0.4.11 / format_ver=2）
+# p37 MCP 契约（v0.4.12 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
 `internal/mcpsrv` 的注册为准；当前注册 68 个工具。
@@ -95,7 +95,7 @@
 
 ```json
 {
-  "p37_version": "0.4.11",
+  "p37_version": "0.4.12",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -667,7 +667,7 @@ repo_health { "repo": "my-app", "deep": true }
   "active_workspaces": 0,
   "leases": 0,
   "format_ver": 2,
-  "p37_version": "0.4.11",
+  "p37_version": "0.4.12",
   "warnings": ["mainline_head_missing"]
 }
 ```
@@ -685,7 +685,7 @@ repo_health { "repo": "my-app", "deep": true }
   "refs_match": true,
   "data_ok": true,
   "repo_db_ok": true,
-  "p37_version": "0.4.11",
+  "p37_version": "0.4.12",
   "quota": {"max_active":8,"active_used":2,"active_available":6,
             "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
             "landed":0,"broken":0,"workspaces":[]},
@@ -702,7 +702,7 @@ repo_health { "repo": "my-app", "deep": true }
 `registered=false` 表示磁盘数据可能完整，但 registry 已经把该 repo 隐藏
 （`repo_unregister` tombstone）。此时 `line/version/ws` 工具都会返回
 `repo_not_found`，P36 `/ready` 不能只凭 `initialized=true` 判 ready；应先
-`repo_register`（可带 `rebind=true`）恢复。`registered` 字段从 0.4.11 起提供；
+`repo_register`（可带 `rebind=true`）恢复。`registered` 字段从 0.4.12 起提供；
 旧版 p37 不返回该字段时调用方应按 `registered=true` 兼容。
 
 判定规则：repo 行存在、`root` 与 path 一致、`mainline_head` 非零、

@@ -44,7 +44,7 @@ max_matches = 64
 max_chain_length = 64
 
 [retention]
-keep_versions = 200
+keep_versions = 50
 keep_epochs = 20
 epoch_size = 50
 
@@ -119,7 +119,7 @@ max_package_bytes = 536870912
 | `merge.move_similarity` | `0.6` | 块移动相似度阈值 |
 | `merge.max_matches` | `64` | place 匹配上限 |
 | `merge.max_chain_length` | `64` | 重命名/移动链长度上限 |
-| `retention.keep_versions` | `200` | 每条 line 保留的祖先版本数 |
+| `retention.keep_versions` | `50` | 每条 line 保留的祖先版本数 |
 | `retention.keep_epochs` | `20` | 保留的 epoch 数 |
 | `retention.epoch_size` | `50` | 每个 epoch 的版本数 |
 | `daemon.socket` | `""` | 空则 `<root>/.p37/p37d.sock`；多仓库模式固定用该路径 |

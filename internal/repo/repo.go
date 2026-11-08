@@ -156,7 +156,7 @@ type GCOptions struct {
 
 // DefaultGCOptions 返回附录 B 的默认值。
 func DefaultGCOptions() GCOptions {
-	return GCOptions{KeepVersions: 200, KeepEpochs: 20, ScrubSample: 0.01, VerifyOnRead: "sample"}
+	return GCOptions{KeepVersions: 50, KeepEpochs: 20, ScrubSample: 0.01, VerifyOnRead: "sample"}
 }
 
 // DefaultLandQueueMax 是 land 队列的默认容量（附录 B 的 daemon.land_queue_max）。

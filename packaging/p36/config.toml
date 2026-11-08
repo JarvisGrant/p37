@@ -40,7 +40,7 @@ listen_http = false
 log_level = "info"
 
 [retention]
-keep_versions = 200
+keep_versions = 50
 keep_epochs = 20
 epoch_size = 50
 

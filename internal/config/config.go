@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -174,7 +175,7 @@ func Default() Config {
 			MaxMatches:     64,
 			MaxChainLength: 64,
 		},
-		Retention: RetentionConfig{KeepVersions: 200, KeepEpochs: 20, EpochSize: 50},
+		Retention: RetentionConfig{KeepVersions: 50, KeepEpochs: 20, EpochSize: 50},
 		Daemon: DaemonConfig{
 			HTTPAddr: "127.0.0.1", HTTPPort: 7757,
 			LogLevel: "info", LandQueueMax: 256,
@@ -229,11 +230,16 @@ func LoadTemplate(path string) (Config, error) {
 }
 
 // applyEnvOverrides 让 L1 unit 的全局环境覆盖各 repo 的 config.toml。
-// 目前只有事件 socket：已有仓库的 .p37/config.toml 是旧模板（没有 [events]），
-// 靠 P37_EVENT_SOCKET 保证升级后无需重建仓库也能收到事件。
+// 已有仓库的 .p37/config.toml 是旧模板（没有 [events]、keep_versions=200），
+// 靠这两个环境变量保证升级后无需重建仓库也能生效。
 func applyEnvOverrides(cfg *Config) {
 	if v := strings.TrimSpace(os.Getenv("P37_EVENT_SOCKET")); v != "" {
 		cfg.Events.UnixSocket = v
+	}
+	if v := strings.TrimSpace(os.Getenv("P37_KEEP_VERSIONS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.Retention.KeepVersions = n
+		}
 	}
 }
 

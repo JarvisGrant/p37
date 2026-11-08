@@ -25,6 +25,7 @@ Environment=P37_CONFIG=/usr/local/share/p37/config.toml
 # P36 guest agent 监听的事件 socket；覆盖各 repo 自己的 config.toml，
 # 保证已有仓库不需要重建也能收到 land/merge/workspace 事件。
 Environment=P37_EVENT_SOCKET=/srv/repos/.p36/p37-events.sock
+Environment=P37_KEEP_VERSIONS=50
 Environment=TMPDIR=/srv/repos/.p37/tmp
 # 默认 config.toml 是 materialize=auto：非 root overlay EPERM 时回退 copy。
 
