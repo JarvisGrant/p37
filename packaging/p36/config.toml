@@ -47,3 +47,8 @@ epoch_size = 50
 [gc]
 scrub_sample = 0.01
 verify_on_read = "sample"
+
+[events]
+# P36 guest agent 监听；P37 在 land/revert/sync/workspace 变化时写一行 JSON。
+# 为空表示关闭事件上报（P37 业务不受影响）。
+unix_socket = "/srv/repos/.p36/p37-events.sock"

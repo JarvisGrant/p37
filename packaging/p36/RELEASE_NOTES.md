@@ -1,4 +1,4 @@
-# p37 @VERSION@ — detach 生命周期与 repo 注册可见性
+# p37 @VERSION@ — repo 用量快照与语义事件
 
 ## 发布物
 
@@ -19,7 +19,23 @@
 }
 ```
 
-## 本版重点（v0.4.7）
+## 本版重点（v0.4.8）
+
+- **新增 MCP `repo_usage`**：只读返回仓库用量快照，P36 不再需要从卷外
+  NBD/mount/find 测量。字段：
+  - `head` / `version_count` / `epoch` / `last_land_ts`
+  - `objects.count/stored_bytes/raw_bytes`（来自 `object_index` 聚合）
+  - `db_bytes` / `refs_bytes` / `config_bytes`
+  - `durable_stored_bytes` / `durable_raw_bytes`
+  - `workspaces.count/logical_bytes/disk_bytes`
+  - `measured_at`
+- **新增 `[events] unix_socket` 语义事件**：P37 在 workspace 文件变化、
+  land/merge、revert、sync_pull、repo import、gc 完成后向本地 socket 写一行
+  JSON。P36 guest agent 监听后立即刷新 `repo_usage`，不再周期轮询。
+- 事件只做 best-effort：socket 不存在/对端断开不影响 repo 操作。
+- `format_ver` 不变；旧 P36 可忽略 `repo_usage` 和事件。
+
+## 上一版（v0.4.7）
 
 - **`repo_quiesce` / `repo_resume`**：把“关闭 repo 的 DB/overlay/flock”和
   “从 registry 隐藏”拆开。P36 detach 的顺序改为

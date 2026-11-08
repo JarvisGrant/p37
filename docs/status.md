@@ -1,4 +1,4 @@
-# 当前状态（v0.4.7）
+# 当前状态（v0.4.8）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,9 +7,9 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.7` |
+| 发布版本 | `v0.4.8` |
 | 仓库格式 | `format_ver = 2` |
-| MCP 工具 | 67 个（以 `internal/mcpsrv` 注册为准） |
+| MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
 | 测试 | `go test ./...` 全绿；`make cross` 通过 |
 
@@ -17,13 +17,11 @@
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
 
-**v0.4.7 重点（不改 `format_ver`）**：把应用卷 detach 拆成
-`repo_quiesce → guest umount → repo_unregister`。新增 `repo_quiesce` /
-`repo_resume`：前者只关闭 repo 的 DB/overlay/flock、保留 registry 可见，后者在
-umount 失败时恢复；`repo_health` 新增 `registered` 字段，调用方可以区分
-“数据完整但 registry 已隐藏”和真正 ready。`repo_register` 继续作为 tombstone
-的显式恢复入口。这样 P36 在 umount busy 时不会留下“VM 还在跑、repo 却
-repo_not_found”的中间态。
+**v0.4.8 重点（不改 `format_ver`）**：新增只读 `repo_usage`，用
+`object_index` 聚合 objects/db/refs/config/durable/workspaces，P36 不再需要从
+卷外 NBD/mount/find 测量；新增 `[events] unix_socket` 语义事件，在 workspace
+变化、land/merge、revert、sync_pull、import、gc 完成后通知本机消费方，事件只
+带“哪个 repo 变了”，不带数据。事件是 best-effort，不影响 repo 操作。
 
 **v0.4.6 重点（不改 `format_ver`）**：修复 daemon 重启后 `.p37/overlay/bases`
 基底缓存永久不回收的问题：`New` 启动时登记磁盘上已有基底；daemon 打开仓库时

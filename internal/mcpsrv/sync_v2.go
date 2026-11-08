@@ -109,6 +109,7 @@ func (s *Server) registerSyncV2() {
 			if err != nil {
 				return nil, classifySyncErr(err)
 			}
+			rr.EmitSyncPulled()
 			return res, nil
 		})
 

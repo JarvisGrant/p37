@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chenyiwen/p37/internal/events"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/op"
@@ -359,6 +360,7 @@ func (r *Repo) Land(wsID string) (*LandResult, error) {
 		return res, ErrLandConflict
 	}
 	_ = r.DB.ClearConflicts(wsID)
+	r.emit(events.VersionLanded, res.VersionID.String(), wsID)
 	return res, nil
 }
 
@@ -452,6 +454,7 @@ func (r *Repo) Revert(versionID hash.ID) (hash.ID, error) {
 	if err := r.DB.SetMainlineHead(v.ID(), rp.VersionCount+1, uint64(epoch)); err != nil {
 		return hash.ID{}, err
 	}
+	r.emit(events.VersionReverted, v.ID().String(), "")
 	return v.ID(), nil
 }
 

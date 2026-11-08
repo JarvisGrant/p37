@@ -6,6 +6,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/codec"
+	"github.com/chenyiwen/p37/internal/events"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 )
@@ -298,6 +299,7 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	if err := r.Store.Flush(); err != nil {
 		return rep, err
 	}
+	r.emit(events.GCCompleted, "", "")
 	return rep, nil
 }
 

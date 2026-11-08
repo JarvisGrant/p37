@@ -262,6 +262,23 @@ func (s *Server) registerRepoLineRead() {
 			return map[string]any{"repo": repoArg(raw), "root": rr.Root, "disk_bytes": bytes}, nil
 		})
 
+	s.register("repo_usage", "返回仓库只读用量快照（durable/objects/db/refs/workspaces）。",
+		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
+		func(ctx context.Context, raw json.RawMessage) (any, error) {
+			rr, err := s.repoFor(repoArg(raw))
+			if err != nil {
+				return nil, err
+			}
+			u, err := rr.Usage()
+			if err != nil {
+				return nil, err
+			}
+			if name := repoArg(raw); name != "" {
+				u.Repo = name
+			}
+			return u, nil
+		})
+
 	s.register("repo_import", "把目录导入空仓库作为 v0。未初始化的已注册仓库等价于 repo_init(mode=import)。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"dir":{"type":"string"},"task":{"type":"string"},"force":{"type":"boolean","default":false},"idempotency_key":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {

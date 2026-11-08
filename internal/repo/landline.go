@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chenyiwen/p37/internal/capture"
+	"github.com/chenyiwen/p37/internal/events"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/op"
@@ -503,7 +504,11 @@ func (r *Repo) LandIntoWithOptions(wsID string, opt LandIntoOptions) (*LandResul
 	if res, ok := checkLanded(); ok {
 		return res, nil
 	}
-	return r.landIntoLocked(wsID, opt)
+	res, err := r.landIntoLocked(wsID, opt)
+	if err == nil && res != nil && !res.VersionID.IsZero() {
+		r.emit(events.VersionLanded, res.VersionID.String(), wsID)
+	}
+	return res, err
 }
 
 func (r *Repo) landIntoLocked(wsID string, opt LandIntoOptions) (*LandResult, error) {

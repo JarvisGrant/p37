@@ -13,6 +13,7 @@ import (
 
 	"github.com/chenyiwen/p37/internal/capture"
 	"github.com/chenyiwen/p37/internal/cas"
+	"github.com/chenyiwen/p37/internal/events"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/mountmgr"
@@ -50,6 +51,9 @@ type Repo struct {
 	// exportRoot 非空时，repo_export 的 dest_dir 必须位于该目录之下。
 	// 这是防止 MCP 调用方把文件写到任意路径的服务端护栏。
 	exportRoot string
+
+	// eventsSocket 是语义事件的本地 unix socket；为空表示不上报。
+	eventsSocket string
 
 	// syncMu 避免同一 repo 同时跑 push/fetch/pull。
 	syncMu sync.Mutex
@@ -116,6 +120,8 @@ type Options struct {
 	// ExportRoot 限制 repo_export 的目标目录范围（绝对路径）。
 	// 为空表示只要求目标在仓库目录之外；非空时还必须位于该目录之下。
 	ExportRoot string
+	// EventsSocket 是语义事件上报的本地 unix socket；为空表示关闭。
+	EventsSocket string
 	// MaxActive / MaxDepth / MaxFanout 覆盖工作区上限（附录 B）。
 	// 0 表示硬上限；只能调小，不能调大（D20）。
 	MaxActive int
@@ -297,6 +303,7 @@ func Open(root string, opt Options) (*Repo, error) {
 		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
 		redactTaskDesc: opt.RedactTaskDesc,
 		exportRoot:     opt.ExportRoot,
+		eventsSocket:   opt.EventsSocket,
 		landSem:        make(chan struct{}, qmax)}
 	// 步骤 3：恢复活跃工作区的挂载。**必须在 land 修复之后**，因为修复可能
 	// 焚毁/恢复工作区。只重建挂载，upper 层原样保留。
@@ -505,6 +512,7 @@ func (r *Repo) ImportWithOptions(srcDir string, opt ImportOptions) (hash.ID, err
 	}
 	_ = UpdateInitState(filepath.Join(r.Root, ".p37"), r.Root, name, def,
 		res.VersionID.String(), res.Imported)
+	r.emit(events.RepoImported, res.VersionID.String(), "")
 	return res.VersionID, nil
 }
 

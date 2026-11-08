@@ -99,6 +99,15 @@ func (o *ObjectIndex) Count() (int64, error) {
 	return n, err
 }
 
+// Stats 返回索引中的对象数、存储字节数与原始字节数。
+//
+// object_index 只是缓存；调用方若需要“绝对真相”可先 RebuildIndex。
+func (o *ObjectIndex) Stats() (count, storedBytes, rawBytes int64, err error) {
+	err = o.db.sql.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size),0), COALESCE(SUM(raw_size),0)
+		FROM object_index`).Scan(&count, &storedBytes, &rawBytes)
+	return
+}
+
 // Clear 清空索引（重建前使用）。
 func (o *ObjectIndex) Clear() error {
 	return o.db.withWrite(func(tx *sql.Tx) error {

@@ -65,6 +65,11 @@ redact_task_desc = false
 scrub_sample = 0.01
 verify_on_read = "sample"            # off | sample | always
 
+[events]
+# P36 guest agent 监听的本地 unix socket；为空表示关闭事件上报。
+# P37 在 workspace 变化 / land / revert / sync_pull / gc 后写一行 JSON。
+unix_socket = "/srv/repos/.p36/p37-events.sock"
+
 [remote]
 enabled = false
 backend = "s3"                       # s3 | dir
@@ -127,6 +132,7 @@ max_package_bytes = 536870912
 | `daemon.land_queue_max` | `256` | land 队列容量；满返回 `land_queue_full` |
 | `journal.redact_task_desc` | `false` | 为真时 journal 不落任务描述原文 |
 | `gc.scrub_sample` | `0.01` | scrub 抽样比例 |
+| `events.unix_socket` | `""` | 语义事件上报的本地 unix socket；空=关闭 |
 | `gc.verify_on_read` | `sample` | 读时校验策略：off/sample/always |
 | `remote.enabled` | `false` | 是否启用远端同步 |
 | `remote.backend` | `s3` | `s3` 或 `dir` |

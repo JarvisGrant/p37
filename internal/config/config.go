@@ -31,6 +31,7 @@ type Config struct {
 	Journal   JournalConfig   `toml:"journal"`
 	GC        GCConfig        `toml:"gc"`
 	Remote    RemoteConfig    `toml:"remote"`
+	Events    EventsConfig    `toml:"events"`
 }
 
 // RepoConfig 对应 [repo]。
@@ -99,6 +100,14 @@ type DaemonConfig struct {
 // JournalConfig 对应 [journal]。
 type JournalConfig struct {
 	RedactTaskDesc bool `toml:"redact_task_desc"`
+}
+
+// EventsConfig 对应 [events]。
+//
+// UnixSocket 是 P37 写语义事件的本地 unix socket（P36 guest agent 监听）。
+// 为空时关闭事件上报；P37 只做 best-effort，不因为 socket 不在而阻塞业务。
+type EventsConfig struct {
+	UnixSocket string `toml:"unix_socket"`
 }
 
 // GCConfig 对应 [gc]。
@@ -324,6 +333,7 @@ func (c Config) RepoOptions() repo.Options {
 		MaxHidden:      c.Workspace.MaxHidden,
 		MaxMatches:     c.Merge.MaxMatches,
 		TombstoneTTL:   Duration(c.Workspace.TombstoneTTL, 168*time.Hour),
+		EventsSocket:   c.Events.UnixSocket,
 		GC: repo.GCOptions{
 			KeepVersions: c.Retention.KeepVersions,
 			KeepEpochs:   c.Retention.KeepEpochs,

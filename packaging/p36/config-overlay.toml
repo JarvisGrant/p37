@@ -39,3 +39,6 @@ epoch_size = 50
 [gc]
 scrub_sample = 0.01
 verify_on_read = "sample"
+
+[events]
+unix_socket = "/srv/repos/.p36/p37-events.sock"
