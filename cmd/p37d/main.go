@@ -188,8 +188,7 @@ func runDaemon(root string, serveHTTP bool) error {
 		FallbackToRoot: watchFallbackNeeded(),
 		Logger:         logger,
 		OnSync: func(wsID string, took time.Duration) {
-			r.EmitWorkspaceChanged(wsID)
-			// 只有 info 及以上才逐条打印：debug 级别下采集很频繁。
+			// 事件由 workspace.Options.OnSync 统一发出，这里只做日志。
 			if cfg.LogLevel() == "info" || cfg.LogLevel() == "debug" {
 				logger.Printf("自动采集 %s 完成（%s）", wsID, took.Round(time.Millisecond))
 			}

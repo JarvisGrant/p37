@@ -19,7 +19,7 @@
 }
 ```
 
-## 本版重点（v0.4.8）
+## 本版重点（v0.4.9）
 
 - **新增 MCP `repo_usage`**：只读返回仓库用量快照，P36 不再需要从卷外
   NBD/mount/find 测量。字段：
@@ -32,8 +32,17 @@
 - **新增 `[events] unix_socket` 语义事件**：P37 在 workspace 文件变化、
   land/merge、revert、sync_pull、repo import、gc 完成后向本地 socket 写一行
   JSON。P36 guest agent 监听后立即刷新 `repo_usage`，不再周期轮询。
+- **`workspace.Options.OnSync`**：所有成功采集（MCP `ws_sync`、daemon watcher、
+  子工作区）统一发 `workspace_changed`；root 多仓库模式也能收到文件变化事件。
 - 事件只做 best-effort：socket 不存在/对端断开不影响 repo 操作。
+- 修复 CI 慢机上的 `TestStabilizeNoDelayWhenNothingRecent` 抖动。
 - `format_ver` 不变；旧 P36 可忽略 `repo_usage` 和事件。
+
+## 上一版（v0.4.8）
+
+- 新增 `repo_usage` 与 `[events] unix_socket` 的首版实现。
+- `workspace_changed` 当时只在单仓库 daemon 的 watcher 触发；root 多仓库模式
+  由 v0.4.9 的 `workspace.Options.OnSync` 补齐。
 
 ## 上一版（v0.4.7）
 

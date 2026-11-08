@@ -178,6 +178,8 @@ type Options struct {
 	MaxMatches int
 	// MaxHidden 是隐藏 merge/preview 工作区上限（不占用户 max_active）。
 	MaxHidden int
+	// OnSync 在每次成功采集后回调（用于 P36 的 workspace_changed 事件）。
+	OnSync func(wsID string)
 }
 
 // maxMatches 返回生效的 place 匹配上限。
@@ -812,6 +814,9 @@ func (m *Manager) syncLocked(wsID string, strict bool) error {
 	}
 	if w.State == meta.StateBroken {
 		_ = m.db.UpdateWorkspaceState(wsID, meta.StateActive, ts)
+	}
+	if m.opt.OnSync != nil {
+		m.opt.OnSync(wsID)
 	}
 	return nil
 }

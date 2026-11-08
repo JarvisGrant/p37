@@ -260,6 +260,7 @@ func Open(root string, opt Options) (*Repo, error) {
 		copt.ForceHash = true
 	}
 
+	var r *Repo
 	ws := workspace.New(root, db, store, mm, workspace.Options{
 		Ignore:             ig,
 		Capture:            copt,
@@ -270,6 +271,11 @@ func Open(root string, opt Options) (*Repo, error) {
 		MaxFanout:          opt.MaxFanout,
 		MaxHidden:          opt.MaxHidden,
 		MaxMatches:         opt.MaxMatches,
+		OnSync: func(wsID string) {
+			if r != nil {
+				r.EmitWorkspaceChanged(wsID)
+			}
+		},
 	})
 
 	// 启动修复：补做/回滚未完成的 land（§7.7 步骤 2）。
@@ -299,7 +305,7 @@ func Open(root string, opt Options) (*Repo, error) {
 	// 读时校验策略（§8.3、附录 B 的 gc.verify_on_read）。
 	store.SetVerifyOnRead(cas.ParseVerifyMode(gc.VerifyOnRead))
 
-	r := &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
+	r = &Repo{Root: root, DB: db, Store: store, MM: mm, WS: ws,
 		Ignore: ig, CaptureOpt: copt, epochSize: epoch, gc: gc,
 		redactTaskDesc: opt.RedactTaskDesc,
 		exportRoot:     opt.ExportRoot,
