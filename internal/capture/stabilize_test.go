@@ -112,10 +112,13 @@ func TestStabilizeAcceptsQuietFile(t *testing.T) {
 // 窗口，并让文件老于该窗口。
 func TestStabilizeNoDelayWhenNothingRecent(t *testing.T) {
 	e := newEnv(t)
-	e.opt.StableDelay = 300 * time.Millisecond
+	// 窗口必须明显大于一次小仓库 build 的耗时：CI 慢机曾出现 387ms 的
+	// build 被 300ms 窗口误判成“稳定点等待”。这里用 2s，验证的是语义，
+	// 不是宿主/CI 的具体速度。
+	e.opt.StableDelay = 2 * time.Second
 	e.opt.StableRetries = 3
 	e.write("a.txt", "a\n")
-	time.Sleep(400 * time.Millisecond) // 让 mtime 老于 stableDelay
+	time.Sleep(2100 * time.Millisecond) // 让 mtime 老于 stableDelay
 
 	var skipped []string
 	e.opt.OnUnstable = func(p string) { skipped = append(skipped, p) }
