@@ -19,8 +19,12 @@
 }
 ```
 
-## 本版重点（v0.4.9）
+## 本版重点（v0.4.10）
 
+- **已有仓库无需重建也能收到事件**：`P37_EVENT_SOCKET` 环境变量覆盖各 repo
+  自己的 `.p37/config.toml`；L1 的 `p37d.service` 已设置
+  `P37_EVENT_SOCKET=/srv/repos/.p36/p37-events.sock`。旧仓库的 config 没有
+  `[events]` 也能工作。
 - **新增 MCP `repo_usage`**：只读返回仓库用量快照，P36 不再需要从卷外
   NBD/mount/find 测量。字段：
   - `head` / `version_count` / `epoch` / `last_land_ts`
@@ -38,11 +42,15 @@
 - 修复 CI 慢机上的 `TestStabilizeNoDelayWhenNothingRecent` 抖动。
 - `format_ver` 不变；旧 P36 可忽略 `repo_usage` 和事件。
 
-## 上一版（v0.4.8）
+## 上一版（v0.4.9）
 
 - 新增 `repo_usage` 与 `[events] unix_socket` 的首版实现。
 - `workspace_changed` 当时只在单仓库 daemon 的 watcher 触发；root 多仓库模式
   由 v0.4.9 的 `workspace.Options.OnSync` 补齐。
+
+## 上一版（v0.4.8）
+
+- 新增 `repo_usage` 与 `[events] unix_socket` 的首版实现。
 
 ## 上一版（v0.4.7）
 

@@ -129,3 +129,17 @@ func TestRepoOptionsExportsStableDelayForWorkspaces(t *testing.T) {
 			o.Capture.StableRetries, o.Capture.StableDelay)
 	}
 }
+
+func TestEventSocketEnvOverridesRepoConfig(t *testing.T) {
+	t.Setenv("P37_EVENT_SOCKET", "/srv/repos/.p36/p37-events.sock")
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Events.UnixSocket != "/srv/repos/.p36/p37-events.sock" {
+		t.Fatalf("events.unix_socket = %q", cfg.Events.UnixSocket)
+	}
+	if cfg.RepoOptions().EventsSocket != "/srv/repos/.p36/p37-events.sock" {
+		t.Fatalf("RepoOptions.EventsSocket = %q", cfg.RepoOptions().EventsSocket)
+	}
+}

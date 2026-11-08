@@ -19,6 +19,7 @@ Environment=P37_REPO=/srv/repo
 Environment=P37_PAYLOAD_LABEL=P37PAYLOAD
 Environment=P37_PAYLOAD_MOUNT=/run/p37-payload
 Environment=P37_CONFIG=/usr/local/share/p37/config-overlay.toml
+Environment=P37_EVENT_SOCKET=/srv/repos/.p36/p37-events.sock
 Environment=TMPDIR=/srv/repos/.p37/tmp
 
 ExecStart=/usr/local/bin/p37-run

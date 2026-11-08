@@ -199,7 +199,9 @@ func Load(root string) (Config, error) {
 	cfg, err := LoadTemplate(Path(root))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Default(), nil
+			cfg = Default()
+			applyEnvOverrides(&cfg)
+			return cfg, nil
 		}
 		return cfg, err
 	}
@@ -222,7 +224,17 @@ func LoadTemplate(path string) (Config, error) {
 	if _, err := toml.Decode(string(b), &cfg); err != nil {
 		return cfg, err
 	}
+	applyEnvOverrides(&cfg)
 	return cfg, nil
+}
+
+// applyEnvOverrides 让 L1 unit 的全局环境覆盖各 repo 的 config.toml。
+// 目前只有事件 socket：已有仓库的 .p37/config.toml 是旧模板（没有 [events]），
+// 靠 P37_EVENT_SOCKET 保证升级后无需重建仓库也能收到事件。
+func applyEnvOverrides(cfg *Config) {
+	if v := strings.TrimSpace(os.Getenv("P37_EVENT_SOCKET")); v != "" {
+		cfg.Events.UnixSocket = v
+	}
 }
 
 // SocketPath 返回 daemon 的 unix socket 路径。
