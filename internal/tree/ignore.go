@@ -51,8 +51,24 @@ var DefaultIgnorePatterns = []string{
 	"target/",
 	"dist/",
 	"build/",
+	"coverage/",
 	".idea/",
 	".DS_Store",
+	// 构建/测试/编辑器产物：不是源码成果，不应进入版本树，否则会被
+	// 工作卡写范围（path_not_allowed）或并入冲突误伤。
+	"*.tsbuildinfo",
+	"*.log",
+	"*.tmp",
+	"*.temp",
+	"*.swp",
+	"*.swo",
+	"*.orig",
+	"*.rej",
+	"*.pyc",
+	"*.pyo",
+	".eslintcache",
+	".stylelintcache",
+	"Thumbs.db",
 }
 
 // IgnoreFileName 是仓库根的忽略文件名（§3.4）。

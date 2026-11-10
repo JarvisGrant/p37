@@ -65,3 +65,25 @@ func TestLoadIgnoreFileBadSyntaxReportsLine(t *testing.T) {
 		t.Fatal("非法模式应报语法错误")
 	}
 }
+
+func TestDefaultIgnoreCoversBuildArtifacts(t *testing.T) {
+	ig, err := tree.NewIgnore(true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		"web/tsconfig.tsbuildinfo",
+		"server/tsconfig.tsbuildinfo",
+		".eslintcache",
+		"app.log",
+		"tmp.swp",
+		"a.pyc",
+	} {
+		if !ig.Match(p, false) {
+			t.Fatalf("expected default ignore to cover %s", p)
+		}
+	}
+	if ig.Match("src/app.ts", false) {
+		t.Fatal("source file must not be ignored")
+	}
+}

@@ -1,4 +1,4 @@
-# 当前状态（v0.4.12）
+# 当前状态（v0.4.13）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.12` |
+| 发布版本 | `v0.4.13` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,12 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.4.13 重点（不改 `format_ver`）**：默认忽略集补齐构建/测试/编辑器产物
+（`*.tsbuildinfo`、`*.log`、`*.tmp`、`*.swp`、`*.pyc`、`.eslintcache`、
+`coverage/`、`Thumbs.db` 等），这些文件不再进入版本树，避免被工作卡写范围
+（`path_not_allowed`）或并入冲突误伤。内置忽略集始终生效，已有仓库无需重建；
+用户仍可在 `.p37ignore` 追加规则。
 
 **v0.4.12 重点（不改 `format_ver`）**：新增只读 `repo_usage`，用
 `object_index` 聚合 objects/db/refs/config/durable/workspaces，P36 不再需要从

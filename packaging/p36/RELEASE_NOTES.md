@@ -19,6 +19,18 @@
 }
 ```
 
+## 本版重点（v0.4.13）
+
+- **默认忽略构建/测试/编辑器产物**：`internal/tree.DefaultIgnorePatterns` 新增
+  `*.tsbuildinfo`、`*.log`、`*.tmp`、`*.temp`、`*.swp`、`*.swo`、`*.orig`、
+  `*.rej`、`*.pyc`、`*.pyo`、`.eslintcache`、`.stylelintcache`、`coverage/`、
+  `Thumbs.db`。这些文件不再进入版本树，避免被工作卡写范围
+  （`path_not_allowed`）或并入冲突误伤（会话 #7 的 `web/tsconfig.tsbuildinfo`）。
+- 内置忽略集始终生效，已有仓库无需重建、无需迁移 `format_ver`；用户仍可在
+  仓库根的 `.p37ignore` 追加规则。
+- 新增 `TestDefaultIgnoreCoversBuildArtifacts` 回归用例，确保源码文件不会被
+  误伤。
+
 ## 本版重点（v0.4.12）
 
 - **保留版本数从 200 降到 50**：`retention.keep_versions` 默认值和 P36 L1 模板都改为 50；`P37_KEEP_VERSIONS` 环境变量覆盖已有 repo 的旧 config。
