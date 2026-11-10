@@ -1,4 +1,4 @@
-# p37 @VERSION@ — repo 用量快照与语义事件
+# p37 @VERSION@ — 发布说明
 
 ## 发布物
 
