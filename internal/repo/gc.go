@@ -260,6 +260,18 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	}
 
 	// -- 5. 执行 ------------------------------------------------------------
+	// 缓存必须在删对象之前清空：stat_cache / ws_effective_tree 里的对象 id
+	// 只被缓存引用，GC 会判定不可达。先删对象再清缓存会留下一个悬空引用窗口。
+	// 两者都是纯缓存，清掉后下一次访问会重新构建。
+	n, err := r.DB.StatCache().ClearAll()
+	if err != nil {
+		return rep, err
+	}
+	rep.StatCacheCleared = n
+	if _, err := r.DB.ClearEffectiveTrees(); err != nil {
+		return rep, err
+	}
+
 	// 顺序要紧：**先剪版本行、再删对象**。反过来会出现「版本还在但对象没了」
 	// 的窗口，此时若进程被杀，仓库就处于损坏状态。
 	for _, vid := range dropVersions {
@@ -285,14 +297,6 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	rep.PackBytesReclaimed = sw.BytesReclaimed
 	rep.BytesReclaimed += sw.BytesReclaimed
 
-	// stat 缓存必须清空：它可能持有「只被缓存引用」的中间 Tree 对象 id，
-	// 而那些对象刚刚被扫掉了。留着就是悬空引用 —— 下一次采集会直接返回一个
-	// 不存在的对象 id，树立刻烂掉。它是纯缓存，清掉即可。
-	n, err := r.DB.StatCache().ClearAll()
-	if err != nil {
-		return rep, err
-	}
-	rep.StatCacheCleared = n
 	rep.Bootstrapped = true
 
 	// 对象落盘后再返回（与 land 的提交点纪律一致）。

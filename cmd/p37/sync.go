@@ -277,6 +277,10 @@ func syncPush(root string, args []string, out, errw io.Writer) int {
 	defer func() { _ = r.Close() }()
 	res, err := remotesync.Push(context.Background(), r, remote, ids)
 	if err != nil {
+		if errors.Is(err, remotesync.ErrUpToDate) {
+			fmt.Fprintln(out, "已是最新，无需推送")
+			return 0
+		}
 		return fail(errw, err)
 	}
 	fmt.Fprintf(out, "已上传 %d 个包（%s），远端 head = %s\n",

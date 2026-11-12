@@ -138,9 +138,16 @@ func (m *Manager) acquireClaim(tool, key string, c meta.WSClaim) (*meta.WSClaim,
 		cur, err := meta.ParseWSClaim(rec.Value)
 		if err != nil {
 			// 损坏记录：直接覆盖，避免永久卡死。
-			if ok, _ := m.db.TakeOverKV(tool, key, mustClaim(c, now, now+claimLease.Milliseconds()), now, now+claimLease.Milliseconds()); ok {
+			if ok, terr := m.db.TakeOverKV(tool, key, mustClaim(c, now, now+claimLease.Milliseconds()), now, now+claimLease.Milliseconds()); terr != nil {
+				return nil, false, terr
+			} else if ok {
 				return &c, true, nil
 			}
+			// 损坏记录可能仍有未来 expires_ts，不能无退避忙等。
+			if time.Now().After(deadline) {
+				return nil, false, &OpenInProgressError{WSID: c.WSID, RetryAfterMS: 250}
+			}
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		if cur.State == claimReady {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/version"
@@ -519,9 +518,11 @@ func (d *DB) FindVersionByIdempotency(tool, key string, now int64) (*version.Ver
 	if err != nil {
 		return nil, err
 	}
-	if ts > 0 && now-ts > int64(7*24*time.Hour/time.Millisecond) {
-		return nil, nil
-	}
+	// 不要在这里过期：version 上的 (idempotency_tool, idempotency_key)
+	// 是永久唯一索引。若 7 天后返回 nil，调用方会尝试重新插入并撞 UNIQUE。
+	// 幂等键本就应由调用方保证不复用；保留历史结果比制造约束错误安全。
+	_ = ts
+	_ = now
 	id, err := hash.Parse(idStr)
 	if err != nil {
 		return nil, err

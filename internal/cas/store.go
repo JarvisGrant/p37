@@ -318,7 +318,13 @@ func (s *Store) ReadFileData(id hash.ID) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, fc.TotalSize)
+	// 不要按声明值一次性预分配：损坏/恶意 FileContent 的 TotalSize 可能极大。
+	// 分块读入时 append 自然增长，容量提示只作为小文件的优化。
+	capHint := fc.TotalSize
+	if capHint > 1<<20 {
+		capHint = 1 << 20
+	}
+	out := make([]byte, 0, capHint)
 	for _, cid := range fc.Chunks {
 		b, err := s.GetBlob(cid)
 		if err != nil {
@@ -372,7 +378,11 @@ func (s *Store) ReadFilePrefix(id hash.ID, max int64) ([]byte, int64, error) {
 	if max <= 0 || max > fc.TotalSize {
 		max = fc.TotalSize
 	}
-	out := make([]byte, 0, max)
+	capHint := max
+	if capHint > 1<<20 {
+		capHint = 1 << 20
+	}
+	out := make([]byte, 0, capHint)
 	for _, cid := range fc.Chunks {
 		if int64(len(out)) >= max {
 			break
@@ -509,10 +519,15 @@ func (s *Store) ListObjects() ([]ObjectInfo, error) {
 //
 // 对象不存在不报错：GC 是幂等的，重复运行或与并发写入竞争都不应失败。
 func (s *Store) DeleteObject(id hash.ID) error {
+	// 先删索引、再删文件。反过来如果进程在两步之间崩溃，索引会声称对象
+	// 仍存在，后续 put 的去重快路径会永远跳过重写，形成永久性数据丢失。
+	if err := s.idx.Remove(id); err != nil {
+		return err
+	}
 	if err := s.bs.Delete(keyFor(id)); err != nil && !errors.Is(err, ErrNotExist) {
 		return err
 	}
-	return s.idx.Remove(id)
+	return nil
 }
 
 // GetStored 返回对象的**存储字节**（0x01||type||zstd(raw)），不解压。

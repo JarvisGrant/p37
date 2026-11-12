@@ -173,6 +173,9 @@ func (s *Server) repoFor(ref string) (*repo.Repo, error) {
 	}
 	r, err := s.Resolve(ref)
 	if err != nil {
+		if errors.Is(err, hub.ErrRepoQuiesced) {
+			return nil, coded("repo_quiesced", "仓库 %q 已 quiesce，请先 repo_resume", ref)
+		}
 		return nil, coded("repo_not_found", "仓库 %q 不存在: %v", ref, err)
 	}
 	return r, nil
@@ -180,7 +183,11 @@ func (s *Server) repoFor(ref string) (*repo.Repo, error) {
 
 // Handler 返回可直接挂到 HTTP/unix socket 上的 Streamable HTTP handler。
 func (s *Server) Handler() *mcp.StreamableHTTPHandler {
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.Srv }, nil)
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.Srv }, &mcp.StreamableHTTPOptions{
+		// 不设时 SDK 会永久保留空闲 SSE 会话；长时间运行的守护进程会累积
+		// goroutine/连接。30 分钟足够覆盖正常的 MCP 调用间隔。
+		SessionTimeout: 30 * time.Minute,
+	})
 }
 
 // toolFunc 实现一个工具。
@@ -579,6 +586,10 @@ func classify(err error) (code, msg string, detail any) {
 			}
 		}
 		return "repo_busy", err.Error(), nil
+	case errors.Is(err, hub.ErrRepoQuiesced):
+		return "repo_quiesced", err.Error(), map[string]any{
+			"retryable": true, "next_action": "repo_resume",
+		}
 	case errors.Is(err, hub.ErrRegistryBusy):
 		return "registry_busy", err.Error(), nil
 	case errors.Is(err, hub.ErrRepoLocked):
@@ -618,7 +629,7 @@ func decode[T any](raw json.RawMessage) (T, error) {
 		return v, nil
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return v, coded("internal", "参数解析失败: %v", err)
+		return v, coded("invalid_argument", "参数解析失败: %v", err)
 	}
 	return v, nil
 }
@@ -628,11 +639,11 @@ func nowMS() int64 { return time.Now().UnixMilli() }
 // parseKey 解析冲突 key。
 func parseKey(s string) (hash.ID, error) {
 	if s == "" {
-		return hash.ID{}, coded("internal", "缺少 key")
+		return hash.ID{}, coded("invalid_argument", "缺少 key")
 	}
 	id, err := hash.Parse(s)
 	if err != nil {
-		return hash.ID{}, coded("internal", "非法 key %q", s)
+		return hash.ID{}, coded("invalid_argument", "非法 key %q", s)
 	}
 	return id, nil
 }

@@ -33,13 +33,16 @@ const (
 	ConflictBinary          ConflictKind = "binary"
 	ConflictMissingBase     ConflictKind = "missing_base"
 	ConflictAttr            ConflictKind = "attr_conflict"
+	// ConflictPathCollision 表示文件/目录同名（例如已有文件 a，另一侧新增 a/b）。
+	// 若不拦截会生成 DecodeTree 无法读取的树，提交后整个 head 都不可读。
+	ConflictPathCollision ConflictKind = "path_collision"
 )
 
 // Valid 报告冲突分类是否已知。
 func (c ConflictKind) Valid() bool {
 	switch c {
 	case ConflictOverlappingEdit, ConflictDeleteVsEdit, ConflictRenameVsEdit,
-		ConflictBinary, ConflictMissingBase, ConflictAttr:
+		ConflictBinary, ConflictMissingBase, ConflictAttr, ConflictPathCollision:
 		return true
 	}
 	return false

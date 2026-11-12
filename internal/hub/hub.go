@@ -38,6 +38,7 @@ var (
 	ErrRepoIsMountpoint   = errors.New("hub: repo 路径是挂载点")
 	ErrRegistryBusy       = errors.New("hub: registry 忙")
 	ErrRepoLocked         = errors.New("hub: repo 锁被其它进程持有")
+	ErrRepoQuiesced       = errors.New("hub: repo 已 quiesce，需要 repo_resume")
 )
 
 // BusyError 描述 unregister 被活跃工作区/租约挡住的具体原因。
@@ -98,6 +99,9 @@ type Hub struct {
 	mu    sync.Mutex
 	repos map[string]*repo.Repo
 	locks map[string]*repolock.Lock
+	// quiesced 记录 repo_quiesce 后的 repo；任何读/写工具都不得把它重新打开
+	// （尤其不能重新 remount overlay），直到 repo_resume/unregister。
+	quiesced map[string]bool
 
 	// mountProbe 可注入，单测不需要真实挂载点。默认使用 mountmgr.IsMountPoint。
 	mountProbe func(string) bool
@@ -171,6 +175,7 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)
 	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{},
+		quiesced:           map[string]bool{},
 		mountProbe:         mountmgr.IsMountPoint,
 		allowNonPersistent: os.Getenv("P37_ALLOW_NONPERSISTENT") == "1",
 		healthCache:        map[string]healthCacheEntry{}}
@@ -411,6 +416,9 @@ func (h *Hub) openLocked(ref string, remount bool) (*repo.Repo, error) {
 	if err != nil {
 		return nil, err
 	}
+	if h.quiesced[e.ID] {
+		return nil, fmt.Errorf("%w: %s", ErrRepoQuiesced, e.Name)
+	}
 	if r := h.repos[e.ID]; r != nil {
 		return r, nil
 	}
@@ -517,11 +525,17 @@ func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 			}
 		}
 	}
-	// 先写 tombstone，再移目录，最后删 registry。
+	// 先关闭缓存/flock，再写 tombstone，最后移目录。反过来 tombstone 会让
+	// CloseRepo 的 lookupLocked(deleted_ts=0) 找不到行，DB handle 和 flock
+	// 会永久残留，旧名字仍能解析到已删除的 repo。
+	if err := h.CloseRepo(e.ID); err != nil && !errors.Is(err, ErrRepoNotFound) {
+		return nil, err
+	}
 	_, _ = h.db.Exec(`UPDATE repo SET deleted_ts=? WHERE id=?`, time.Now().UnixMilli(), e.ID)
-	_ = h.CloseRepo(e.ID)
 	trash := filepath.Join(h.root, ".p37", "trash", e.ID+"-"+fmt.Sprint(time.Now().UnixMilli()))
 	if err := os.Rename(e.Path, trash); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// 目录没移走就不能让 repo 从 registry 消失；回滚 tombstone。
+		_, _ = h.db.Exec(`UPDATE repo SET deleted_ts=0 WHERE id=?`, e.ID)
 		return nil, err
 	}
 	_, err = h.db.Exec(`DELETE FROM repo WHERE id=?`, e.ID)

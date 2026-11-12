@@ -19,6 +19,56 @@
 }
 ```
 
+## 本版重点（v0.5.0）
+
+这是以正确性/恢复能力为主的版本，**`format_ver` 仍为 2**；已有仓库无需迁移。
+
+### 数据安全与崩溃恢复
+
+- **land 提交协议修复**：启动时以 `refs/mainline` 为权威提交点，补齐
+  “refs 已推进、DB head 未推进”的窗口；不会再回滚已经提交的 land。
+- **workspace integrating 孤儿修复**：不再在 `CommitLand` 之前提前置状态；
+  `CommitLand` 失败不会留下无人回收的 `integrating` 工作区。
+- **GC 缓存顺序修复**：删除对象前先清 `stat_cache` 和 `ws_effective_tree`；
+  活跃工作区的有效树不再被 GC 误删。GC 同时清理 `version_parent` /
+  `landed_ws` 并维护 `version_count`。
+- **overlay 清理修复**：卸载失败或 `ws_drop(keep_dir=true)` 时不再删除
+  `upper/`；`keep_dir=true` 真正保留未落地内容。
+- **CAS 修复**：损坏的 pack 会被跳过而不是拖垮整个 store；`FileContent`
+  总长度做自洽校验，避免恶意/损坏对象触发 panic/OOM；`Flush` 串行化并
+  记录祖先目录，失败路径不会被误报为已持久化；删除对象改为“先删索引”。
+- **overlay 基底引用计数**：挂载失败/回滚路径释放 `inUse`，缓存不再泄漏。
+
+### 合并正确性
+
+- **文件/目录同名冲突**：新增 `path_collision` 冲突，避免提交
+  `DecodeTree` 无法读取的树。
+- **`missing_base` + `take_upper`**：`modify` op 会用 base 文件重放本侧 hunk，
+  不再静默丢改动。
+- **delete 跟随 rename**、**`StartHint` 上下文偏移修正**、
+  **create 相同内容幂等**。
+- `merge.max_matches` 配置现在真正生效。
+
+### 生命周期与接口
+
+- **`repo_quiesce` 防护**：quiesced repo 的业务工具返回 `repo_quiesced`，
+  任何读请求都不能把它重新打开/重挂；`repo_resume` / `repo_unregister`
+  仍可用。
+- **`repo_import` 路径限制**：多仓库模式下导入目录必须位于 root 内，
+  拒绝 symlink 逃逸。
+- **`sync_prune` 的 `local`/`remote` 语义修正**；异步 `sync_push` 不再
+  忽略 `expected_remote_generation`；远端 ref 读取失败不再 fail-open。
+- **`conflict_resolve_all`** 校验 policy，拼错不再静默按 `prefer_lower` 处理。
+- **异步导出失败**仍以 `state=failed` + `error` 暴露（保持旧客户端兼容）。
+
+### 可观测性与性能
+
+- `repo_health`/`ws_info` 行为不变；参数/key/枚举错误映射修正为
+  `invalid_argument`，避免客户端把参数错误当服务端故障重试。
+- 启动时不再每次全表回填 `version_parent`；`ws_list` 的
+  `dropped_within` 现在按 `created_ts` 过滤。
+- P36/P34 最低 p37 版本提升到 **0.5.0**；旧 L1 需要重建。
+
 ## 本版重点（v0.4.13）
 
 - **默认忽略构建/测试/编辑器产物**：`internal/tree.DefaultIgnorePatterns` 新增

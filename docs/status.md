@@ -1,4 +1,4 @@
-# 当前状态（v0.4.13）
+# 当前状态（v0.5.0）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.4.13` |
+| 发布版本 | `v0.5.0` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -17,11 +17,13 @@
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
 
-**v0.4.13 重点（不改 `format_ver`）**：默认忽略集补齐构建/测试/编辑器产物
-（`*.tsbuildinfo`、`*.log`、`*.tmp`、`*.swp`、`*.pyc`、`.eslintcache`、
-`coverage/`、`Thumbs.db` 等），这些文件不再进入版本树，避免被工作卡写范围
-（`path_not_allowed`）或并入冲突误伤。内置忽略集始终生效，已有仓库无需重建；
-用户仍可在 `.p37ignore` 追加规则。
+**v0.5.0 重点（不改 `format_ver`）**：以正确性/恢复能力为主。修复 land
+提交点（refs 权威）与 integrating 孤儿；GC 先清 `stat_cache`/`ws_effective_tree`
+再删对象；overlay `keep_dir`/卸载失败不再删 upper；损坏 pack 隔离、FileContent
+长度自洽校验、Flush 串行化、DeleteObject 顺序；新增 `path_collision` 冲突、
+`missing_base + take_upper` 整文件重建、delete 跟随 rename、`StartHint` 偏移
+修正；`repo_quiesce` 期间业务工具返回 `repo_quiesced`；`repo_import` 限制在
+root 内；`sync_prune` 的 local/remote 语义修正。P36/P34 最低版本提升到 0.5.0。
 
 **v0.4.12 重点（不改 `format_ver`）**：新增只读 `repo_usage`，用
 `object_index` 聚合 objects/db/refs/config/durable/workspaces，P36 不再需要从

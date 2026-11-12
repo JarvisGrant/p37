@@ -325,6 +325,23 @@ func (s *Server) registerRepoLineRead() {
 			if dir == "" {
 				dir = rr.Root
 			}
+			// repo_import 是 MCP 可写入口，必须与 repo_init/repo_register
+			// 使用同一套 root 内路径校验，避免把宿主机任意目录导入成仓库。
+			if s.Hub != nil {
+				clean, verr := s.Hub.ValidateRepoPath(dir, true)
+				if verr != nil {
+					return nil, verr
+				}
+				dir = clean
+			} else if clean, cerr := filepath.Abs(dir); cerr != nil {
+				return nil, coded("invalid_path", "非法导入目录: %v", cerr)
+			} else {
+				// 单仓库模式至少拒绝符号链接叶子，避免 import 跟随链接到卷外。
+				if fi, lerr := os.Lstat(clean); lerr != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+					return nil, coded("invalid_path", "导入目录必须是真实目录: %s", clean)
+				}
+				dir = clean
+			}
 			res, err := rr.ImportV0(dir, a.Force)
 			if err != nil {
 				return nil, err

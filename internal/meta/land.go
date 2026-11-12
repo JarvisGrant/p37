@@ -67,6 +67,27 @@ func (d *DB) CommitLand(v *version.Version, j JournalEntry, foldWsIDs []string) 
 	})
 }
 
+// LandedWSIDs 返回某个版本对应的 folded 工作区 id。
+//
+// 启动时若 refs/mainline 已经指向该版本（提交点已过），但 DB head 还没推进，
+// 需要用这些 id 补做 FinishLand。
+func (d *DB) LandedWSIDs(versionID string) ([]string, error) {
+	rows, err := d.sql.Query(`SELECT ws_id FROM landed_ws WHERE version_id = ?`, versionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // FinishLand 删除折叠集合的工作区（§7.2 步骤 11）。幂等。
 func (d *DB) FinishLand(foldWsIDs []string) error {
 	return d.withWrite(func(tx *sql.Tx) error {

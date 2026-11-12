@@ -69,6 +69,9 @@ type LocalFS struct {
 	root string
 	tmp  string
 
+	// flushMu 串行化 Flush：并发 Flush 不能各自取走一部分 pending 后
+	// 在对方尚未 fsync 时返回成功。
+	flushMu  sync.Mutex
 	syncMu   sync.Mutex
 	pendingF map[string]struct{}
 	pendingD map[string]struct{}
@@ -126,6 +129,9 @@ func (l *LocalFS) Root() string { return l.root }
 //
 // 调用方必须在推进 head 之前调用它（§7.3）。
 func (l *LocalFS) Flush() error {
+	l.flushMu.Lock()
+	defer l.flushMu.Unlock()
+
 	l.syncMu.Lock()
 	if l.noSync {
 		l.pendingF = make(map[string]struct{})
@@ -157,9 +163,27 @@ func (l *LocalFS) Flush() error {
 	// 回退：并行逐个 fsync。
 	// fsync 是阻塞系统调用，并行做能显著摊薄等待。
 	if err := parallelSync(files); err != nil {
+		l.requeue(files, dirs)
 		return err
 	}
-	return parallelSyncDirs(dirs)
+	if err := parallelSyncDirs(dirs); err != nil {
+		l.requeue(files, dirs)
+		return err
+	}
+	return nil
+}
+
+// requeue 把同步失败的路径放回 pending，保证下一次 Flush 仍会重试，
+// 不会在错误已经返回给调用方后把“未落盘”误报为“已落盘”。
+func (l *LocalFS) requeue(files, dirs []string) {
+	l.syncMu.Lock()
+	defer l.syncMu.Unlock()
+	for _, p := range files {
+		l.pendingF[p] = struct{}{}
+	}
+	for _, p := range dirs {
+		l.pendingD[p] = struct{}{}
+	}
 }
 
 // note 记下待同步的文件与目录。
@@ -170,7 +194,14 @@ func (l *LocalFS) note(file string) {
 		return
 	}
 	l.pendingF[file] = struct{}{}
-	l.pendingD[filepath.Dir(file)] = struct{}{}
+	// 记录从文件所在目录一直到 root 的每一级目录：PutIfAbsent 用 MkdirAll
+	// 创建 shard 目录，只 fsync 最深层目录无法保证上层目录项持久。
+	for d := filepath.Dir(file); ; d = filepath.Dir(d) {
+		l.pendingD[d] = struct{}{}
+		if filepath.Clean(d) == filepath.Clean(l.root) || d == filepath.Dir(d) {
+			break
+		}
+	}
 }
 
 // parallelSync 并行 fsync 一批文件。
@@ -359,6 +390,16 @@ func (l *LocalFS) GetRange(key string, off, length int64) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	// 调用方给的 length 可能来自损坏的索引；先按文件实际大小钳制，
+	// 避免 make([]byte, length) 直接 OOM。
+	if fi, statErr := f.Stat(); statErr == nil {
+		if off >= fi.Size() {
+			return []byte{}, nil
+		}
+		if maxLen := fi.Size() - off; length > maxLen {
+			length = maxLen
+		}
+	}
 	buf := make([]byte, length)
 	n, err := f.ReadAt(buf, off)
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -568,6 +609,9 @@ func (l *LocalFS) PutIfMatch(key, etag string, data []byte) (string, error) {
 		return "", err
 	}
 	cur, statErr := l.Stat(key)
+	if statErr != nil && !errors.Is(statErr, ErrNotExist) {
+		return "", statErr
+	}
 	switch {
 	case etag == "":
 		if statErr == nil {

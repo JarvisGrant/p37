@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -252,7 +253,10 @@ func (ps *PackStore) ensureLoaded() error {
 		}
 		entries, err := ps.readFooter(pid, st.Size)
 		if err != nil {
-			return fmt.Errorf("cas: 读取 pack %s 索引失败: %w", pid, err)
+			// 单个损坏/未写完的 pack 不能拖垮整个 store：跳过它，
+			// 让仍然存在的松散副本继续可读；fsck 会报告该 pack。
+			log.Printf("cas: 跳过损坏的 pack %s: %v", pid, err)
+			continue
 		}
 		packs = append(packs, pid)
 		for _, en := range entries {
@@ -285,14 +289,14 @@ func (ps *PackStore) readFooter(pid hash.ID, size int64) ([]packEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if string(hdr) != packHeaderMagic {
+	if len(hdr) != packHeaderLen || string(hdr) != packHeaderMagic {
 		return nil, fmt.Errorf("%w: pack 头标记不符", ErrCorrupt)
 	}
 	trailer, err := ps.base.GetRange(key, size-packTrailerLen, packTrailerLen)
 	if err != nil {
 		return nil, err
 	}
-	if string(trailer[:8]) != packTrailerMagic {
+	if len(trailer) != packTrailerLen || string(trailer[:8]) != packTrailerMagic {
 		return nil, fmt.Errorf("%w: pack 尾标记不符", ErrCorrupt)
 	}
 	footerLen := int64(binary.BigEndian.Uint64(trailer[8:]))
@@ -303,8 +307,20 @@ func (ps *PackStore) readFooter(pid hash.ID, size int64) ([]packEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 这里只需索引本身合法；body 连续性由打包端保证，fsck 会整份校验。
-	return decodePackIndex(footer)
+	entries, err := decodePackIndex(footer)
+	if err != nil {
+		return nil, err
+	}
+	// 索引里的 offset/length 是读取方直接信任的；必须在这里做边界校验，
+	// 否则一个被篡改的 footer 可以让 GetRange 分配超大 buffer 或越界读取。
+	dataLimit := size - packTrailerLen - packHeaderLen
+	for _, en := range entries {
+		if en.off < packHeaderLen || en.length < 0 || en.off > size || en.length > size ||
+			en.off-packHeaderLen > dataLimit-en.length {
+			return nil, fmt.Errorf("%w: pack 索引区间越界", ErrCorrupt)
+		}
+	}
+	return entries, nil
 }
 
 // encodePackIndex 编码尾部索引。
@@ -327,7 +343,7 @@ func decodePackIndex(footer []byte) ([]packEntry, error) {
 	if d.Err() != nil {
 		return nil, fmt.Errorf("%w: pack 索引不可读", ErrCorrupt)
 	}
-	if count > MaxPackEntries {
+	if count > MaxPackEntries || count > uint64(len(footer)) {
 		return nil, fmt.Errorf("%w: pack 条目数 %d 超上限", ErrCorrupt, count)
 	}
 	entries := make([]packEntry, 0, count)
@@ -391,7 +407,8 @@ func (ps *PackStore) refreshPacks() error {
 	for _, f := range fresh {
 		entries, err := ps.readFooter(f.id, f.size)
 		if err != nil {
-			return fmt.Errorf("cas: 读取 pack %s 索引失败: %w", f.id, err)
+			log.Printf("cas: 跳过损坏的 pack %s: %v", f.id, err)
+			continue
 		}
 		for _, en := range entries {
 			if _, dup := ps.locs[en.id]; dup {

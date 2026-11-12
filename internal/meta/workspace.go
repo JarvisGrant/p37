@@ -406,6 +406,23 @@ func (d *DB) PutEffectiveTree(wsID string, opsEpoch int64, tree hash.ID) error {
 	})
 }
 
+// ClearEffectiveTrees 清空全部有效树缓存。
+//
+// ws_effective_tree 里的中间 Tree 对象只被缓存引用，不属于任何版本/op。
+// GC 在删除不可达对象前必须先清掉缓存，否则缓存会留下悬空 tree id。
+func (d *DB) ClearEffectiveTrees() (int64, error) {
+	var n int64
+	err := d.withWrite(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM ws_effective_tree`)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
+}
+
 // --- 租约（§4.5） -------------------------------------------------------
 
 // Lease 是 lease 表的一行。

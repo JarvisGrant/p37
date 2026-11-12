@@ -268,6 +268,19 @@ func Save(root string, cfg Config) error {
 // 原子初始化在 <repo>/.p37.tmp 里构建，这个入口让它不必假装有一个
 // 完整的 repo 根。
 func SaveControl(controlDir string, cfg Config) error {
+	return saveControl(controlDir, cfg, 0o644)
+}
+
+// SaveRepoControl 写出 per-repo 配置，并剔除只属于 daemon 的凭据。
+//
+// repo_init/repo_register 会把 root 配置复制到应用卷的 .p37/config.toml；
+// 应用卷可能被备份/租户可见，绝不能携带 daemon HTTP auth_token。
+func SaveRepoControl(controlDir string, cfg Config) error {
+	cfg.Daemon.AuthToken = ""
+	return saveControl(controlDir, cfg, 0o600)
+}
+
+func saveControl(controlDir string, cfg Config, mode os.FileMode) error {
 	var sb strings.Builder
 	enc := toml.NewEncoder(&sb)
 	if err := enc.Encode(cfg); err != nil {
@@ -276,7 +289,7 @@ func SaveControl(controlDir string, cfg Config) error {
 	if err := os.MkdirAll(controlDir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(controlDir, "config.toml"), []byte(sb.String()), 0o644)
+	return os.WriteFile(filepath.Join(controlDir, "config.toml"), []byte(sb.String()), mode)
 }
 
 // Duration 解析时长字符串，非法时返回默认值。

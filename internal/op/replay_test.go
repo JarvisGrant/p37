@@ -332,3 +332,55 @@ func TestReplayResolutionApplied(t *testing.T) {
 		t.Fatalf("无关 resolution 不应消解冲突，得到 %d", len(r3.Conflicts))
 	}
 }
+
+// TestReplayPathCollision 回归：文件/目录同名必须变成冲突，不能生成
+// DecodeTree 无法读取的树。
+func TestReplayPathCollision(t *testing.T) {
+	f := newFixture(t, "ws_1")
+	base := f.treeWith("a", "file\n")
+	childID := f.fileID("a/b", "child\n")
+	res := f.replay(base,
+		Op{ID: "op_2", WsID: "ws_1", Seq: 2, Kind: KindCreate, Path: "a/b", NewFile: childID},
+	)
+	if len(res.Conflicts) != 1 || res.Conflicts[0].Kind != ConflictPathCollision {
+		t.Fatalf("期望 path_collision，得到 %+v", res.Conflicts)
+	}
+	// 结果树必须仍可编码/解码。
+	enc := res.Tree.Encode()
+	if _, err := tree.DecodeTree(enc); err != nil {
+		t.Fatalf("结果树不可解码: %v", err)
+	}
+}
+
+// TestReplayTakeUpperRebuildsModifiedMissingBase 回归：modify op 没有 NewFile，
+// missing_base + take_upper 必须用 base 文件重放 hunk，而不是静默丢弃。
+func TestReplayTakeUpperRebuildsModifiedMissingBase(t *testing.T) {
+	f := newFixture(t, "ws_1")
+	baseID := f.fileID("gone.txt", "a\nb\nc\n")
+	hunks := tree.Hunks(tree.SplitLines([]byte("a\nb\nc\n")), tree.SplitLines([]byte("a\nB\nc\n")), 3)
+	hs := make([]Hunk, len(hunks))
+	for i, h := range hunks {
+		hs[i] = FromTreeHunk(h)
+	}
+	o := Op{ID: "op_1", WsID: "ws_1", Seq: 1, Kind: KindModify, Path: "gone.txt",
+		BaseFile: baseID, Hunks: hs}
+
+	r1 := f.replay(&tree.Tree{}, o)
+	if len(r1.Conflicts) != 1 || r1.Conflicts[0].Kind != ConflictMissingBase {
+		t.Fatalf("期望 missing_base，得到 %+v", r1.Conflicts)
+	}
+	c := r1.Conflicts[0]
+	mem := f.opt.Resolver.(*MemResolver)
+	if !mem.Put(Resolution{Key: c.Key, WsID: "ws_1", Path: "gone.txt",
+		LowerHash: c.Lower.ContentHash(), UpperHash: c.Upper.ContentHash(),
+		Kind: ResolveTakeUpper}) {
+		t.Fatal("写入 resolution 失败")
+	}
+	r2 := f.replay(&tree.Tree{}, o)
+	if len(r2.Conflicts) != 0 {
+		t.Fatalf("take_upper 后不应有冲突: %+v", r2.Conflicts)
+	}
+	if got, ok := f.read(r2.Tree, "gone.txt"); !ok || got != "a\nB\nc\n" {
+		t.Fatalf("take_upper 结果 = %q ok=%v", got, ok)
+	}
+}

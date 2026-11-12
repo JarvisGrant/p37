@@ -53,6 +53,11 @@ func DecodeFileContent(b []byte) (*FileContent, error) {
 	if count > MaxChunksPerFile {
 		return nil, fmt.Errorf("tree: chunk 数 %d 超过上限 %d", count, MaxChunksPerFile)
 	}
+	// TotalSize 必须与 chunk 列表自洽。否则损坏/恶意对象可以让调用方
+	// 按声明值做 make([]byte, 0, TotalSize)，造成 panic 或 OOM。
+	if total > count*MaxChunkSize {
+		return nil, fmt.Errorf("tree: 文件长度 %d 超过 chunk 上限 %d", total, count*MaxChunkSize)
+	}
 	if eol > codec.EOLmixed {
 		return nil, fmt.Errorf("tree: 非法 EOL 值 %d", eol)
 	}
@@ -68,6 +73,11 @@ func DecodeFileContent(b []byte) (*FileContent, error) {
 
 // MaxChunksPerFile 是单文件 chunk 数上限（§13）。
 const MaxChunksPerFile = 1_000_000
+
+// MaxChunkSize 是单个 CDC 分块的字节上限（与 internal/cas/chunker.go 的
+// MaxSize 保持一致）。tree 不能 import cas（会造成循环依赖），因此在这里
+// 保留一份用于 FileContent 自洽校验。
+const MaxChunkSize = 65536
 
 // MaxTreeEntries 是单棵树条目数上限（§13）。
 const MaxTreeEntries = 1_000_000

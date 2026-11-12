@@ -3,9 +3,11 @@ package workspace
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
 )
@@ -92,11 +94,13 @@ func (m *Manager) VerifyBeforeWrite(wsID string, before hash.ID, paths []string)
 				mismatched = append(mismatched, p)
 			}
 		default:
-			wantData, err := m.store.ReadFileData(exp.id)
+			// 流式比较：不把期望文件和磁盘文件同时读进内存。
+			// files.max_file_size 允许 2 GiB，全量读取会让 land 直接 OOM。
+			equal, err := equalFileData(m.store, exp.id, abs)
 			if err != nil {
 				return nil, err
 			}
-			if !bytes.Equal(wantData, act.data) {
+			if !equal {
 				mismatched = append(mismatched, p)
 			}
 		}
@@ -108,6 +112,52 @@ type diskEntry struct {
 	kind uint8
 	mode uint64
 	data []byte
+}
+
+// equalFileData 按 chunk 流式比较 CAS 文件与磁盘文件，内存上界为单个 chunk。
+func equalFileData(store *cas.Store, id hash.ID, abs string) (bool, error) {
+	fc, err := store.GetFileContent(id)
+	if err != nil {
+		return false, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if fi.Size() != fc.TotalSize {
+		return false, nil
+	}
+	buf := make([]byte, cas.MaxSize)
+	for _, cid := range fc.Chunks {
+		want, err := store.GetBlob(cid)
+		if err != nil {
+			return false, err
+		}
+		if len(want) > len(buf) {
+			buf = make([]byte, len(want))
+		}
+		got := buf[:len(want)]
+		if _, err := io.ReadFull(f, got); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return false, nil
+			}
+			return false, err
+		}
+		if !bytes.Equal(want, got) {
+			return false, nil
+		}
+	}
+	// 确认没有尾部多余字节。
+	var one [1]byte
+	if n, _ := f.Read(one[:]); n != 0 {
+		return false, nil
+	}
+	return true, nil
 }
 
 // readDiskEntry 读取磁盘条目的内容、类型与权限位。
@@ -133,11 +183,8 @@ func readDiskEntry(abs string) (diskEntry, bool, error) {
 	case fi.IsDir():
 		return diskEntry{kind: codec.EntryTree, mode: mode}, true, nil
 	case fi.Mode().IsRegular():
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			return diskEntry{}, false, err
-		}
-		return diskEntry{kind: codec.EntryFile, mode: mode, data: data}, true, nil
+		// 常规文件不在这里读入内存；verify 用 equalFileData 流式比较。
+		return diskEntry{kind: codec.EntryFile, mode: mode}, true, nil
 	default:
 		return diskEntry{}, false, fmt.Errorf("workspace: 不支持的条目类型: %s", abs)
 	}

@@ -185,7 +185,7 @@ func runDaemon(root string, serveHTTP bool) error {
 	w, err := watch.New(r, watch.Options{
 		Debounce:       config.Duration(cfg.Workspace.Debounce, 500*time.Millisecond),
 		ScanInterval:   config.Duration(cfg.Workspace.ScanInterval, 30*time.Second),
-		FallbackToRoot: watchFallbackNeeded(),
+		FallbackToRoot: cfg.Workspace.InotifyFallback || watchFallbackNeeded(),
 		Logger:         logger,
 		OnSync: func(wsID string, took time.Duration) {
 			// 事件由 workspace.Options.OnSync 统一发出，这里只做日志。
@@ -315,6 +315,11 @@ func runDaemon(root string, serveHTTP bool) error {
 	}
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		logger.Printf("HTTP 关闭超时: %v", err)
+	}
+	// 先停 watcher 并等待在途采集结束，再 unmount/关 DB。defer 里的 Close
+	// 只作为提前返回路径的兜底；这里必须显式先停。
+	if err := w.Close(); err != nil {
+		logger.Printf("停止采集器失败: %v", err)
 	}
 
 	// 卸载全部 overlay 挂载点（不动 upper 层，§4.6）。

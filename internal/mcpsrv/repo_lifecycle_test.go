@@ -202,8 +202,8 @@ func TestRepoQuiesceResumeAndHealthRegistered(t *testing.T) {
 	if h["registered"] != true {
 		t.Fatalf("quiesce 后应保持 registered: %v", h)
 	}
-	// 已 quiesce 的 repo 仍可通过 line_list 重新打开。
-	hh.mustOK("line_list", map[string]any{"repo": "app-q"})
+	// quiesce 期间任何业务工具都不得把 repo 重新打开/重挂。
+	hh.mustFail("line_list", "repo_quiesced", map[string]any{"repo": "app-q"})
 	hh.mustOK("repo_resume", map[string]any{"repo": "app-q"})
 
 	hh.mustOK("repo_unregister", map[string]any{"repo": "app-q"})

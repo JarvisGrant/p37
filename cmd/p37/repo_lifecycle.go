@@ -389,8 +389,18 @@ func openRepoHub(root string) (*hub.Hub, error) {
 //
 // 返回 (data, true, nil) 表示已由 daemon 处理；(_, false, nil) 表示 daemon
 // 不在，调用方应直连 registry。
+func daemonSocketFor(root string) string {
+	if cfg, err := config.Load(root); err == nil {
+		return config.SocketPath(root, cfg)
+	}
+	return filepath.Join(root, ".p37", "p37d.sock")
+}
+
 func routeRepoCommand(root, tool string, args any) (json.RawMessage, bool, error) {
-	sock := filepath.Join(root, ".p37", "p37d.sock")
+	sock := os.Getenv("P37_DAEMON_SOCKET")
+	if sock == "" {
+		sock = daemonSocketFor(root)
+	}
 	fi, err := os.Stat(sock)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -478,7 +488,7 @@ func findAncestorSocket(root string) string {
 	}
 	dir := filepath.Dir(abs)
 	for {
-		sock := filepath.Join(dir, ".p37", "p37d.sock")
+		sock := daemonSocketFor(dir)
 		if fi, err := os.Stat(sock); err == nil && fi.Mode()&os.ModeSocket != 0 {
 			return sock
 		}

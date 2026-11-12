@@ -267,6 +267,9 @@ func (d *DB) ListWSTombstones(since, now int64, limit int) ([]WSTombstone, error
 	}
 	out := make([]WSTombstone, 0, len(recs))
 	for _, rec := range recs {
+		if since > 0 && rec.CreatedTS < since {
+			continue
+		}
 		if rec.ExpiresTS > 0 && rec.ExpiresTS < now {
 			continue
 		}

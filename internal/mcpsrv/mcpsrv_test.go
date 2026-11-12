@@ -349,8 +349,8 @@ func TestToolsErrorPaths(t *testing.T) {
 	h.mustFail("version_show", "version_not_found",
 		map[string]any{"version_id": "0000000000000000000000000000000000000000000000000000000000000000"})
 
-	// 非法 key。
-	h.mustFail("conflict_show", "internal", map[string]any{"key": "not-a-key"})
+	// 非法 key：客户端参数错误，不是服务端内部错误。
+	h.mustFail("conflict_show", "invalid_argument", map[string]any{"key": "not-a-key"})
 
 	// blame 对不存在的路径必须返回结构化错误码而不是 panic。
 	env := h.call("blame", map[string]any{"path": "definitely-missing.txt"})

@@ -231,7 +231,7 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	leaf := fold[len(fold)-1]
 	res, err := op.Replay(headTree, allOps, r.Store, op.Options{
 		WsID:       leaf.ID,
-		MaxMatches: op.DefaultMaxMatches,
+		MaxMatches: r.maxMatchesOrDefault(),
 		Resolver:   r.DB.Resolver(),
 		Candidates: true,
 		Follow:     follow,
@@ -269,15 +269,10 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 		return out, nil
 	}
 
-	// 3b. 采集成功后置 integrating。
+	// 10. 元数据提交（可回滚）。CommitLand 会在同一事务里把 folded
+	// 工作区置为 integrating；不要提前单独置状态，否则 CommitLand 失败时
+	// 会留下没有 landed_ws 行的孤儿 integrating 工作区。
 	now := time.Now().UnixMilli()
-	for _, w := range fold {
-		if err := r.DB.UpdateWorkspaceState(w.ID, meta.StateIntegrating, now); err != nil {
-			return nil, err
-		}
-	}
-
-	// 10. 元数据提交（可回滚）。
 	foldIDs := make([]string, len(fold))
 	for i, w := range fold {
 		foldIDs[i] = w.ID
@@ -423,7 +418,7 @@ func (r *Repo) Revert(versionID hash.ID) (hash.ID, error) {
 	_ = targetTree
 
 	res, err := op.Replay(headTree, inv, r.Store, op.Options{
-		WsID: "revert", MaxMatches: op.DefaultMaxMatches, Resolver: r.DB.Resolver(),
+		WsID: "revert", MaxMatches: r.maxMatchesOrDefault(), Resolver: r.DB.Resolver(),
 	})
 	if err != nil {
 		return hash.ID{}, err

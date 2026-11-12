@@ -805,14 +805,14 @@ func (s *Server) registerConflict() {
 			}
 			kind := op.ResolutionKind(a.Resolution.Kind)
 			if !kind.Valid() {
-				return nil, coded("internal", "非法解决方式 %q", a.Resolution.Kind)
+				return nil, coded("invalid_argument", "非法解决方式 %q", a.Resolution.Kind)
 			}
 			var content [][]byte
 			for _, l := range a.Resolution.Content {
 				content = append(content, []byte(l))
 			}
 			if kind == op.ResolveCustom && len(content) == 0 {
-				return nil, coded("internal", "custom 解决必须提供 content")
+				return nil, coded("invalid_argument", "custom 解决必须提供 content")
 			}
 			created, err := rr.Resolve(key, kind, content, "mcp")
 			if err != nil {
@@ -839,12 +839,16 @@ func (s *Server) registerConflict() {
 			if err != nil {
 				return nil, err
 			}
-			if a.Policy == "abort" {
+			var kind op.ResolutionKind
+			switch a.Policy {
+			case "abort":
 				return map[string]any{"resolved": 0, "aborted": true}, nil
-			}
-			kind := op.ResolveTakeLower
-			if a.Policy == "prefer_upper" {
+			case "prefer_lower":
+				kind = op.ResolveTakeLower
+			case "prefer_upper":
 				kind = op.ResolveTakeUpper
+			default:
+				return nil, coded("invalid_argument", "policy 必须是 prefer_lower/prefer_upper/abort，得到 %q", a.Policy)
 			}
 			rows, err := rr.DB.ListConflicts(a.WsID, true)
 			if err != nil {

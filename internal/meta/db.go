@@ -315,11 +315,30 @@ func ensureColumnsTx(tx *sql.Tx) error {
 			   WHERE idempotency_key IS NOT NULL`); err != nil {
 			return err
 		}
+		// 一次性回填。旧实现每次 repo.Open 都在写事务里全表 INSERT OR IGNORE，
+		// 大仓库每个 CLI 命令都要 O(versions) 扫描并与 daemon 抢写锁。
 		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO version_parent(version_id, parent_id, ordinal)
-			 SELECT id, parent, 0 FROM version
-			  WHERE parent IS NOT NULL AND parent != '' AND parent != ?`, zero); err != nil {
+			`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '')`,
+		); err != nil {
 			return err
+		}
+		var done int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM schema_meta WHERE key='version_parent_backfill_v2'`).Scan(&done); err != nil {
+			return err
+		}
+		if done == 0 {
+			if _, err := tx.Exec(
+				`INSERT OR IGNORE INTO version_parent(version_id, parent_id, ordinal)
+				 SELECT id, parent, 0 FROM version
+				  WHERE parent IS NOT NULL AND parent != '' AND parent != ?`, zero); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(
+				`INSERT OR IGNORE INTO schema_meta(key, value) VALUES('version_parent_backfill_v2','1')`,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	// 回填 main line：以 mainline_head 为 head。没有 head 的仓库等 Init/首次 land。

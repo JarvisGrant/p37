@@ -487,13 +487,9 @@ func (m *Manager) reserveActive(activeLimit, hiddenLimit int) error {
 	if n+m.pendingActive >= activeLimit {
 		return &LimitError{Scope: ScopeActive, Used: n + m.pendingActive, Limit: activeLimit}
 	}
-	hn, err := m.db.CountHiddenWorkspaces()
-	if err != nil {
-		return err
-	}
-	if hn >= hiddenLimit {
-		return &LimitError{Scope: ScopeHidden, Used: hn, Limit: hiddenLimit}
-	}
+	// 隐藏工作区不占 active 名额，也不应该在普通 ws_open 上检查：
+	// 否则 32 个残留 merge/preview 会让所有正常 ws_open 失败。
+	_ = hiddenLimit
 	m.pendingActive++
 	return nil
 }
@@ -1190,6 +1186,9 @@ func (m *Manager) ReapOrphanDirs() ([]string, error) {
 	for _, e := range entries {
 		if !e.IsDir() || known[e.Name()] {
 			continue
+		}
+		if m.mm.IsKept(e.Name()) {
+			continue // ws_drop(keep_dir=true) 的人工保留目录
 		}
 		// mountmgr.Close 会先尽力卸载（overlay），再删目录与状态文件。
 		// 非 ws_* 目录（历史遗留命名）走直接删除。

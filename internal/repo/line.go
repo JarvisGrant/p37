@@ -602,7 +602,7 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 		replayID = "__merge_commit__"
 	}
 	replayed, err := op.Replay(tgtTree, ops, r.Store, op.Options{
-		WsID: replayID, MaxMatches: op.DefaultMaxMatches, Resolver: r.DB.Resolver(), Candidates: true,
+		WsID: replayID, MaxMatches: r.maxMatchesOrDefault(), Resolver: r.DB.Resolver(), Candidates: true,
 	})
 	if err != nil {
 		return nil, err
@@ -615,6 +615,10 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 	}
 	if opt.Preview {
 		if mergeID != "" && opt.MergeID == "" {
+			// 隐藏工作区有独立上限；必须在创建点检查，而不是在用户 ws_open 上。
+			if q, qerr := r.WS.Quota(); qerr == nil && q.HiddenUsed >= q.MaxHidden {
+				return nil, &workspace.LimitError{Scope: workspace.ScopeHidden, Used: q.HiddenUsed, Limit: q.MaxHidden}
+			}
 			// 创建隐藏 merge workspace，承载冲突与后续 resolution。
 			w := meta.Workspace{
 				ID: mergeID, Name: source, ParentKind: meta.ParentVersion,
@@ -827,7 +831,7 @@ func (r *Repo) RevertTo(versionID string, targetLine string, expectedHead string
 		return hash.ID{}, err
 	}
 	replayed, err := op.Replay(headTree, inv, r.Store, op.Options{
-		WsID: "revert", MaxMatches: op.DefaultMaxMatches, Resolver: r.DB.Resolver(),
+		WsID: "revert", MaxMatches: r.maxMatchesOrDefault(), Resolver: r.DB.Resolver(),
 	})
 	if err != nil {
 		return hash.ID{}, err

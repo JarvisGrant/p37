@@ -3,6 +3,7 @@ package meta
 import (
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/chenyiwen/p37/internal/hash"
 )
@@ -58,10 +59,25 @@ func (d *DB) PruneVersion(id hash.ID) error {
 			`DELETE FROM version WHERE id = ?`,
 			`DELETE FROM journal WHERE version_id = ?`,
 			`DELETE FROM blame_cache WHERE version_id = ?`,
+			// 血缘表没有外键；不清理会永久留下指向已删版本的边。
+			`DELETE FROM version_parent WHERE version_id = ? OR parent_id = ?`,
+			// 已回收版本的 landed_ws 行不再可作为幂等结果返回。
+			`DELETE FROM landed_ws WHERE version_id = ?`,
 		} {
-			if _, err := tx.Exec(q, s); err != nil {
+			args := []any{s}
+			if strings.Count(q, "?") == 2 {
+				args = append(args, s)
+			}
+			if _, err := tx.Exec(q, args...); err != nil {
 				return err
 			}
+		}
+		// version_count 是 epoch 的推进依据；GC 后必须同步递减，
+		// 否则后续 CommitLineLand 的 COUNT(*) 会让 epoch 回退。
+		if _, err := tx.Exec(
+			`UPDATE repo SET version_count = CASE WHEN version_count > 0 THEN version_count - 1 ELSE 0 END WHERE id = 1`,
+		); err != nil {
+			return err
 		}
 		return nil
 	})

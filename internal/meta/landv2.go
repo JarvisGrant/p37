@@ -47,7 +47,8 @@ func (d *DB) CommitLineLand(v *version.Version, j JournalEntry, line string,
 		if err := insertVersionTx(tx, v, j, idemTool, idemKey); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE repo SET version_count=(SELECT COUNT(*) FROM version) WHERE id=1`); err != nil {
+		// 不要用 COUNT(*)：GC 之后版本表不包含全部历史，COUNT 会让 epoch 回退。
+		if _, err := tx.Exec(`UPDATE repo SET version_count = version_count + 1 WHERE id=1`); err != nil {
 			return err
 		}
 		for _, wsID := range foldWsIDs {
@@ -90,7 +91,7 @@ func (d *DB) CommitMerge(v *version.Version, j JournalEntry, line string,
 		if err := insertVersionTx(tx, v, j, idemTool, idemKey); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE repo SET version_count=(SELECT COUNT(*) FROM version) WHERE id=1`); err != nil {
+		if _, err := tx.Exec(`UPDATE repo SET version_count = version_count + 1 WHERE id=1`); err != nil {
 			return err
 		}
 		_ = vid

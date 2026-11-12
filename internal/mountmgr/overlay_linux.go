@@ -37,6 +37,9 @@ func (m *Manager) mountWithLower(wsID string, baseTree hash.ID, base string) err
 	// lower 一律单层（D23）。
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", base, upper, work)
 	if err := syscall.Mount("overlay", dir, "overlay", 0, opts); err != nil {
+		// ensureBase 已经增加 inUse；挂载失败必须回滚，否则 auto 回退 copy
+		// 后这个基底会被永久当成“正在使用”，缓存永远无法回收。
+		m.releaseBaseTree(baseTree)
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	baseRefs.Store(wsID, baseTree)
@@ -106,6 +109,7 @@ func (m *Manager) Relower(wsID string, newBase hash.ID, src ContentSource) error
 	}
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", base, m.upperDir(wsID), work)
 	if err := syscall.Mount("overlay", dir, "overlay", 0, opts); err != nil {
+		m.releaseBaseTree(newBase)
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	// 释放旧基底的引用，改记新的。

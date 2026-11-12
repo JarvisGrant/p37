@@ -46,9 +46,38 @@ type Event struct {
 	TS        int64  `json:"ts"`
 }
 
+type asyncEvent struct {
+	socket string
+	ev     Event
+}
+
+var asyncCh = make(chan asyncEvent, 256)
+
+func init() {
+	go func() {
+		for e := range asyncCh {
+			Emit(e.socket, e.ev)
+		}
+	}()
+}
+
+// EmitAsync 把事件放进有界队列，由单 goroutine 串行写 socket。
+//
+// 用于采集/land 等热路径：调用方不再为 150ms dial/write 阻塞；队列满时
+// 丢弃本次事件（事件是 best-effort，P36 侧有周期兜底）。
+func EmitAsync(socket string, ev Event) {
+	if socket == "" {
+		return
+	}
+	select {
+	case asyncCh <- asyncEvent{socket: socket, ev: ev}:
+	default:
+	}
+}
+
 // Emit 把事件写入 socket。socket 为空或不可达时静默返回。
 //
-// 调用方可以在热路径调用：最坏情况是一次 150ms 的本地 dial/write 超时。
+// 同步版本保留给测试/显式调用；业务热路径应使用 EmitAsync。
 func Emit(socket string, ev Event) {
 	socket = filepath.Clean(socket)
 	if socket == "" || socket == "." {

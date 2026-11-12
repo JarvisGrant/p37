@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,6 +63,15 @@ type Repo struct {
 	landSem chan struct{}
 	// landMu 串行化整条 land 流水线（§7.4：一条全局 land 队列）。
 	landMu sync.Mutex
+	// maxMatches 是 place 的匹配上限（merge.max_matches）。
+	maxMatches int
+}
+
+func (r *Repo) maxMatchesOrDefault() int {
+	if r.maxMatches > 0 {
+		return r.maxMatches
+	}
+	return op.DefaultMaxMatches
 }
 
 // Errors
@@ -278,6 +289,13 @@ func Open(root string, opt Options) (*Repo, error) {
 		},
 	})
 
+	// 启动修复：refs/mainline 是 land 的提交点。若进程在
+	// writeHead(refs) 与 SetMainlineHead(DB) 之间崩溃，必须先按 refs
+	// 向前完成提交，再让 ReconcileLand 收尾；反过来会被误判为未提交而回滚。
+	if err := reconcileMainlineRef(db, store); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	// 启动修复：补做/回滚未完成的 land（§7.7 步骤 2）。
 	if _, err := db.ReconcileLand(); err != nil {
 		_ = db.Close()
@@ -310,6 +328,7 @@ func Open(root string, opt Options) (*Repo, error) {
 		redactTaskDesc: opt.RedactTaskDesc,
 		exportRoot:     opt.ExportRoot,
 		eventsSocket:   opt.EventsSocket,
+		maxMatches:     opt.MaxMatches,
 		landSem:        make(chan struct{}, qmax)}
 	// 步骤 3：恢复活跃工作区的挂载。**必须在 land 修复之后**，因为修复可能
 	// 焚毁/恢复工作区。只重建挂载，upper 层原样保留。
@@ -540,6 +559,61 @@ func (r *Repo) writeHead(id hash.ID) error {
 	}
 	_, err = r.Store.BlobStore().PutIfMatch(key, etag, []byte(id.String()+"\n"))
 	return err
+}
+
+// reconcileMainlineRef 以 refs/mainline 为提交点，修复 DB head 落后。
+//
+// 场景：CommitLand 已提交 version/landed_ws，writeHead 已推进 refs，但
+// SetMainlineHead 之前进程崩溃。此时 refs 是唯一权威，必须向前完成提交。
+func reconcileMainlineRef(db *meta.DB, store *cas.Store) error {
+	rc, _, err := store.BlobStore().Get("refs/mainline")
+	if err != nil {
+		if errors.Is(err, cas.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	b, err := io.ReadAll(io.LimitReader(rc, 256))
+	_ = rc.Close()
+	if err != nil {
+		return err
+	}
+	id, err := hash.Parse(strings.TrimSpace(string(b)))
+	if err != nil {
+		return nil // 损坏的 refs 交给 fsck/repair，不在打开路径猜测
+	}
+	if _, err := db.GetVersion(id); err != nil {
+		return nil // refs 指向不存在的版本：保留 DB head，交给 integrity 报告
+	}
+	head, ok, err := db.Head()
+	if err != nil {
+		return err
+	}
+	if ok && head == id {
+		return nil
+	}
+	rp, err := db.GetRepo()
+	if err != nil {
+		return err
+	}
+	count, err := db.CountVersions()
+	if err != nil {
+		return err
+	}
+	if err := db.SetMainlineHead(id, count, rp.Epoch); err != nil {
+		return err
+	}
+	ids, err := db.LandedWSIDs(id.String())
+	if err != nil {
+		return err
+	}
+	if len(ids) > 0 {
+		if err := db.FinishLand(ids); err != nil {
+			return err
+		}
+	}
+	log.Printf("repo: %s 按 refs/mainline 补齐未完成的 land %s", db.Path(), id.String()[:16])
+	return nil
 }
 
 // Sync 采集一个工作区（workspace.Manager.Sync 的便捷入口）。

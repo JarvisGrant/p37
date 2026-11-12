@@ -233,25 +233,40 @@ func (m *Manager) Open(wsID string, baseTree hash.ID, src ContentSource,
 // Close 卸载并清理一个工作区。
 func (m *Manager) Close(wsID string, keepDir bool, overlay bool) error {
 	dir := m.WorkspaceDir(wsID)
-	var errs []error
 	if overlay {
 		if err := m.unmountOverlay(wsID); err != nil {
-			errs = append(errs, err)
+			// 卸载失败时绝不能继续删 upper/work：它们仍是活挂载的底层，
+			// 删除会在挂载视图里产生白化文件，并丢掉未提交数据。
+			return err
 		}
 	}
-	if !keepDir {
+	var errs []error
+	if keepDir {
+		// 标记为人工保留：ReapOrphanDirs/gc --workspaces 不能把
+		// ws_drop(keep_dir=true) 留下的目录当成崩溃残留删掉。
+		_ = os.MkdirAll(m.wsMetaDir(wsID), 0o700)
+		_ = os.WriteFile(filepath.Join(m.wsMetaDir(wsID), "keep"), []byte("keep_dir\n"), 0o600)
+	} else {
 		if err := os.RemoveAll(dir); err != nil {
 			errs = append(errs, err)
 		}
-	}
-	if err := os.RemoveAll(m.wsMetaDir(wsID)); err != nil {
-		errs = append(errs, err)
-	}
-	if err := os.Remove(m.StatePath(wsID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		errs = append(errs, err)
+		// upper/work 只属于这个工作区；keepDir=true 时必须保留，
+		// 否则 ws_drop(keep_dir=true) 只留下一个空挂载点，数据全丢。
+		if err := os.RemoveAll(m.wsMetaDir(wsID)); err != nil {
+			errs = append(errs, err)
+		}
+		if err := os.Remove(m.StatePath(wsID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
 	}
 	m.releaseBase(wsID)
 	return errors.Join(errs...)
+}
+
+// IsKept 报告工作区是否被 ws_drop(keep_dir=true) 标记为人工保留。
+func (m *Manager) IsKept(wsID string) bool {
+	_, err := os.Stat(filepath.Join(m.wsMetaDir(wsID), "keep"))
+	return err == nil
 }
 
 func (m *Manager) writeState(wsID string) error {
@@ -428,6 +443,15 @@ func (m *Manager) ensureBase(treeID hash.ID, src ContentSource) (string, error) 
 // 注意用的是 case.go 里的 `baseRefs` —— 写入它的地方是 mountWithLower /
 // Relower。早先这里读的是另一个**从未被写入**的 map，于是 inUse 只增不减，
 // `Evict` 会认为所有基底都在被引用，基底缓存永远腾不出空间。
+// releaseBaseTree 直接释放一次 ensureBase 引用（尚未写入 baseRefs 的失败路径）。
+func (m *Manager) releaseBaseTree(id hash.ID) {
+	m.mu.Lock()
+	if m.inUse[id] > 0 {
+		m.inUse[id]--
+	}
+	m.mu.Unlock()
+}
+
 func (m *Manager) releaseBase(wsID string) {
 	v, ok := baseRefs.LoadAndDelete(wsID)
 	if !ok {

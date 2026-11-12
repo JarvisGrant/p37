@@ -338,3 +338,31 @@ func TestScrubDetectsCorruption(t *testing.T) {
 }
 
 var _ = workspace.OpenRequest{}
+
+// TestGCPreservesActiveWorkspaceEffectiveTree 回归：ws_effective_tree 里的
+// 中间 Tree 只被缓存引用；GC 必须先清缓存，否则会删掉活跃工作区的有效树。
+func TestGCPreservesActiveWorkspaceEffectiveTree(t *testing.T) {
+	e := newGCEnv(t, 1)
+	e.seed("a.txt", "v0\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	w := e.open("", "active")
+	e.write(w.ID, "a.txt", "changed\n")
+	if err := e.r.WS.Sync(w.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.r.WS.EffectiveTree(w.ID); err != nil {
+		t.Fatalf("preview effective tree: %v", err)
+	}
+	if _, err := e.r.GC(false); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	eff, err := e.r.WS.EffectiveTree(w.ID)
+	if err != nil {
+		t.Fatalf("effective tree after gc: %v", err)
+	}
+	if _, err := e.r.Store.GetTree(eff); err != nil {
+		t.Fatalf("effective tree object missing after gc: %v", err)
+	}
+}

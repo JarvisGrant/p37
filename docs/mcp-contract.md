@@ -1,4 +1,4 @@
-# p37 MCP 契约（v0.4.13 / format_ver=2）
+# p37 MCP 契约（v0.5.0 / format_ver=2）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
 `internal/mcpsrv` 的注册为准；当前注册 68 个工具。
@@ -95,7 +95,7 @@
 
 ```json
 {
-  "p37_version": "0.4.13",
+  "p37_version": "0.5.0",
   "persistence": {
     "truth_source": "local_repo",
     "local": {"root": "/srv/repos/app", "available": true, "format_ver": 2},
@@ -168,6 +168,8 @@ detach: repo_quiesce → guest umount → repo_unregister → 宿主 remove-devi
 删除卷: repo_quiesce → guest umount → repo_unregister → 宿主删卷（不要用 repo_delete）
 ```
 
+`repo_quiesce` 之后，除 `repo_resume` / `repo_unregister` / `repo_health`
+（只读快路径）外的业务工具返回 `repo_quiesced`，不会把 repo 重新打开或重挂。
 `repo_quiesce` / `repo_unregister` 的分工：前者只关闭 DB/overlay/锁，registry
 仍可见；后者才写 tombstone。P36 必须先 quiesce、再 umount、成功后才 unregister；
 如果 umount 失败，调用 `repo_resume` 恢复，避免“VM 还在运行、repo 却
@@ -667,7 +669,7 @@ repo_health { "repo": "my-app", "deep": true }
   "active_workspaces": 0,
   "leases": 0,
   "format_ver": 2,
-  "p37_version": "0.4.13",
+  "p37_version": "0.5.0",
   "warnings": ["mainline_head_missing"]
 }
 ```
@@ -685,7 +687,7 @@ repo_health { "repo": "my-app", "deep": true }
   "refs_match": true,
   "data_ok": true,
   "repo_db_ok": true,
-  "p37_version": "0.4.13",
+  "p37_version": "0.5.0",
   "quota": {"max_active":8,"active_used":2,"active_available":6,
             "hidden_limit":32,"hidden_used":0,"max_depth":32,"max_fanout":16,
             "landed":0,"broken":0,"workspaces":[]},
@@ -801,6 +803,7 @@ repo_required repo_not_found repo_exists repo_busy repo_not_initialized
 repo_not_empty repo_history_not_empty repo_db_corrupt
 idempotency_in_progress
 repo_name_mismatch repo_path_exists repo_is_mountpoint
+repo_quiesced
 registry_busy
 line_not_found line_exists line_protected
 target_invalid target_moved source_moved target_not_ancestor
@@ -813,7 +816,7 @@ not_dirty conflict land_queue_full invalid_path
 destination_not_empty path_not_found
 overlay_unavailable path_case_conflict
 version_not_found ambiguous_id
-sync_not_configured sync_in_progress sync_remote_moved
+sync_not_configured sync_in_progress sync_remote_moved sync_remote_unavailable
 corrupt_object file_too_large
 invalid_argument internal not_found
 ```

@@ -38,7 +38,7 @@ Environment=TMPDIR=/srv/repos/.p37/tmp
 ExecStart=/usr/local/bin/p37-run
 Restart=on-failure
 RestartSec=2s
-TimeoutStopSec=60s
+TimeoutStopSec=120s
 KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal

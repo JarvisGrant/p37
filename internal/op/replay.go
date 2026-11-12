@@ -175,10 +175,17 @@ func (c *replayCtx) contentOf(path string) ([][]byte, bool, error) {
 
 func (c *replayCtx) applyCreate(o *Op) error {
 	if e, ok := c.entries[o.Path]; ok {
+		// 两侧独立创建了完全相同的内容：幂等，不制造假冲突。
+		if e.ID == o.NewFile && e.Kind == o.EntryKindOf() {
+			return nil
+		}
 		return c.conflict(o, ConflictOverlappingEdit, fileHunks(e, c.cs), insertHunks(o))
 	}
 	if o.NewFile.IsZero() {
 		return fmt.Errorf("op: create 缺少 NewFile (op=%s)", o.ID)
+	}
+	if collided, err := c.checkPathCollision(o, o.Path); collided || err != nil {
+		return err
 	}
 	c.entries[o.Path] = tree.Entry{
 		Name: baseName(o.Path), Mode: createdMode(o), Kind: o.EntryKindOf(), ID: o.NewFile,
@@ -187,15 +194,42 @@ func (c *replayCtx) applyCreate(o *Op) error {
 }
 
 func (c *replayCtx) applyDelete(o *Op) error {
-	e, ok := c.entries[o.Path]
+	// 对侧可能已经重命名了文件；删除必须跟随 rename，否则删除意图会静默丢失。
+	path := c.target(o.Path)
+	e, ok := c.entries[path]
 	if !ok {
 		return nil // 幂等：已经不存在，视为达成
 	}
 	if e.ID != o.BaseFile {
-		return c.conflict(o, ConflictDeleteVsEdit, fileHunks(e, c.cs), nil)
+		return c.conflictAt(path, o, ConflictDeleteVsEdit, fileHunks(e, c.cs), nil)
 	}
-	delete(c.entries, o.Path)
+	delete(c.entries, path)
 	return nil
+}
+
+// checkPathCollision 检测文件/目录同名。
+//
+// entries 只保存文件（目录由路径前缀隐含）。因此：
+//   - 祖先路径已是文件 -> 新文件会与隐含目录同名；
+//   - 已有后代文件 -> 新文件会把已有目录变成同名文件。
+func (c *replayCtx) checkPathCollision(o *Op, path string) (bool, error) {
+	for p := path; ; {
+		i := strings.LastIndexByte(p, '/')
+		if i < 0 {
+			break
+		}
+		p = p[:i]
+		if e, ok := c.entries[p]; ok {
+			return true, c.conflictAt(path, o, ConflictPathCollision, fileHunks(e, c.cs), insertHunks(o))
+		}
+	}
+	prefix := path + "/"
+	for p, e := range c.entries {
+		if strings.HasPrefix(p, prefix) {
+			return true, c.conflictAt(path, o, ConflictPathCollision, fileHunks(e, c.cs), insertHunks(o))
+		}
+	}
+	return false, nil
 }
 
 func (c *replayCtx) applyAttr(o *Op) error {
@@ -227,6 +261,9 @@ func (c *replayCtx) applyBlobPut(o *Op) error {
 	if !ok {
 		if !o.BaseFile.IsZero() {
 			return c.conflictAt(path, o, ConflictMissingBase, nil, insertHunks(o))
+		}
+		if collided, err := c.checkPathCollision(o, path); collided || err != nil {
+			return err
 		}
 		c.entries[path] = tree.Entry{
 			Name: baseName(path), Mode: createdMode(o), Kind: o.EntryKindOf(), ID: o.NewFile,
@@ -264,6 +301,12 @@ func (c *replayCtx) applyRename(o *Op) error {
 	}
 	if _, taken := c.entries[o.DestPath]; taken {
 		return c.conflict(o, ConflictRenameVsEdit, nil, nil)
+	}
+	if o.DestPath == o.Path {
+		return nil
+	}
+	if collided, err := c.checkPathCollision(o, o.DestPath); collided || err != nil {
+		return err
 	}
 	if e.ID != o.BaseFile {
 		// §6.3：「rename_vs_edit 且内容未分叉 -> 跟随重命名，在新路径应用」。
@@ -343,7 +386,10 @@ func (c *replayCtx) applyHunksTo(path string, o *Op) error {
 	for hi := range o.Hunks {
 		h := &o.Hunks[hi]
 		if !force {
-			if next, ok := Place(h, placed, h.StartHint, c.opt.MaxMatches); ok {
+			// StartHint 是改动块（Remove）的起始行；Place 的 hint 是
+			// Pattern()（Before++Remove++After）的起始行，需要减掉上下文长度。
+			hint := h.StartHint - len(h.Before)
+			if next, ok := Place(h, placed, hint, c.opt.MaxMatches); ok {
 				placed = next
 				continue
 			}
@@ -496,9 +542,19 @@ func (c *replayCtx) applyWholeResolution(o *Op, r Resolution) error {
 			}
 			return nil
 		}
-		if !o.NewFile.IsZero() {
+		id := o.NewFile
+		if id.IsZero() && o.Kind == KindModify {
+			// modify op 不携带整文件 id；missing_base 时用 base 文件重放本侧 hunk
+			// 才能兑现“按本侧内容创建”。此前这里静默 no-op，land 会成功但丢改动。
+			var err error
+			id, err = c.rebuildModifiedFile(o)
+			if err != nil {
+				return err
+			}
+		}
+		if !id.IsZero() {
 			c.entries[o.Path] = tree.Entry{
-				Name: o.Path, Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: o.NewFile,
+				Name: baseName(o.Path), Mode: codec.ModeNormal, Kind: o.EntryKindOf(), ID: id,
 			}
 		}
 		return nil
@@ -511,6 +567,30 @@ func (c *replayCtx) applyWholeResolution(o *Op, r Resolution) error {
 		// both / custom 对整文件级冲突无确定语义，视为未解决。
 		return nil
 	}
+}
+
+// rebuildModifiedFile 把 modify op 的 hunk 应用到 base 文件上，返回新内容 id。
+//
+// 用于 missing_base + take_upper：目标侧已删除文件，但本侧仍要保留修改后的内容。
+func (c *replayCtx) rebuildModifiedFile(o *Op) (hash.ID, error) {
+	if o.BaseFile.IsZero() {
+		return hash.ID{}, fmt.Errorf("op: modify 缺少 BaseFile (op=%s)", o.ID)
+	}
+	data, err := c.cs.ReadFileData(o.BaseFile)
+	if err != nil {
+		return hash.ID{}, err
+	}
+	placed := tree.SplitLines(data)
+	for hi := range o.Hunks {
+		h := &o.Hunks[hi]
+		if next, ok := Place(h, placed, h.StartHint-len(h.Before), c.opt.MaxMatches); ok {
+			placed = next
+			continue
+		}
+		// 与 applyResolution 的兜底一致：锚点失效时按 hint 位置替换。
+		placed = spliceAt(placed, h.StartHint, len(h.Remove), h.Insert)
+	}
+	return c.cs.PutFileData(tree.JoinLines(placed))
 }
 
 // applyResolution 对行级冲突应用一条已记录的解决。
@@ -531,7 +611,7 @@ func applyResolution(r Resolution, placed [][]byte, h *Hunk) [][]byte {
 	case ResolveTakeLower:
 		return placed
 	case ResolveTakeUpper:
-		if out, ok := Place(h, placed, h.StartHint, DefaultMaxMatches); ok {
+		if out, ok := Place(h, placed, h.StartHint-len(h.Before), DefaultMaxMatches); ok {
 			return out
 		}
 		return spliceAt(placed, h.StartHint, len(h.Remove), h.Insert)
@@ -637,6 +717,9 @@ func candidatesFor(c Conflict) []Candidate {
 	case ConflictMissingBase:
 		add(ResolveTakeUpper, "按本侧内容创建")
 		add(ResolveTakeLower, "放弃本侧改动")
+	case ConflictPathCollision:
+		add(ResolveTakeLower, "保留当前路径，放弃本侧")
+		add(ResolveTakeUpper, "采用本侧（重命名/删除冲突路径）")
 	}
 	return out
 }

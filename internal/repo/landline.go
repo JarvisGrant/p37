@@ -314,7 +314,7 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 		}
 	}
 	replayed, err := op.Replay(headTree, allOps, r.Store, op.Options{
-		WsID: wsID, MaxMatches: op.DefaultMaxMatches,
+		WsID: wsID, MaxMatches: r.maxMatchesOrDefault(),
 		Resolver: r.DB.Resolver(), Candidates: true, Follow: follow,
 	})
 	if err != nil {
@@ -705,7 +705,7 @@ func (r *Repo) mergeIntoParentLocked(wsID, parentWsID string, opt LandIntoOption
 	// preview_id 就换 key 域。否则「preview → resolve → 带 preview_id 重试」
 	// 会算出新 key，解决记录永远匹配不上（沙盒 #66.2 的死循环）。
 	replayed, err := op.Replay(parentTreeObj, ops, r.Store, op.Options{
-		WsID: wsID, MaxMatches: op.DefaultMaxMatches,
+		WsID: wsID, MaxMatches: r.maxMatchesOrDefault(),
 		Resolver: r.DB.Resolver(), Candidates: true,
 		ForceConflictPaths: forceConflict,
 	})

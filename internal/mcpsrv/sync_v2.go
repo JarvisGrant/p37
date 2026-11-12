@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,15 @@ func (s *Server) registerSyncV2() {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
 			if a.Async {
-				go func() { _, _ = pushRepo(context.Background(), rr, s.Hub, a.Full, 0) }()
+				if a.ExpectedRemoteGeneration > 0 {
+					return nil, coded("invalid_argument", "async=true 不支持 expected_remote_generation")
+				}
+				go func() {
+					if _, err := pushRepo(context.Background(), rr, s.Hub, a.Full, 0); err != nil {
+						// 异步路径没有调用方等待；至少留下可诊断日志。
+						log.Printf("sync_push(async) repo=%s 失败: %v", rr.Root, err)
+					}
+				}()
 				return map[string]any{"durable": false, "async": true}, nil
 			}
 			if a.IdempotencyKey != "" {
@@ -243,16 +252,26 @@ func (s *Server) registerSyncV2() {
 			if err != nil {
 				return nil, err
 			}
+			doRemote, doLocal := a.Remote, a.Local
+			if !doRemote && !doLocal {
+				doLocal = true // 与 CLI 默认一致
+			}
 			n, bytes := 0, int64(0)
-			if remote != nil && !a.Local {
+			if doRemote {
+				if remote == nil {
+					return nil, coded("sync_not_configured", "仓库未配置远端")
+				}
 				n, bytes, err = remotesync.PruneRemote(ctx, remote)
 				if err != nil {
 					return nil, err
 				}
 			}
-			ln, lb, err := remotesync.PruneLocal(rr)
-			if err != nil {
-				return nil, err
+			ln, lb := 0, int64(0)
+			if doLocal {
+				ln, lb, err = remotesync.PruneLocal(rr)
+				if err != nil {
+					return nil, err
+				}
 			}
 			return map[string]any{"dry_run": false, "remote": n, "remote_bytes": bytes,
 				"local": ln, "local_bytes": lb}, nil
@@ -273,7 +292,12 @@ func pushRepo(ctx context.Context, rr *repo.Repo, h *hub.Hub, full bool, expecte
 		return nil, coded("sync_not_configured", "仓库未配置远端")
 	}
 	if expectedGen > 0 {
-		if ref, err := remote.GetRef(ctx); err == nil && ref.Generation != expectedGen {
+		ref, err := remote.GetRef(ctx)
+		if err != nil {
+			// 不能把“读不到远端 ref”当成校验通过：调用方显式给了前置条件。
+			return nil, coded("sync_remote_unavailable", "读取远端 ref 失败，无法校验 generation: %v", err)
+		}
+		if ref.Generation != expectedGen {
 			return nil, coded("sync_remote_moved", "远端 generation=%d，期望 %d", ref.Generation, expectedGen)
 		}
 	}

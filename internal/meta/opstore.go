@@ -128,7 +128,9 @@ func (r *ResolutionStore) Lookup(key hash.ID) (op.Resolution, bool, error) {
 		return op.Resolution{}, false, nil
 	}
 	if err != nil {
-		return op.Resolution{}, false, nil
+		// 只有 sql.ErrNoRows 表示“没有记录”。其它 DB 错误必须上抛，
+		// 否则 transient BUSY 会被当成用户未解决冲突，land 会静默改变合并结果。
+		return op.Resolution{}, false, err
 	}
 
 	res := op.Resolution{

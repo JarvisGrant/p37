@@ -276,7 +276,7 @@ func (h *Hub) getEnrichedLocked(ref string) (*Entry, error) {
 }
 
 func (h *Hub) writeConfig(controlDir string) error {
-	return config.SaveControl(controlDir, h.cfg)
+	return config.SaveRepoControl(controlDir, h.cfg)
 }
 
 func (h *Hub) ensureMetaAndConfig(root, id, name, defaultLine string) error {

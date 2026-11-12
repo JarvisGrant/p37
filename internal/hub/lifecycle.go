@@ -452,6 +452,8 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 	if err := h.dropCachedLocked(e); err != nil {
 		return nil, err
 	}
+	delete(h.quiesced, e.ID)
+	delete(h.quiesced, e.Name)
 
 	// 只有 close/unmount 全部成功后才写 tombstone；失败时 registry 行保持
 	// 可见，调用方可以安全重试。
@@ -492,6 +494,8 @@ func (h *Hub) Quiesce(ref string, force bool) (*QuiesceResult, error) {
 	if err := h.dropCachedLocked(e); err != nil {
 		return nil, err
 	}
+	h.quiesced[e.ID] = true
+	h.quiesced[e.Name] = true
 	return &QuiesceResult{Entry: e}, nil
 }
 
@@ -508,8 +512,13 @@ func (h *Hub) Resume(ref string) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	delete(h.quiesced, e.ID)
+	delete(h.quiesced, e.Name)
 	if h.repos[e.ID] == nil {
 		if _, err := h.openLocked(e.ID, true); err != nil {
+			// 打开失败时恢复 quiesce 标记，避免半状态被后续调用当作可用。
+			h.quiesced[e.ID] = true
+			h.quiesced[e.Name] = true
 			return nil, err
 		}
 	}
@@ -740,6 +749,12 @@ func (h *Hub) guardDeletePath(path string) error {
 	return nil
 }
 
+// ValidateRepoPath 是 validateRepoPath 的只读导出，供 MCP repo_import 等
+// 需要把用户输入限制在 root 内的工具复用。
+func (h *Hub) ValidateRepoPath(path string, mustExist bool) (string, error) {
+	return h.validateRepoPath(path, mustExist)
+}
+
 // validateRepoPath 确保 path 是 root 下的绝对路径，拒绝 ..、root 自身、
 // root/.p37 以及 symlink 逃逸。
 func (h *Hub) validateRepoPath(path string, mustExist bool) (string, error) {
@@ -766,6 +781,26 @@ func (h *Hub) validateRepoPath(path string, mustExist bool) (string, error) {
 	if err != nil {
 		if mustExist || !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("%w: %s: %v", ErrInvalidPath, abs, err)
+		}
+		// 叶子尚不存在时也必须逐级检查已存在的祖先：否则
+		// /srv/repos/link/new（link -> /etc）会绕过 EvalSymlinks 检查。
+		cur := rootAbs
+		parts := strings.Split(rel, string(filepath.Separator))
+		for i, part := range parts {
+			cur = filepath.Join(cur, part)
+			afi, aerr := os.Lstat(cur)
+			if errors.Is(aerr, os.ErrNotExist) {
+				break
+			}
+			if aerr != nil {
+				return "", fmt.Errorf("%w: %s: %v", ErrInvalidPath, cur, aerr)
+			}
+			if afi.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("%w: path 含 symlink 组件: %s", ErrInvalidPath, cur)
+			}
+			if i < len(parts)-1 && !afi.IsDir() {
+				return "", fmt.Errorf("%w: path 祖先不是目录: %s", ErrInvalidPath, cur)
+			}
 		}
 		return abs, nil
 	}

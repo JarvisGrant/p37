@@ -126,10 +126,10 @@ func (r *Repo) emit(event, versionID, wsID string) {
 		return
 	}
 	head := ""
-	if st, err := r.Status(); err == nil && st.HasHead {
-		head = st.MainlineHead.String()
+	if id, ok, err := r.DB.Head(); err == nil && ok {
+		head = id.String()
 	}
-	events.Emit(r.eventsSocket, events.Event{
+	events.EmitAsync(r.eventsSocket, events.Event{
 		Event: event, Repo: filepath.Base(r.Root), Root: r.Root,
 		Head: head, VersionID: versionID, WSID: wsID,
 	})

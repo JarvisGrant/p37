@@ -210,7 +210,8 @@ func TestPackDuplicateTolerant(t *testing.T) {
 	}
 }
 
-// TestPackCorruptionDetected 覆盖被截断的 pack：位置表加载必须报错。
+// TestPackCorruptionDetected 覆盖被截断的 pack：加载时跳过坏 pack，
+// 不能让一个残片拖垮整个 store（松散副本/其它 pack 仍可读）。
 func TestPackCorruptionDetected(t *testing.T) {
 	lfs, _ := NewLocalFS(t.TempDir())
 	s := NewStore(NewPackStore(lfs), NewMemIndex())
@@ -240,8 +241,11 @@ func TestPackCorruptionDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 	ps := NewPackStore(lfs)
-	if _, err := ps.ListPrefix("objects/"); err == nil {
-		t.Fatal("损坏的 pack 应导致加载失败")
+	if _, err := ps.ListPrefix("objects/"); err != nil {
+		t.Fatalf("损坏的 pack 应被跳过而不是拖垮 store: %v", err)
+	}
+	if packs, err := ps.Packs(); err != nil || len(packs) != 0 {
+		t.Fatalf("损坏的 pack 不应进入位置表: packs=%v err=%v", packs, err)
 	}
 }
 
