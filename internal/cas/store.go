@@ -737,6 +737,73 @@ func (s *Store) ListObjects() ([]ObjectInfo, error) {
 	return out, nil
 }
 
+// ReindexLoose 把磁盘上存在、但 object_index 缺少的松散对象补登记。
+//
+// 崩溃窗口：对象字节已经写盘、索引批次还在内存（FlushIndex 之前），进程重启后
+// 这些对象既不可读也不可回收（GC 只看索引）。这里按存储头的类型重建索引；
+// 补登记后 GC 的 mark-sweep 会正常回收未被任何版本/op 引用的对象。
+func (s *Store) ReindexLoose() (int, error) {
+	stats, err := s.bs.ListPrefix("objects/")
+	if err != nil {
+		return 0, err
+	}
+	have := map[ObjectKey]bool{}
+	if err := s.idx.Iterate(func(id hash.ID, typ uint8, _, _ int64) error {
+		have[ObjectKey{ID: id, Type: typ}] = true
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	s.pendingMu.Lock()
+	for k := range s.pending {
+		have[k] = true
+	}
+	s.pendingMu.Unlock()
+
+	entries := make([]IndexEntry, 0)
+	for _, st := range stats {
+		id, ok := objectIDFromKey(st.Key)
+		if !ok {
+			continue
+		}
+		hdr, herr := s.bs.GetRange(st.Key, 0, 2)
+		if herr != nil || len(hdr) != 2 || hdr[0] != storedFormat {
+			continue
+		}
+		typ := hdr[1]
+		if typ < codec.TypeBlob || typ > codec.TypeVersionMerge {
+			continue
+		}
+		k := ObjectKey{ID: id, Type: typ}
+		if have[k] {
+			continue
+		}
+		rc, _, gerr := s.bs.Get(st.Key)
+		if gerr != nil {
+			continue
+		}
+		stored, rerr := io.ReadAll(rc)
+		_ = rc.Close()
+		if rerr != nil {
+			continue
+		}
+		_, raw, derr := decodeStored(stored)
+		if derr != nil {
+			// 损坏对象保留给 fsck/scrub 报告，不登记。
+			continue
+		}
+		entries = append(entries, IndexEntry{Key: k, Size: int64(len(stored)), RawSize: int64(len(raw))})
+		have[k] = true
+	}
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	if err := s.idx.AddMany(entries); err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+
 // DeleteObjectTyped 删除指定类型并同步从索引中摘除。
 func (s *Store) DeleteObjectTyped(typ uint8, id hash.ID) error {
 	s.pendingMu.Lock()

@@ -377,3 +377,38 @@ func TestTypeConflictKeepsBothTypes(t *testing.T) {
 		t.Fatalf("通用 Get 应报告歧义，得到 %v", err)
 	}
 }
+
+// TestReindexLooseRecoversUnflushedIndex 回归：对象已写盘但索引批次未 flush
+// （进程崩溃）时，ReindexLoose 必须能按存储头恢复类型并让对象可读。
+func TestReindexLooseRecoversUnflushedIndex(t *testing.T) {
+	root := t.TempDir()
+	bs, err := NewLocalFS(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1 := NewStore(bs, NewMemIndex())
+	id, err := s1.PutBlob([]byte("hello-crash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟崩溃：换一个全新的索引，磁盘对象还在。
+	s2 := NewStore(bs, NewMemIndex())
+	if ok, _ := s2.idx.Has(id); ok {
+		t.Fatal("前置条件：新索引不应已有该对象")
+	}
+	n, err := s2.ReindexLoose()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("补登记数量 = %d，期望 1", n)
+	}
+	got, err := s2.GetBlob(id)
+	if err != nil || string(got) != "hello-crash" {
+		t.Fatalf("补登记后读取失败: %q %v", got, err)
+	}
+	n, err = s2.ReindexLoose()
+	if err != nil || n != 0 {
+		t.Fatalf("第二次补登记应为 0，得到 %d %v", n, err)
+	}
+}

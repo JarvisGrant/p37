@@ -1315,7 +1315,7 @@ func cmdWSSync(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 	start := time.Now()
-	if err := r.WS.Sync(args[0]); err != nil {
+	if err := r.Sync(args[0]); err != nil {
 		return fail(errw, err)
 	}
 	n, _ := r.DB.CountOps(args[0])

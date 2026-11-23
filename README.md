@@ -11,7 +11,7 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**v0.7.2 / format_ver=3**。多仓库、命名线、会话工作区、子工作区
+> 状态：**v0.7.3 / format_ver=3**。多仓库、命名线、会话工作区、子工作区
 > `ws_land_into`、`line_merge`、历史读取、多 line 同步与恢复、应用卷热插拔
 > 生命周期均已接入。M1–M5 主体已在 P36 实例（Ubuntu 26.04 + ext4 +
 > OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；当前状态和
@@ -118,7 +118,7 @@ copy 模式每个工作区是一份完整树，需要按**应用卷实际容量*
 `max_active` / `warn_disk_bytes`，不要假设固定的可写盘容量。
 
 ```bash
-make release VERSION=0.7.2       # 发布 tar + sha256
+make release VERSION=0.7.3       # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 

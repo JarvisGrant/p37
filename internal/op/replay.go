@@ -426,9 +426,13 @@ func (c *replayCtx) applyHunksTo(path string, o *Op) error {
 		if r, found, err := c.lookup(key); err != nil {
 			return err
 		} else if found {
-			placed = applyResolution(r, placed, h)
-			c.res.Resolved++
-			continue
+			// 锚点歧义（同一 Before/Remove/After 在目标中多处等距出现）时
+			// 不猜位置：保留为未决冲突，等调用方重新裁决。
+			if next, ok := applyResolution(r, placed, h); ok {
+				placed = next
+				c.res.Resolved++
+				continue
+			}
 		}
 
 		conf := Conflict{
@@ -634,35 +638,31 @@ func (c *replayCtx) rebuildModifiedFile(o *Op) (hash.ID, error) {
 // 之所以允许在锚点失效时按 hint 落位：真正的语义保真由 ConflictKey 承担
 // —— 只要目标当前内容与记录 resolution 时不同，key 就会变化，冲突会自动
 // 重新浮现，交回给调用方决策。
-func applyResolution(r Resolution, placed [][]byte, h *Hunk) [][]byte {
+// 返回 ok=false 表示锚点无法唯一定位，调用方必须保留冲突而不是猜位置。
+func applyResolution(r Resolution, placed [][]byte, h *Hunk) ([][]byte, bool) {
 	switch r.Kind {
 	case ResolveTakeLower:
-		return placed
+		return placed, true
 	case ResolveTakeUpper:
 		if out, ok := Place(h, placed, h.StartHint-len(h.Before), DefaultMaxMatches); ok {
-			return out
+			return out, true
 		}
-		return spliceAt(placed, h.StartHint, len(h.Remove), h.Insert)
+		return spliceAt(placed, h.StartHint, len(h.Remove), h.Insert), true
 	case ResolveBoth:
-		start, _ := resolutionSpan(h, placed)
-		return spliceAt(placed, start, 0, h.Insert)
+		_, start, _, ok := Locate(h, placed, h.StartHint-len(h.Before), DefaultMaxMatches)
+		if !ok {
+			return placed, false
+		}
+		return spliceAt(placed, start, 0, h.Insert), true
 	case ResolveCustom:
-		start, end := resolutionSpan(h, placed)
-		return spliceAt(placed, start, end-start, r.Content)
+		_, start, end, ok := Locate(h, placed, h.StartHint-len(h.Before), DefaultMaxMatches)
+		if !ok {
+			return placed, false
+		}
+		return spliceAt(placed, start, end-start, r.Content), true
 	default:
-		return placed
+		return placed, true
 	}
-}
-
-// resolutionSpan 返回 hunk 在 placed 中对应的 [start,end)：优先按锚点定位，
-// 锚点失效时退回 StartHint 并做钳制。
-func resolutionSpan(h *Hunk, placed [][]byte) (int, int) {
-	if _, rs, re, ok := Locate(h, placed, h.StartHint-len(h.Before), DefaultMaxMatches); ok {
-		return rs, re
-	}
-	start := clamp(h.StartHint, 0, len(placed))
-	end := min(len(placed), start+len(h.Remove))
-	return start, end
 }
 
 // spliceAt 把 placed[start:start+n] 替换为 ins；索引自动钳制。

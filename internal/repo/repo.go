@@ -63,6 +63,10 @@ type Repo struct {
 	landSem chan struct{}
 	// landMu 串行化整条 land 流水线（§7.4：一条全局 land 队列）。
 	landMu sync.Mutex
+	// objMu 保护「对象写入」与 GC 的互斥：外部 ws_sync/ws_diff 持读锁，
+	// GC 在 landMu 之后持写锁。这样并发 sync 写出的对象不会在落 op 之前
+	// 被 GC 当成不可达删掉。land 内部采集已由 landMu 与 GC 互斥，不取此锁。
+	objMu sync.RWMutex
 	// maxMatches 是 place 的匹配上限（merge.max_matches）。
 	maxMatches int
 }
@@ -689,7 +693,13 @@ func writeMainlineRefStore(store *cas.Store, head hash.ID) error {
 }
 
 // Sync 采集一个工作区（workspace.Manager.Sync 的便捷入口）。
-func (r *Repo) Sync(wsID string) error { return r.WS.Sync(wsID) }
+// Sync 采集工作区。外部调用必须走这里而不是 WS.Sync：GC 会用 objMu 的写锁
+// 与采集互斥，避免删掉采集刚写入、尚未被 op 引用的对象。
+func (r *Repo) Sync(wsID string) error {
+	r.objMu.RLock()
+	defer r.objMu.RUnlock()
+	return r.WS.Sync(wsID)
+}
 
 // LiveWorkspaces 返回当前应当被 fs watcher 监听的工作区（id → 目录）。
 //

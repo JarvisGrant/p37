@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/repo"
 	"github.com/chenyiwen/p37/internal/workspace"
 )
@@ -364,5 +365,40 @@ func TestGCPreservesActiveWorkspaceEffectiveTree(t *testing.T) {
 	}
 	if _, err := e.r.Store.GetTree(eff); err != nil {
 		t.Fatalf("effective tree object missing after gc: %v", err)
+	}
+}
+
+// TestGCReclaimsObjectMissingFromIndex 回归：崩溃后对象已落盘但索引缺失，
+// GC 必须先补登记再按不可达回收，而不是让文件永久残留。
+func TestGCReclaimsObjectMissingFromIndex(t *testing.T) {
+	e := newGCEnv(t, 1)
+	e.seed("a.txt", "a\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	// 用独立索引写一个对象：字节落盘，但 e.r.Store 的 object_index 不知道它，
+	// 等价于采集写完对象后进程在 FlushIndex 前崩溃。
+	orphan := cas.NewStore(e.r.Store.BlobStore(), cas.NewMemIndex())
+	bytes := make([]byte, 4096)
+	for i := range bytes {
+		bytes[i] = byte(i % 251)
+	}
+	id, err := orphan.PutBlob(bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := e.r.GC(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.ObjectsReindexed < 1 {
+		t.Fatalf("GC 应先补登记崩溃残留，reindexed=%d", rep.ObjectsReindexed)
+	}
+	if rep.ObjectsDeleted < 1 {
+		t.Fatalf("不可达的补登记对象应被回收，deleted=%d", rep.ObjectsDeleted)
+	}
+	// 索引里不应再残留该对象（GC 通过对象清单删除）。
+	if ok, _ := e.r.Store.Has(id); ok {
+		t.Fatal("孤儿对象回收后 Has 仍为 true")
 	}
 }

@@ -133,6 +133,34 @@ func TestQuiesceWaitsForInflightCalls(t *testing.T) {
 	}
 }
 
+// TestQuiesceDrainTimeout 断言卡住的调用不会让 detach 永久挂住：超时返回
+// 可重试错误，并且 draining 标记被解除。
+func TestQuiesceDrainTimeout(t *testing.T) {
+	h, root := newHub(t)
+	path := filepath.Join(root, "app-timeout")
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RegisterPath("app-timeout", path, hub.RegisterOptions{InitIfMissing: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.SetDrainTimeout(50 * time.Millisecond)
+	if err := h.Acquire("app-timeout"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Quiesce("app-timeout", false); !errors.Is(err, hub.ErrRepoDrainTimeout) {
+		t.Fatalf("期望 ErrRepoDrainTimeout，得到 %v", err)
+	}
+	// draining 已解除，新的 Open 不应再报 ErrRepoDraining。
+	if _, err := h.Open("app-timeout"); err != nil {
+		t.Fatalf("超时后 Open 应可用: %v", err)
+	}
+	h.Release("app-timeout")
+	if _, err := h.Quiesce("app-timeout", false); err != nil {
+		t.Fatalf("调用结束后 quiesce 应成功: %v", err)
+	}
+}
+
 func TestQuiesceUnknownRepoIsIdempotent(t *testing.T) {
 	h, _ := newHub(t)
 	res, err := h.Quiesce("missing", false)

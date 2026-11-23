@@ -515,7 +515,7 @@ func (r *Repo) WSDiff(wsID string) ([]WSDiffEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := r.WS.Sync(wsID); err != nil {
+	if err := r.Sync(wsID); err != nil {
 		return nil, err
 	}
 	base, err := r.Store.GetTree(w.BaseTree)

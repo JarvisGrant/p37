@@ -57,6 +57,8 @@ type GCReport struct {
 	BytesReclaimed   int64 `json:"bytes_reclaimed"`
 	StatCacheCleared int64 `json:"stat_cache_cleared"`
 	Bootstrapped     bool  `json:"stat_cache_bootstrapped"`
+	// ObjectsReindexed 是启动/GC 时补登记的「已落盘但索引缺失」对象数。
+	ObjectsReindexed int `json:"objects_reindexed"`
 
 	// pack 回收（§9 P2）：只有当 pack 内所有对象都不可达时整包删除。
 	PacksDropped       int   `json:"packs_dropped"`
@@ -73,6 +75,10 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	// 这里也拿它。
 	r.landMu.Lock()
 	defer r.landMu.Unlock()
+	// 与外部 ws_sync/ws_diff 互斥：采集先写对象、后写 op，GC 若只看索引
+	// 会在两步之间把它们判成不可达。land 内部采集已被 landMu 挡住。
+	r.objMu.Lock()
+	defer r.objMu.Unlock()
 
 	var err error
 	rep := &GCReport{DryRun: dryRun}
@@ -181,6 +187,13 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	// 当成“不在清单里”，活跃 op 的引用检查也会漏掉它们。
 	if err := r.Store.FlushIndex(); err != nil {
 		return nil, err
+	}
+	// 崩溃残留：对象已落盘但索引没来得及 flush。先补登记，否则它们永远
+	// 不会进入对象清单，既读不到也不会被回收。
+	if n, rerr := r.Store.ReindexLoose(); rerr != nil {
+		return nil, rerr
+	} else {
+		rep.ObjectsReindexed = n
 	}
 	objects, err := r.Store.ListObjects()
 	if err != nil {

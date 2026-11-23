@@ -458,7 +458,10 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	done := h.beginDrainLocked(e)
+	done, derr := h.beginDrainLocked(e)
+	if derr != nil {
+		return nil, derr
+	}
 	defer done()
 	if _, err := h.stopWorkspacesLocked(e, force); err != nil {
 		return nil, err
@@ -504,7 +507,10 @@ func (h *Hub) Quiesce(ref string, force bool) (*QuiesceResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	done := h.beginDrainLocked(e)
+	done, derr := h.beginDrainLocked(e)
+	if derr != nil {
+		return nil, derr
+	}
 	defer done()
 	if _, err := h.stopWorkspacesLocked(e, force); err != nil {
 		return nil, err

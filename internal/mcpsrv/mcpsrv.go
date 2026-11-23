@@ -707,6 +707,14 @@ func classify(err error) (code, msg string, detail any) {
 		return "repo_quiesced", err.Error(), map[string]any{
 			"retryable": true, "next_action": "repo_resume",
 		}
+	case errors.Is(err, hub.ErrRepoDrainTimeout):
+		return "repo_busy", err.Error(), map[string]any{
+			"reason": "drain_timeout", "retryable": true, "next_action": "retry_later",
+		}
+	case errors.Is(err, hub.ErrRepoDraining):
+		return "repo_busy", err.Error(), map[string]any{
+			"reason": "repo_draining", "retryable": true, "next_action": "retry_later",
+		}
 	case errors.Is(err, hub.ErrRegistryBusy):
 		return "registry_busy", err.Error(), nil
 	case errors.Is(err, hub.ErrRepoLocked):

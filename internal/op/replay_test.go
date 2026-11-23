@@ -420,15 +420,38 @@ func TestApplyResolutionAnchorShift(t *testing.T) {
 		StartHint: 1, Insert: lines("U"),
 	}
 
-	got := applyResolution(Resolution{Kind: ResolveBoth}, placed, h)
+	got, ok := applyResolution(Resolution{Kind: ResolveBoth}, placed, h)
 	want := lines("z0", "z1", "a", "U", "B", "c")
-	if !eqLines(got, want) {
-		t.Fatalf("both = %v，期望 %v", strs(got), strs(want))
+	if !ok || !eqLines(got, want) {
+		t.Fatalf("both = %v ok=%v，期望 %v", strs(got), ok, strs(want))
 	}
 
-	got = applyResolution(Resolution{Kind: ResolveCustom, Content: lines("CU")}, placed, h)
+	got, ok = applyResolution(Resolution{Kind: ResolveCustom, Content: lines("CU")}, placed, h)
 	want = lines("z0", "z1", "a", "CU", "c")
-	if !eqLines(got, want) {
-		t.Fatalf("custom = %v，期望 %v", strs(got), strs(want))
+	if !ok || !eqLines(got, want) {
+		t.Fatalf("custom = %v ok=%v，期望 %v", strs(got), ok, strs(want))
+	}
+}
+
+// TestApplyResolutionAmbiguousAnchorKeepsConflict 断言锚点多处等距出现时
+// 不会按 StartHint 猜位置；调用方必须保留未决冲突。
+func TestApplyResolutionAmbiguousAnchorKeepsConflict(t *testing.T) {
+	// a/B/c 在目标里出现两次，且相对 StartHint 等距。
+	placed := lines("a", "B", "c", "x", "y", "z", "a", "B", "c")
+	h := &Hunk{
+		Before: lines("a"), Remove: lines("B"), After: lines("c"),
+		StartHint: 4, Insert: lines("U"),
+	}
+	for _, r := range []Resolution{
+		{Kind: ResolveBoth},
+		{Kind: ResolveCustom, Content: lines("CU")},
+	} {
+		got, ok := applyResolution(r, placed, h)
+		if ok {
+			t.Fatalf("%s 锚点歧义时应返回 ok=false，得到 %v", r.Kind, strs(got))
+		}
+		if !eqLines(got, placed) {
+			t.Fatalf("%s 锚点歧义时不应修改目标", r.Kind)
+		}
 	}
 }

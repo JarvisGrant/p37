@@ -604,7 +604,7 @@ func (s *Server) registerWorkspace() {
 				return nil, coded("ws_busy", "工作区状态为 %s", life.State)
 			}
 			before, _ := rr.DB.CountOps(a.WsID)
-			if err := rr.WS.Sync(a.WsID); err != nil {
+			if err := rr.Sync(a.WsID); err != nil {
 				return nil, err
 			}
 			after, _ := rr.DB.CountOps(a.WsID)

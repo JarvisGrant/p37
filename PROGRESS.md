@@ -40,6 +40,17 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.7.3 并发、崩溃恢复与 drain 超时
+
+- `Repo.objMu`：外部 `ws_sync`/`ws_diff` 持读锁，GC 在 `landMu` 之后持写锁，
+  消除 GC 与采集之间「对象已写、op 未提交」的删除窗口。
+- `cas.ReindexLoose`：GC 读对象清单前扫描松散对象，按存储头补登记索引缺失的
+  对象；崩溃残留随后按不可达回收。
+- Hub drain 增加默认 2 分钟超时（`SetDrainTimeout` 可调），超时返回
+  `ErrRepoDrainTimeout` 并解除 draining；MCP 映射为可重试 `repo_busy`。
+- `applyResolution` 返回是否成功定位；`both`/`custom` 锚点歧义时保留冲突，
+  不再按 `StartHint` 猜测。
+
 ## v0.7.2 typed CAS 之后的性能与并发收尾
 
 - `cas.Store` 增加 `AddMany`/`IndexEntry`：capture 写入的对象索引先累积在

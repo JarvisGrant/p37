@@ -40,7 +40,12 @@ var (
 	ErrRepoLocked         = errors.New("hub: repo 锁被其它进程持有")
 	ErrRepoQuiesced       = errors.New("hub: repo 已 quiesce，需要 repo_resume")
 	ErrRepoDraining       = errors.New("hub: repo 有正在执行的调用，正在等待收敛")
+	ErrRepoDrainTimeout   = errors.New("hub: 等待 repo 调用结束超时")
 )
+
+// defaultDrainTimeout 是等待进行中 MCP 调用的默认上限。正常 ws_sync/land
+// 远小于这个值；卡死调用不应让 detach 永久阻塞。
+const defaultDrainTimeout = 2 * time.Minute
 
 // BusyError 描述 unregister 被活跃工作区/租约挡住的具体原因。
 type BusyError struct {
@@ -108,9 +113,13 @@ type Hub struct {
 	// refs 记录每个 repo 正在执行的 MCP 调用数；draining 在 Quiesce/
 	// Unregister/Delete 前置位，拦住新调用并等待 refs 归零，避免在
 	// ws_sync/ws_land 中途关闭 DB、卸载 overlay。
-	refs     map[string]int
-	draining map[string]bool
-	cond     *sync.Cond
+	refs      map[string]int
+	draining  map[string]bool
+	drainWait map[string]chan struct{}
+	cond      *sync.Cond
+	// drainTimeout 限制 quiesce/unregister/delete 等待进行中调用的时间。
+	// 超时返回可重试错误并解除 draining，避免一个卡死的调用让 detach 永久挂住。
+	drainTimeout time.Duration
 	// drainMu 串行化 Quiesce/Unregister/Delete/CloseRepo。持有顺序固定为
 	// drainMu -> mu：等待 refs 归零时 cond.Wait 会释放 mu，但不会释放
 	// drainMu，因此不会有两个生命周期操作同时等在同一个 repo 上。
@@ -195,6 +204,8 @@ func New(root string, cfg config.Config) (*Hub, error) {
 		quiesced:           map[string]bool{},
 		refs:               map[string]int{},
 		draining:           map[string]bool{},
+		drainWait:          map[string]chan struct{}{},
+		drainTimeout:       defaultDrainTimeout,
 		mountProbe:         mountmgr.IsMountPoint,
 		allowNonPersistent: os.Getenv("P37_ALLOW_NONPERSISTENT") == "1",
 		healthCache:        map[string]healthCacheEntry{}}
@@ -540,21 +551,70 @@ func (h *Hub) Release(ref string) {
 	}
 	h.refs[e.ID]--
 	if h.refs[e.ID] == 0 {
+		if ch := h.drainWait[e.ID]; ch != nil {
+			close(ch)
+			delete(h.drainWait, e.ID)
+		}
 		h.cond.Broadcast()
 	}
 }
 
-// beginDrainLocked 拦住新调用并等到当前调用全部结束；返回的函数负责解除
-// draining 标记。必须在持有 h.mu 时调用；等待期间 cond 会临时释放锁。
-func (h *Hub) beginDrainLocked(e *Entry) func() {
-	h.draining[e.ID] = true
-	for h.refs[e.ID] > 0 {
-		h.cond.Wait()
+// SetDrainTimeout 调整 drain 等待上限（测试/运维用；<=0 恢复默认）。
+func (h *Hub) SetDrainTimeout(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if d <= 0 {
+		d = defaultDrainTimeout
 	}
-	return func() {
+	h.drainTimeout = d
+}
+
+// beginDrainLocked 拦住新调用并等待当前调用全部结束；返回的清理函数负责
+// 解除 draining 标记。必须在持有 h.mu 时调用；等待期间会临时释放锁，
+// 返回时重新持有。
+//
+// 超时返回 ErrRepoDrainTimeout，并解除 draining（让调用方可以重试），
+// 不会把 repo 永久锁死在 draining。
+func (h *Hub) beginDrainLocked(e *Entry) (func(), error) {
+	h.draining[e.ID] = true
+	cleanup := func() {
 		delete(h.draining, e.ID)
 		h.cond.Broadcast()
 	}
+	if h.refs[e.ID] == 0 {
+		return cleanup, nil
+	}
+	timeout := h.drainTimeout
+	if timeout <= 0 {
+		timeout = defaultDrainTimeout
+	}
+	zero := make(chan struct{})
+	h.drainWait[e.ID] = zero
+	deadline := time.Now().Add(timeout)
+	for h.refs[e.ID] > 0 {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			delete(h.drainWait, e.ID)
+			n := h.refs[e.ID]
+			cleanup()
+			return nil, fmt.Errorf("%w: %s（%d 个调用仍未结束）", ErrRepoDrainTimeout, e.Name, n)
+		}
+		h.mu.Unlock()
+		timer := time.NewTimer(remaining)
+		select {
+		case <-zero:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		h.mu.Lock()
+	}
+	delete(h.drainWait, e.ID)
+	return cleanup, nil
 }
 
 func (h *Hub) markDegraded(id string, cause error) {
@@ -575,7 +635,10 @@ func (h *Hub) CloseRepo(ref string) error {
 	if err != nil {
 		return err
 	}
-	done := h.beginDrainLocked(e)
+	done, derr := h.beginDrainLocked(e)
+	if derr != nil {
+		return derr
+	}
 	defer done()
 	return h.dropCachedLocked(e)
 }
@@ -619,7 +682,10 @@ func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 	if err := h.guardDeletePath(e.Path); err != nil {
 		return nil, err
 	}
-	done := h.beginDrainLocked(e)
+	done, derr := h.beginDrainLocked(e)
+	if derr != nil {
+		return nil, derr
+	}
 	defer done()
 	r, oerr := h.openLocked(e.ID, false)
 	if oerr != nil && !force {

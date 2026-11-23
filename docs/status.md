@@ -1,4 +1,4 @@
-# 当前状态（v0.7.2）
+# 当前状态（v0.7.3）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.7.2` |
+| 发布版本 | `v0.7.3` |
 | 仓库格式 | `format_ver = 3` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -15,6 +15,12 @@
 
 `format_ver=3` 在 v2 基础上把对象地址改为 `(type,id)` 复合 key，版本 id 不变；
 v1/v2 仓库首次被新二进制打开时会自动迁移并备份，见 [`format-v3.md`](format-v3.md)。
+
+**v0.7.3 重点（`format_ver=3`）**：并发与崩溃恢复收尾。外部 `ws_sync`/
+`ws_diff` 与 GC 通过读写锁互斥，避免 GC 删除采集刚写入、尚未被 op 引用的
+对象；GC 会补登记「已落盘但索引未 flush」的崩溃残留对象并按不可达回收；
+Hub drain 增加默认 2 分钟超时，超时返回可重试的 `repo_busy` 而不是永久挂住；
+`both`/`custom` 冲突解决遇到锚点歧义时保留未决冲突，不再按行号猜位置。
 
 **v0.7.2 重点（`format_ver=3`）**：typed CAS 之后的性能与并发收尾：
 `object_index` 改为采集结束时单事务批量登记，并在写 `stat_cache` 前先

@@ -19,6 +19,20 @@
 }
 ```
 
+## 本版重点（v0.7.3）
+
+v0.7.2 的并发/恢复补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0。
+
+- 外部 `ws_sync` / `ws_diff` 持对象读锁，GC 持写锁：并发采集写入、但 op
+  尚未提交的对象不会再被 GC 当成不可达删除。
+- GC 启动时补登记「对象已落盘、索引批次未 flush」的崩溃残留；随后按正常
+  mark-sweep 回收未引用对象，不再永久占空间。
+- `repo_quiesce` / `repo_unregister` / `repo_delete` 的 drain 增加 2 分钟
+  上限；超时返回可重试的 `repo_busy`（`reason=drain_timeout`），并解除
+  draining，避免卡死调用让 detach 永久阻塞。
+- `both` / `custom` 冲突解决遇到多处等距锚点时保留未决冲突，不再退回
+  `StartHint` 猜位置。
+
 ## 本版重点（v0.7.2）
 
 v0.7.1 的收尾补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0，
