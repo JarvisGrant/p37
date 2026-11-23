@@ -60,6 +60,9 @@ func Fetch(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetc
 		// 本轮同步包是全量 checkpoint，因此直接按创建时间应用全部远端包。
 		need = make([]*Manifest, 0, len(byResult))
 		for _, m := range byResult {
+			if manifestVersionsLocal(r, m) {
+				continue
+			}
 			need = append(need, m)
 		}
 		sort.Slice(need, func(i, j int) bool {
@@ -155,6 +158,12 @@ func Pull(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetch
 		return res, nil
 	}
 	if err := r.AdvanceHead(target, epochOf(r, target)); err != nil {
+		if errors.Is(err, repo.ErrTargetNotAncestor) {
+			// Fetch 期间本地又 land 了新版本：保持本地不动，按分叉报告。
+			res.Diverged = true
+			res.FastForward = false
+			return res, nil
+		}
 		return nil, err
 	}
 
@@ -164,6 +173,26 @@ func Pull(ctx context.Context, r *repo.Repo, remote Remote, opt Options) (*Fetch
 	res.Behind = 0
 	res.Diverged = false
 	return res, nil
+}
+
+// manifestVersionsLocal 报告包里的全部版本是否都已在本地。
+//
+// 多 line 的 ref.Lines 总是非空，历史实现因此每次都下载/重导全部远端包；
+// 这个短路让“已经同步过、只多了一个新包”的 pull 不再重复处理旧包。
+func manifestVersionsLocal(r *repo.Repo, m *Manifest) bool {
+	if m == nil || len(m.Versions) == 0 {
+		return false
+	}
+	for _, vs := range m.Versions {
+		id, err := hash.Parse(vs)
+		if err != nil {
+			return false
+		}
+		if _, err := r.DB.GetVersion(id); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // finishFetch 更新远端跟踪状态并计算 ahead/behind。
@@ -229,17 +258,30 @@ func ApplyLineRefs(r *repo.Repo, ref Ref) (map[string]string, error) {
 	}
 	for name, lr := range ref.Lines {
 		if lr.DeletedTS != 0 {
-			_ = r.DB.DeleteLine(name, lr.DeletedTS)
+			// 远端删除 line 不能绕过本地保护：默认 line、protected line、
+			// 仍有活跃工作区的 line 一律拒绝，并把结果如实报告给调用方。
+			if err := r.DeleteLine(name, false); err != nil {
+				result[name] = "delete_rejected"
+				continue
+			}
+			result[name] = "deleted"
 			continue
 		}
 		head, err := hash.Parse(lr.Head)
 		if err != nil {
 			return result, err
 		}
+		// line head 必须对应本地已导入的版本；否则会留下悬空 head。
+		if _, err := r.DB.GetVersion(head); err != nil {
+			return result, fmt.Errorf("line %s: head %s 不在本地: %w", name, head, err)
+		}
 		cur, err := r.DB.GetLine(name)
 		if err != nil {
 			from, _ := hash.Parse(lr.CreatedFrom)
 			if from.IsZero() {
+				from = head
+			}
+			if _, verr := r.DB.GetVersion(from); verr != nil {
 				from = head
 			}
 			if err := r.DB.CreateLine(name, head, from, lr.Protected, meta.NowMS()); err != nil {
@@ -270,7 +312,9 @@ func ApplyLineRefs(r *repo.Repo, ref Ref) (map[string]string, error) {
 		}
 	}
 	if def != "" {
-		_ = r.DB.SetDefaultLine(def)
+		if l, derr := r.DB.GetLine(def); derr == nil && l.DeletedTS == 0 {
+			_ = r.DB.SetDefaultLine(def)
+		}
 	}
 	if curDef, derr := r.DB.DefaultLine(); derr == nil {
 		if h, herr := r.DB.LineHead(curDef); herr == nil {

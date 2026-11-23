@@ -384,3 +384,28 @@ func TestReplayTakeUpperRebuildsModifiedMissingBase(t *testing.T) {
 		t.Fatalf("take_upper 结果 = %q ok=%v", got, ok)
 	}
 }
+
+func TestUnflattenRejectsNonAdjacentAncestor(t *testing.T) {
+	f := newFixture(t, "ws_unflatten")
+	fileID := f.fileID("foo", "x")
+	entries := map[string]tree.Entry{
+		"foo":         {Name: "foo", Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: fileID},
+		"foo-bar.txt": {Name: "foo-bar.txt", Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: fileID},
+		"foo/bar":     {Name: "bar", Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: fileID},
+	}
+	if _, err := unflatten(f.cs, entries); err == nil {
+		t.Fatal("foo 文件与 foo/bar 目录同名应被拒绝（字典序不相邻）")
+	}
+}
+
+func TestModifyReplayIsIdempotentWhenTargetAlreadyNew(t *testing.T) {
+	f := newFixture(t, "ws_modify_idem")
+	newID := f.fileID("a.txt", "new\n")
+	base := &tree.Tree{Entries: []tree.Entry{{Name: "a.txt", Mode: codec.ModeNormal, Kind: codec.EntryFile, ID: newID}}}
+	o := Op{ID: "x", WsID: "ws_modify_idem", Kind: KindModify, Path: "a.txt",
+		BaseFile: f.fileID("a.txt", "old\n"), NewFile: newID}
+	res := f.replay(base, o)
+	if len(res.Conflicts) != 0 {
+		t.Fatalf("目标已是本侧内容时不应冲突: %+v", res.Conflicts)
+	}
+}

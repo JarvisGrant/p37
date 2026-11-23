@@ -20,6 +20,7 @@ import (
 	"github.com/chenyiwen/p37/internal/mcpsrv"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
+	"github.com/chenyiwen/p37/internal/repolock"
 )
 
 // runRootDaemon 以单进程多仓库模式运行。
@@ -33,13 +34,30 @@ func runRootDaemon(root string, serveHTTP bool) error {
 		return err
 	}
 	defer func() { _ = h.Close() }()
+	// 多仓库 daemon 必须有 root 级单实例锁。没有它时第二个实例会删掉
+	// 第一个实例的 socket，但自己又打不开已被 flock 的 repo，表现为“仓库全丢”。
+	daemonLock, lerr := repolock.TryExclusive(filepath.Join(root, ".p37", "daemon.lock"))
+	if lerr != nil {
+		if errors.Is(lerr, repolock.ErrBusy) {
+			return fmt.Errorf("已有 p37d 实例持有 %s", filepath.Join(root, ".p37", "daemon.lock"))
+		}
+		return fmt.Errorf("获取 root daemon 锁失败: %w", lerr)
+	}
+	defer func() { _ = daemonLock.Release() }()
 	for _, w := range h.RecoverWarnings() {
 		fmt.Fprintf(os.Stderr, "p37d: registry 重建警告: %s\n", w)
 	}
 
-	// 旧单仓库原地注册为 default（不移动目录）。
-	if _, err := h.RegisterLegacy("/srv/repo"); err != nil {
-		fmt.Fprintf(os.Stderr, "p37d: 注册旧仓库 /srv/repo 失败: %v\n", err)
+	// 旧单仓库原地注册为 default（不移动目录）。路径可由 P37_REPO 覆盖，
+	// 且只有真的存在 .p37 时才注册，避免每次启动都报“/srv/repo 不存在”。
+	legacy := os.Getenv("P37_REPO")
+	if legacy == "" {
+		legacy = "/srv/repo"
+	}
+	if _, serr := os.Stat(filepath.Join(legacy, ".p37")); serr == nil {
+		if _, err := h.RegisterLegacy(legacy); err != nil {
+			fmt.Fprintf(os.Stderr, "p37d: 注册旧仓库 %s 失败: %v\n", legacy, err)
+		}
 	}
 	// 启动时按实际挂载的 repo 做一次轻量 reconcile：新挂上的应用卷会被
 	// 加入 registry；已注册但卷不在的只标记 degraded，不自动删除数据。
@@ -221,21 +239,12 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 			}
 		}
 		if it.OK && strict {
-			r, err := h.Open(e.ID)
+			// 只读检查：不要 hub.Open（会取 flock/重挂/回收工作区）。
+			n, err := repo.CheckLinesReadOnly(e.Path)
+			it.Lines = n
 			if err != nil {
 				it.OK = false
 				it.Error = err.Error()
-			} else {
-				if ls, err := r.Lines(); err == nil {
-					it.Lines = len(ls)
-				}
-				for _, l := range mustLines(r) {
-					if err := r.WalkHead(l.Head, nil); err != nil {
-						it.OK = false
-						it.Error = err.Error()
-						break
-					}
-				}
 			}
 		}
 		if !it.OK {
@@ -260,9 +269,4 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-func mustLines(r *repo.Repo) []meta.Line {
-	ls, _ := r.Lines()
-	return ls
 }

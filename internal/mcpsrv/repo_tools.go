@@ -41,7 +41,7 @@ func (s *Server) registerRepoLineRead() {
 			return es, nil
 		})
 
-	s.register("repo_create", "创建一个新仓库（含空 v0 与默认 line）。传 path 时等价于 repo_init(mode=empty)；不传 path 是 L2 scratch，不能用于应用卷。",
+	s.register("repo_create", "创建一个新仓库（含空 v0 与默认 line）。传 path 时等价于 repo_init(mode=empty)；不传 path 是 VM 根盘 scratch，不能用于应用卷。",
 		`{"type":"object","properties":{"name":{"type":"string"},"path":{"type":"string","description":"可选；应用卷必须传持久挂载路径"},"default_line":{"type":"string"},"remote_key":{"type":"string"},"remote_prefix":{"type":"string"},"remote":{"type":"object"},"idempotency_key":{"type":"string"}},"required":["name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			if s.Hub == nil {
@@ -283,9 +283,10 @@ func (s *Server) registerRepoLineRead() {
 		`{"type":"object","properties":{"repo":{"type":"string"},"dir":{"type":"string"},"task":{"type":"string"},"force":{"type":"boolean","default":false},"idempotency_key":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var a struct {
-				Dir   string `json:"dir"`
-				Task  string `json:"task"`
-				Force bool   `json:"force"`
+				Dir            string `json:"dir"`
+				Task           string `json:"task"`
+				Force          bool   `json:"force"`
+				IdempotencyKey string `json:"idempotency_key"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
@@ -306,6 +307,7 @@ func (s *Server) registerRepoLineRead() {
 						}
 						res, err := s.Hub.InitRepo(e.Name, e.Path, hub.InitOptions{
 							Mode: repo.InitImport, DefaultLine: e.DefaultLine, Force: a.Force,
+							IdempotencyKey: a.IdempotencyKey,
 						})
 						if err != nil {
 							return nil, err
@@ -342,16 +344,44 @@ func (s *Server) registerRepoLineRead() {
 				}
 				dir = clean
 			}
+			request := map[string]string{"dir": dir, "force": fmt.Sprint(a.Force)}
+			if a.IdempotencyKey != "" {
+				if rec, _ := rr.DB.GetIdempotencyResult("repo_import", a.IdempotencyKey, time.Now().UnixMilli()); rec != nil {
+					var prev struct {
+						Request map[string]string `json:"request"`
+						Result  map[string]any    `json:"result"`
+					}
+					if json.Unmarshal([]byte(rec.ResultJSON), &prev) == nil {
+						if prev.Request["dir"] != request["dir"] || prev.Request["force"] != request["force"] {
+							return nil, codedDetail("idempotency_conflict", map[string]any{
+								"idempotency_key": a.IdempotencyKey,
+								"field":           "dir/force",
+								"existing":        fmt.Sprintf("dir=%s force=%s", prev.Request["dir"], prev.Request["force"]),
+								"requested":       fmt.Sprintf("dir=%s force=%s", request["dir"], request["force"]),
+							}, "幂等键 %q 已用于不同的 repo_import 请求", a.IdempotencyKey)
+						}
+						return prev.Result, nil
+					}
+				}
+			}
 			res, err := rr.ImportV0(dir, a.Force)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{
+			out := map[string]any{
 				"version_id": res.Version, "dir": dir,
 				"imported": res.Imported, "repaired": res.Repaired,
 				"old_version_id": res.OldVersionID,
 				"current_tree":   res.CurrentTree, "v0_tree": res.V0Tree,
-			}, nil
+			}
+			if a.IdempotencyKey != "" {
+				if b, merr := json.Marshal(map[string]any{"request": request, "result": out}); merr == nil {
+					now := time.Now().UnixMilli()
+					_ = rr.DB.PutIdempotencyResult("repo_import", a.IdempotencyKey, string(b), now,
+						now+int64(7*24*time.Hour/time.Millisecond))
+				}
+			}
+			return out, nil
 		})
 
 	s.register("repo_set_remote", "设置/更新仓库远端配置（凭证仍只从环境变量读）。",

@@ -1,4 +1,4 @@
-# 当前状态（v0.5.1）
+# 当前状态（v0.5.2）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.5.1` |
+| 发布版本 | `v0.5.2` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,15 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.5.2 重点（不改 `format_ver`）**：以数据安全与 P36 L1 形态对齐为主。
+修复 daemon 重启后 `RemountAll` 把 `materialized_ts` 推到当前时刻导致离线改动
+被惰性快路径吞掉、broken 工作区被重挂成空 overlay、`reconcileMainlineRef`
+回退已提交 land、`AdvanceHead` 不校验 fast-forward、`ws_land` 非 strict 采集、
+`fold=stack` 孤立兄弟子工作区、`unflatten` 文件/目录同名漏检、CAS 同内容不同
+类型静默别名、`repo_import`/`version_revert` 幂等、`land_into` rename-follow、
+MCP 未知参数校验、stdio 空闲会话失效等。P36 文档/模板改为“p37 内嵌 L1、
+应用卷 staging/OSS”，不再把 L2 当 p37 用户数据层。
 
 **v0.5.1 重点（不改 `format_ver`）**：修复 `version_tree` / `version_archive`
 在 `path` 指向目录时的 off-by-one：此前会列出父目录的同级项（并按 path
@@ -121,13 +130,13 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 | `remote_prefix` 单写者 | 同一前缀只允许一个写者 | P34 需串行化同一 app 的 push |
 | `line_reset` 旧版本 grace | 由 GC 的 reset 日志保留 7 天 | 尚无独立后台清理任务 |
 | `p37d --check --root` | 只做 registry / DB / line 链检查 | 完整 ext4/写探测/OverlayFS/inotify/磁盘检查用 `--check --repo <root>` |
-| P36 payload 换盘 | 需要重启实例 | 服务级 `systemctl restart` 不保证换盘 |
+| P36 L1 升级 | 需要重建/重新选择 L1 | 已有实例不会自动切换；旧 L1 不应回退读新格式仓库 |
 | `p37d --stdio` | 启动时快照工具清单 | daemon 升级后客户端应重连 |
 | `repo_unregister` | 不等待已经进入执行中的 MCP 调用 | detach 前由 P36 在上层确认应用空闲 |
 | `repo_import.idempotency_key` | 保留但未接 root `init_idempotency` 表 | 需要跨重启幂等时用 `repo_init(mode=import)` |
 | root 幂等索引丢失 | 同 path 仍靠 `.p37/init.json`；跨 path 冲突降级 | 接受 warning；重启后同 path key 仍有效 |
-| 非 root OverlayFS | Ubuntu 26.04 可能 `EPERM` | 默认 `materialize=auto` 回退 copy；按 L2 容量收紧 `max_active` / `warn_disk_bytes` |
-| 自更新 | 不支持 | 升级靠替换 payload 盘，不在实例内改 `/run/p37-payload` |
+| 非 root OverlayFS | Ubuntu 26.04 可能 `EPERM` | 默认 `materialize=auto` 回退 copy；按应用卷容量收紧 `max_active` / `warn_disk_bytes` |
+| 自更新 | 不支持 | 升级靠重建/重新选择 L1，不在实例内改 `/usr/local/lib/p37` |
 | 发布平台 | 只发布 linux/amd64 | linux/arm64 只做编译校验 |
 
 ## 下一步优先级

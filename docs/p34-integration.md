@@ -52,7 +52,7 @@ repo_set_remote { "repo": "p34-59", "remote": {
 P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 ```
 
-`repo_create` 不带 `path` 仍然存在，但它是 **L2 scratch**（`mounted=false`），
+`repo_create` 不带 `path` 仍然存在，但它是 **VM 根盘 scratch**（`mounted=false`），
 严禁用于应用卷。
 
 ## 2. 每个会话一条 line

@@ -12,15 +12,14 @@ Conflicts=p37d-root-overlay.service
 Type=simple
 User=p36
 Group=p36
-# p36 需要读 /dev/disk/by-label/P37PAYLOAD 对应的 virtio-blk。
-# P36 中该盘是第三块（vda=root，vdb=P36AGENT，vdc=P37PAYLOAD）。
-# 若 L1 里没有 disk 组，改用 udev 规则把该设备 GROUP 设为 p36。
+# legacy payload 模式需要读 /dev/disk/by-label/P37PAYLOAD；当前 P36 L1
+# 已把 p37 内嵌到 /usr/local/lib/p37，不再投递该盘。
 SupplementaryGroups=disk
 
 Environment=P37_ROOT=/srv/repos
 Environment=P37_REPO=/srv/repo
 Environment=P37_PAYLOAD_LABEL=P37PAYLOAD
-Environment=P37_PAYLOAD_MOUNT=/run/p37-payload
+Environment=P37_PAYLOAD_MOUNT=/usr/local/lib/p37
 Environment=P37_CONFIG=/usr/local/share/p37/config.toml
 # P36 guest agent 监听的事件 socket；覆盖各 repo 自己的 config.toml，
 # 保证已有仓库不需要重建也能收到 land/merge/workspace 事件。
@@ -29,11 +28,9 @@ Environment=P37_KEEP_VERSIONS=50
 Environment=TMPDIR=/srv/repos/.p37/tmp
 # 默认 config.toml 是 materialize=auto：非 root overlay EPERM 时回退 copy。
 
-# /run/p37-payload 由 L1 的 /etc/tmpfiles.d/p37.conf 创建（属主 p36）。
-# 不要改用 RuntimeDirectory=：service 重启时 systemd 会尝试在该路径上重新
-# 创建/chmod 目录，而它已经是只读 payload 的挂载点，会报
-# status=233/RUNTIME_DIRECTORY（EROFS）。tmpfiles 不参与 unit 生命周期，
-# 停服后 payload 仍挂载，维护窗口可以继续用 /run/p37-payload/p37 gc。
+# L1 内 p37 二进制是只读层；legacy payload 挂载点由 tmpfiles 创建。
+# 不要改用 RuntimeDirectory=：service 重启时 systemd 可能在只读挂载点上
+# 重新创建/chmod 目录，报 status=233/RUNTIME_DIRECTORY（EROFS）。
 
 ExecStart=/usr/local/bin/p37-run
 Restart=on-failure
@@ -50,18 +47,16 @@ NoNewPrivileges=yes
 
 # 不要加入 PrivateTmp/ProtectSystem/ProtectHome/ReadWritePaths/ProtectKernel*/
 # ProtectControlGroups 等会创建私有 mount namespace 的选项：
-# p37d 在里面挂载 /run/p37-payload 和 workspace overlay，而 agent 的 shell
+# p37d 在里面挂载 workspace overlay（legacy 还有 payload），而 agent 的 shell
 # 与 /usr/local/bin/p37-mcp 在宿主 namespace，看不到私有 namespace 的挂载。
 # 这是 P36 验收里必须从“服务外 shell”执行 findmnt 的原因。
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 
-# 手工卸载 payload：
+# legacy payload 手工卸载：
 #   systemctl stop p37d
 #   sudo umount /run/p37-payload
-# 不建议加 ExecStopPost=umount：那会让停服后的 p37 CLI 随 payload 一起消失，
-# 维护窗口无法执行 p37 gc。
 
 [Install]
 WantedBy=multi-user.target

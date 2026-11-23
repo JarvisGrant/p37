@@ -56,7 +56,7 @@ func cmdSync(root string, args []string, out, errw io.Writer) int {
 	}
 }
 
-func openRemote(root string) (remotesync.Remote, config.RemoteConfig, bool, error) {
+func openRemote(root string, ensureKey bool) (remotesync.Remote, config.RemoteConfig, bool, error) {
 	cfg, err := config.Load(root)
 	if err != nil {
 		return nil, cfg.Remote, false, err
@@ -64,7 +64,7 @@ func openRemote(root string) (remotesync.Remote, config.RemoteConfig, bool, erro
 	if !cfg.Remote.Enabled {
 		return nil, cfg.Remote, false, nil
 	}
-	if cfg.Remote.RemoteKey == "" {
+	if cfg.Remote.RemoteKey == "" && ensureKey {
 		var b [16]byte
 		if _, err := rand.Read(b[:]); err != nil {
 			return nil, cfg.Remote, true, err
@@ -226,7 +226,7 @@ func syncStatus(root string, args []string, out, errw io.Writer) int {
 	}
 	defer func() { _ = r.Close() }()
 
-	remote, _, configured, err := openRemote(root)
+	remote, _, configured, err := openRemote(root, false)
 	if err != nil {
 		fmt.Fprintf(errw, "警告: %v\n", err)
 	}
@@ -263,7 +263,7 @@ func syncPush(root string, args []string, out, errw io.Writer) int {
 		}
 		ids = append(ids, a)
 	}
-	remote, _, configured, err := openRemote(root)
+	remote, _, configured, err := openRemote(root, true)
 	if err != nil {
 		return fail(errw, err)
 	}
@@ -289,7 +289,7 @@ func syncPush(root string, args []string, out, errw io.Writer) int {
 }
 
 func syncPull(root string, args []string, out, errw io.Writer, pull bool) int {
-	remote, _, configured, err := openRemote(root)
+	remote, _, configured, err := openRemote(root, true)
 	if err != nil {
 		return fail(errw, err)
 	}
@@ -358,7 +358,7 @@ func syncPrune(root string, args []string, out, errw io.Writer) int {
 		fmt.Fprintf(out, "已清理本地已上传包 %d 个（%s）\n", n, humanBytes(bytes))
 	}
 	if remotePrune {
-		remote, _, configured, err := openRemote(root)
+		remote, _, configured, err := openRemote(root, true)
 		if err != nil {
 			return fail(errw, err)
 		}

@@ -437,8 +437,12 @@ func (r *Repo) MergeLines(source, target string, opt MergeOptions) (*MergeResult
 	if opt.IdempotencyKey != "" && !opt.Preview {
 		if v, _ := r.DB.FindVersionByIdempotency("line_merge", opt.IdempotencyKey, time.Now().UnixMilli()); v != nil {
 			head, _ := r.DB.LineHead(target)
+			sourceHead := v.Parent
+			if ps := v.Parents; len(ps) > 1 {
+				sourceHead = ps[1] // [target, source]
+			}
 			return &MergeResult{Source: source, Target: target, VersionID: v.ID(),
-				TargetHead: head, SourceHead: v.Parent}, nil
+				TargetHead: head, SourceHead: sourceHead}, nil
 		}
 		if ir, _ := r.DB.GetIdempotencyResult("line_merge", opt.IdempotencyKey, time.Now().UnixMilli()); ir != nil {
 			var out MergeResult
@@ -789,6 +793,13 @@ func (r *Repo) RevertTo(versionID string, targetLine string, expectedHead string
 	id, err := r.resolveVersionRef(versionID)
 	if err != nil {
 		return hash.ID{}, err
+	}
+	// 同 key 重试必须返回首次提交的版本；否则会生成不同 TS 的新版本，
+	// 插入时撞 version(idempotency_tool,idempotency_key) 的唯一索引。
+	if idemKey != "" {
+		if v, verr := r.DB.FindVersionByIdempotency("version_revert", idemKey, time.Now().UnixMilli()); verr == nil && v != nil {
+			return v.ID(), nil
+		}
 	}
 	if targetLine == "" {
 		targetLine, err = r.DB.DefaultLine()

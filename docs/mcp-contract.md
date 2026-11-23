@@ -114,7 +114,7 @@
 
 | 工具 | 参数 | 说明 |
 |---|---|---|
-| `repo_create` | `name`, `path?`, `default_line?`, `remote_key?`, `remote_prefix?`, `remote?` | 创建空 v0 与默认 line。传 `path` 等价于 `repo_init(mode=empty)`；**不传 path 是 L2 scratch，不能用于应用卷** |
+| `repo_create` | `name`, `path?`, `default_line?`, `remote_key?`, `remote_prefix?`, `remote?` | 创建空 v0 与默认 line。传 `path` 等价于 `repo_init(mode=empty)`；**不传 path 是 VM 根盘 scratch，不能用于应用卷** |
 | `repo_delete` | `repo`, `force?`, `delete_remote?` | 有活跃工作区/租约时返回 `repo_busy`；挂载点返回 `repo_is_mountpoint` |
 | `repo_import` | `repo`, `dir?`, `task?`, `force?` | 把目录导入空仓库作为 v0；未初始化的已注册仓库等价于 `repo_init(mode=import)` |
 | `repo_export` | `repo`, `ref`, `dest_dir`, `async?` | 把 line/version 物化到目录；`async=true` 返回 `job_id` |

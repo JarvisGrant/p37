@@ -261,9 +261,6 @@ func (s *Server) addHealthDetails(out map[string]any, rr *repo.Repo, entry *hub.
 		"count": len(lines), "default_line": defaultLine, "heads": heads,
 	}
 	out["last_land_ts"] = st.LastLandTS
-	for _, w := range in.Warnings {
-		appendWarning(out, w)
-	}
 
 	repoInfo, _ := out["repo"].(map[string]any)
 	if repoInfo == nil {

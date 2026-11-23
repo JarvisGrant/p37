@@ -861,14 +861,25 @@ func (m *Manager) RemountAll() (int, error) {
 			_ = m.db.UpdateWorkspaceMount(w.ID, w.Materialize, true, m.now(), w.MaterializedTS)
 			continue
 		}
+		// upper 是工作区里唯一可能含未落地改动的地方。upper 丢失时重新挂载
+		// 只会创建一个空 upper，把“内容已丢”伪装成“空工作区”，随后采集会
+		// 产出整树删除。这里保持 broken，交给显式 repair/rebuild 处理。
+		if !m.mm.HasUpper(w.ID) {
+			if w.State != meta.StateBroken {
+				_ = m.db.UpdateWorkspaceState(w.ID, meta.StateBroken, m.now())
+			}
+			continue
+		}
 		if err := m.mm.Remount(w.ID, w.BaseTree, m.store); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("重挂 %s: %w", w.ID, err)
 			}
 			continue
 		}
-		// 恢复后刷新物化时刻：期间没被改过的文件仍可走惰性判定。
-		_ = m.db.UpdateWorkspaceMount(w.ID, w.Materialize, true, m.now(), time.Now().UnixNano())
+		// 重挂只恢复同一份 upper，磁盘内容并**不**等于 base_tree；不能把
+		// materialized_ts 推进到现在，否则停机期间改过的文件会被惰性判定
+		// 当成“未变”。置 0 让下一次采集全量读一遍，采集完再恢复快路径。
+		_ = m.db.UpdateWorkspaceMount(w.ID, w.Materialize, true, m.now(), 0)
 		if w.State == meta.StateBroken {
 			_ = m.db.UpdateWorkspaceState(w.ID, meta.StateActive, m.now())
 		}

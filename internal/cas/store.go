@@ -171,6 +171,9 @@ func (s *Store) put(typ uint8, raw []byte) (hash.ID, error) {
 	if ok, err := s.idx.Has(id); err != nil {
 		return hash.ID{}, err
 	} else if ok {
+		if oldType, terr := s.idx.Type(id); terr == nil && oldType != typ {
+			return hash.ID{}, fmt.Errorf("%w: id=%s existing=%d new=%d", ErrTypeConflict, id, oldType, typ)
+		}
 		return id, nil // 去重快路径
 	}
 
@@ -252,6 +255,14 @@ func (s *Store) Get(id hash.ID) (uint8, []byte, error) {
 
 // ErrCorrupt 表示对象内容与其 key 不符或无法解码。
 var ErrCorrupt = errors.New("cas: 对象损坏")
+
+// ErrTypeConflict 表示同一个内容哈希已以另一种对象类型存在。
+//
+// 对象 id 只覆盖 raw，不覆盖 type；正常情况下各类型编码互不相交，但用户
+// 文件内容可以恰好等于某类对象的编码（例如空 Tree 的 {0x03,0x00}）。此时
+// 静默去重会让文件指向一个 Tree，之后所有读取都失败。这里显式拒绝，避免
+// 把歧义写成静默损坏（根治需要 typed object 布局）。
+var ErrTypeConflict = errors.New("cas: 同一内容已存在不同类型")
 
 // GetBlob 读取一个分片的原文。
 func (s *Store) GetBlob(id hash.ID) ([]byte, error) {
@@ -471,6 +482,16 @@ type ObjectInfo struct {
 // 全量 Get 会把每个对象解压一遍并算哈希 —— 对 GC 这种「只要知道类型、
 // 好顺着树往下走」的场景是纯浪费（10 GB 仓库要读 10 GB）。
 func (s *Store) Head(id hash.ID) (uint8, int64, error) {
+	// 索引里已有类型与存储长度时直接 Stat。PackStore.Stat 只查索引/读 pack
+	// footer，不会把整个 packed 对象读进内存 —— 旧实现用 Get 会把 GC 的
+	// “只读头”退化成 10GB 仓库全读。
+	if typ, terr := s.idx.Type(id); terr == nil {
+		if st, serr := s.bs.Stat(keyFor(id)); serr == nil {
+			return typ, st.Size, nil
+		} else if !errors.Is(serr, ErrNotExist) {
+			return 0, 0, serr
+		}
+	}
 	rc, st, err := s.bs.Get(keyFor(id))
 	if err != nil {
 		return 0, 0, err
@@ -564,6 +585,9 @@ func (s *Store) PutStored(id hash.ID, stored []byte) error {
 	if ok, err := s.idx.Has(id); err != nil {
 		return err
 	} else if ok {
+		if oldType, terr := s.idx.Type(id); terr == nil && oldType != typ {
+			return fmt.Errorf("%w: id=%s existing=%d new=%d", ErrTypeConflict, id, oldType, typ)
+		}
 		return nil
 	}
 	if err := s.bs.PutIfAbsent(keyFor(id), bytes.NewReader(stored), int64(len(stored))); err != nil && !errors.Is(err, ErrExists) {
@@ -621,13 +645,15 @@ func (s *Store) SweepPacks(reachable map[hash.ID]struct{}) (SweepResult, error) 
 		if err == nil {
 			size = st.Size
 		}
-		if err := ps.DeletePack(pid); err != nil {
-			return res, err
-		}
+		// 先摘索引、再删 pack：反过来若在两步之间崩溃，索引仍声称对象
+		// 存在而字节已经没了，后续同内容写入会被去重快路径永久吞掉。
 		for _, en := range entries {
 			if err := s.idx.Remove(en.id); err != nil {
 				return res, err
 			}
+		}
+		if err := ps.DeletePack(pid); err != nil {
+			return res, err
 		}
 		res.PacksDropped++
 		res.ObjectsDropped += len(entries)

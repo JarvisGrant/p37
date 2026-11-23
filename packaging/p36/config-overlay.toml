@@ -17,7 +17,7 @@ export_root = "/srv/repos/.p37/tmp/p34-deploy"
 [workspace]
 materialize = "overlay"
 base_cache_bytes = 4294967296
-# overlay 下每个工作区只存 upper 层，20 GiB L2 可以放宽到 8。
+# overlay 下每个工作区只存 upper 层，可按应用卷容量放宽。
 max_active = 8
 # 隐藏 merge/preview 工作区上限（不占 max_active）。
 max_hidden = 32

@@ -160,6 +160,15 @@ func (m *Manager) upperDir(wsID string) string {
 	return filepath.Join(m.repoRoot, ".p37", "overlay", "ws", wsID, "upper")
 }
 
+// HasUpper 报告工作区是否还有 overlay upper 层。
+//
+// 重挂前必须检查：目录/upper 已丢失时重新 mount 会创建一个空 upper，
+// 把“内容已丢”伪装成“刚创建的空工作区”，下一次采集就会产出整树删除。
+func (m *Manager) HasUpper(wsID string) bool {
+	fi, err := os.Stat(m.upperDir(wsID))
+	return err == nil && fi.IsDir()
+}
+
 func (m *Manager) workDir(wsID string) string {
 	return filepath.Join(m.repoRoot, ".p37", "overlay", "ws", wsID, "work")
 }

@@ -201,7 +201,7 @@ func Open(root string, opt Options) (*Repo, error) {
 	}
 	db.SetTombstoneTTL(opt.TombstoneTTL)
 	// 目录迁移/应用卷重挂后，repo.root 可能还是旧路径。以实际打开路径为准
-	// 自愈，避免 repo_info/persistence 继续展示 L2 旧路径。
+	// 自愈，避免 repo_info/persistence 继续展示 旧路径。
 	if rp, err := db.GetRepo(); err == nil && rp.Root != "" && rp.Root != root {
 		_ = db.UpdateRepoRoot(root)
 	}
@@ -421,6 +421,28 @@ func (r *Repo) AdvanceHead(target hash.ID, epoch uint64) error {
 	if err != nil {
 		return err
 	}
+	// 这是快进，不是 reset：调用方用 fetch 时算出的 ahead/diverged 可能在
+	// 下载期间已经过期，绝不能凭旧快照把本地刚 land 的 head 覆盖回去。
+	if hadOld && old != target {
+		anc, aerr := r.DB.IsAncestor(old, target)
+		if aerr != nil {
+			return aerr
+		}
+		if !anc {
+			// 空仓库的初始 v0 与远端首版本必然不同 id（时间戳不同），但它
+			// 没有任何用户内容；允许像 git 在空仓库上 pull 一样直接替换。
+			emptyInit := false
+			if ov, verr := r.DB.GetVersion(old); verr == nil && ov.Parent.IsZero() &&
+				ov.Agent == "p37-init" {
+				if wss, werr := r.DB.ListWorkspaces(); werr == nil && len(wss) == 0 {
+					emptyInit = true
+				}
+			}
+			if !emptyInit {
+				return fmt.Errorf("%w: current=%s target=%s", ErrTargetNotAncestor, old, target)
+			}
+		}
+	}
 	chain, err := r.DB.VersionChain(target)
 	if err != nil {
 		return err
@@ -592,6 +614,32 @@ func reconcileMainlineRef(db *meta.DB, store *cas.Store) error {
 	if ok && head == id {
 		return nil
 	}
+	if ok {
+		refsAhead, aerr := db.IsAncestor(head, id) // DB head -> refs
+		if aerr != nil {
+			return aerr
+		}
+		dbAhead, derr := db.IsAncestor(id, head) // refs -> DB head
+		if derr != nil {
+			return derr
+		}
+		switch {
+		case refsAhead:
+			// 旧协议（v1 CommitLand）先写 refs 再推 DB head；按 refs 补齐。
+		case dbAhead:
+			// v2 CommitLineLand 在同一个 SQLite 事务里推进了 line/mainline
+			// head，refs 只是提交后的镜像。这里若按 refs 倒退，会把已经
+			// 成功提交的 land 回滚掉。把 refs 追平到 DB head 即可。
+			if err := writeMainlineRefStore(store, head); err != nil {
+				return err
+			}
+			log.Printf("repo: %s refs/mainline 落后于 DB head，已追平到 %s", db.Path(), head.String()[:16])
+			return nil
+		default:
+			// 两边分叉：交给 integrity/fsck 报告，不做猜测。
+			return nil
+		}
+	}
 	rp, err := db.GetRepo()
 	if err != nil {
 		return err
@@ -614,6 +662,23 @@ func reconcileMainlineRef(db *meta.DB, store *cas.Store) error {
 	}
 	log.Printf("repo: %s 按 refs/mainline 补齐未完成的 land %s", db.Path(), id.String()[:16])
 	return nil
+}
+
+// writeMainlineRefStore 用已打开的 store 写 refs/mainline。
+func writeMainlineRefStore(store *cas.Store, head hash.ID) error {
+	if head.IsZero() {
+		return errors.New("repo: 空 head 不能写 refs/mainline")
+	}
+	key := "refs/mainline"
+	cur, err := store.BlobStore().Stat(key)
+	etag := ""
+	if err == nil {
+		etag = cur.ETag
+	} else if !errors.Is(err, cas.ErrNotExist) {
+		return err
+	}
+	_, err = store.BlobStore().PutIfMatch(key, etag, []byte(head.String()+"\n"))
+	return err
 }
 
 // Sync 采集一个工作区（workspace.Manager.Sync 的便捷入口）。

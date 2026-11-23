@@ -418,3 +418,57 @@ func dbFingerprint(t *testing.T, r *repo.Repo) string {
 	}
 	return fmt.Sprintf("v=%d w=%d op=%d c=%d r=%d j=%d", nv, nw, no, nc, nr, nj)
 }
+
+func TestAdvanceHeadRejectsNonFastForward(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "A\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	v1, ok, err := e.r.Head()
+	if err != nil || !ok {
+		t.Fatalf("head: %v %v", ok, err)
+	}
+	w := e.open("mainline", "ff")
+	e.write(w.ID, "a.txt", "B\n")
+	if _, err := e.r.LandTo(w.ID, repo.LandOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.AdvanceHead(v1, 0); !errors.Is(err, repo.ErrTargetNotAncestor) {
+		t.Fatalf("回退到祖先应被拒绝，得到 %v", err)
+	}
+}
+
+func TestOpenDoesNotRollBackCommittedHeadWhenRefsLags(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "A\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	v1, _, _ := e.r.Head()
+	w := e.open("mainline", "refs")
+	e.write(w.ID, "a.txt", "B\n")
+	res, err := e.r.LandTo(w.ID, repo.LandOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟 CommitLineLand 已提交、writeHead 之前崩溃：refs 落后于 DB head。
+	if err := e.r.WriteMainlineRef(v1); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := repo.Open(e.root, repo.Options{Materialize: mountmgr.ModeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r2.Close() }()
+	head, ok, err := r2.Head()
+	if err != nil || !ok {
+		t.Fatalf("head: %v %v", ok, err)
+	}
+	if head != res.VersionID {
+		t.Fatalf("已提交的 head 被回退: got %s want %s", head, res.VersionID)
+	}
+}

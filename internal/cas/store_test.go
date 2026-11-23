@@ -352,3 +352,19 @@ func TestCompressionDoesNotAffectID(t *testing.T) {
 		t.Fatalf("存储大小 %d 未小于原文 %d，压缩未生效", stats[0].Size, len(raw))
 	}
 }
+
+// TestTypeConflictIsRejected 钉住「同一 raw 不能静默复用成另一种类型」。
+//
+// 空 Tree 的编码是 {0x03,0x00}；如果用户文件内容恰好等于它，旧实现会
+// 去重命中 Tree 并返回同一个 id，文件之后永远读不出来。
+func TestTypeConflictIsRejected(t *testing.T) {
+	s := newTestStore(t)
+	empty := &tree.Tree{}
+	if _, err := s.PutTree(empty); err != nil {
+		t.Fatal(err)
+	}
+	raw := empty.Encode()
+	if _, err := s.PutBlob(raw); !errors.Is(err, ErrTypeConflict) {
+		t.Fatalf("期望 ErrTypeConflict，得到 %v", err)
+	}
+}

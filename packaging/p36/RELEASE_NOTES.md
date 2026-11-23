@@ -19,6 +19,49 @@
 }
 ```
 
+## 本版重点（v0.5.2）
+
+这是数据安全与 P36 L1 集成形态对齐版本，**`format_ver` 仍为 2**；已有仓库
+无需迁移。P36 最低 p37 版本提升到 **0.5.2**，旧 L1 需要重建。
+
+### 数据安全
+
+- **重启后不再吞掉离线改动**：`RemountAll` 不再把 `materialized_ts` 推到
+  当前时刻；重挂后置 0，让下一次采集全量读。
+- **不再复活空工作区**：overlay `upper` 已丢失的 broken 工作区保持 broken，
+  不会重挂成空 upper 后产出“整树删除”。
+- **不再回退已提交 land**：`reconcileMainlineRef` 在 DB head 领先 refs 时
+  把 refs 追平，而不是把 DB head 倒退；`AdvanceHead` 只允许 fast-forward。
+- **land 采集改为 strict**：`ws_land` 与 `ws_land_into` 使用同一套全量采集 +
+  不稳定文件重试，避免漏 op 后焚毁工作区。
+- **stack land 重挂兄弟子工作区**：`fold=stack` 不再让中间节点的子工作区
+  留下悬空 parent。
+- **CAS 类型冲突显式拒绝**：同一 raw 已以另一种对象类型存在时返回
+  `ErrTypeConflict`，不再静默把文件指向 Tree。
+- **line 同步保护**：远端删除默认/protected/有活跃工作区的 line 会被拒绝并
+  如实报告；line head 必须是本地已存在的版本。
+
+### 正确性
+
+- `land_into` 增加 rename-follow，父子重命名 + 修改不再假冲突。
+- `modify` op 写入 `NewFile`，两侧做完全相同修改时幂等而不是冲突。
+- `rename + missing_base` 的 `take_upper` 会真正创建文件，不再静默 no-op。
+- `unflatten` 逐路径检查祖先，堵住文件/目录同名写出不可读 head。
+- `version_revert` 同 key 重试返回首次版本，不再撞 UNIQUE。
+- `repo_import` 的 `idempotency_key` 接入 root init / repo 幂等表。
+- `reconcileLandInto` 恢复后补写 `landed_ws` 并收尾子工作区。
+
+### 接口与运维
+
+- MCP 工具按 schema 拒绝未知顶层参数（`additionalProperties=false` 真正生效）。
+- stdio 代理增加 keepalive，空闲超过 daemon 30 分钟会话超时后仍可用。
+- `repoFor` 不再把所有打开错误压成 `repo_not_found`。
+- 多仓库 daemon 增加 root 级单实例锁，并遵循 `daemon.socket`。
+- CLI `sync status` 不再写 config/生成 remote_key。
+- `p37d --check --root` 不再走会重挂/回收工作区的写路径（后续版本继续收敛）。
+- P36 文档/模板改为“p37 内嵌 L1、应用卷 staging/OSS”，移除 payload/L2 作为
+  p37 用户数据层的描述。
+
 ## 本版重点（v0.5.1）
 
 这是 `version_tree` / `version_archive` 的目录路径正确性修复，**`format_ver` 仍为 2**；已有仓库无需迁移。

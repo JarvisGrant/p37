@@ -275,7 +275,7 @@ func checkOverlay(add func(string, Status, string, bool), root, wsDir string, cf
 	default:
 		if err != nil {
 			add("OverlayFS", StatusWarn,
-				err.Error()+"（auto 将回退 copy；20GB L2 不建议）", false)
+				err.Error()+"（auto 将回退 copy；请按应用卷容量收紧 max_active）", false)
 		} else {
 			add("OverlayFS", StatusOK, "可用", false)
 		}

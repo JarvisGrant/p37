@@ -23,7 +23,7 @@ p37 --root <root> --repo <id|name> <命令> [参数]   # 对指定 repo 执行
 - `--root` 与 `--repo` 可以写成 `--root=/srv/repos` 形式。
 - 多仓库模式除 `repo` 子命令外必须提供 `--repo`；CLI 会先把 id/name 解析成
   路径，再执行命令。
-- `p37 --root ... init` 被拒绝；多仓库请用 `repo init <name> <path>`（应用卷）或 `repo create`（L2 scratch）。
+- `p37 --root ... init` 被拒绝；多仓库请用 `repo init <name> <path>`（应用卷）或 `repo create`（VM 根盘 scratch）。
 - CLI 不会自动启动 daemon。daemon 持锁时，`gc` 会拒绝；其他写命令应在维护
   窗口执行（见 [`operations.md`](operations.md)）。
 
@@ -56,7 +56,7 @@ GC：
 ```bash
 p37 --root /srv/repos repo list [--json]
 p37 --root /srv/repos repo init <name> <path> [--mode empty|import|repair] [--default-line main] [--force] [--idempotency-key <key>] [--allow-nonpersistent] [--json]
-p37 --root /srv/repos repo create <name> [--default-line main] [--remote-key rk_...] [--remote-prefix <p>] [--json]  # 不传 path 是 L2 scratch
+p37 --root /srv/repos repo create <name> [--default-line main] [--remote-key rk_...] [--remote-prefix <p>] [--json]  # 不传 path 是 VM 根盘 scratch
 p37 --root /srv/repos repo info <id|name> [--json]
 p37 --root /srv/repos repo delete <id|name> [--force]
 p37 --root /srv/repos repo register <name> <path> [--init-if-missing] [--default-line main] [--json]

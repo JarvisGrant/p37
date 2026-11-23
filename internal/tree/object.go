@@ -53,6 +53,11 @@ func DecodeFileContent(b []byte) (*FileContent, error) {
 	if count > MaxChunksPerFile {
 		return nil, fmt.Errorf("tree: chunk 数 %d 超过上限 %d", count, MaxChunksPerFile)
 	}
+	// 先看剩余字节是否放得下这么多 32 字节 hash，再分配；否则一个几字节
+	// 的恶意对象就能让 make 分配几十 MB。
+	if count > uint64(len(d.Rest())/32) {
+		return nil, fmt.Errorf("tree: chunk 数 %d 与剩余字节不符", count)
+	}
 	// TotalSize 必须与 chunk 列表自洽。否则损坏/恶意对象可以让调用方
 	// 按声明值做 make([]byte, 0, TotalSize)，造成 panic 或 OOM。
 	if total > count*MaxChunkSize {
@@ -131,6 +136,10 @@ func DecodeTree(b []byte) (*Tree, error) {
 	}
 	if count > MaxTreeEntries {
 		return nil, fmt.Errorf("tree: 条目数 %d 超过上限 %d", count, MaxTreeEntries)
+	}
+	// 每条至少 name(1)+mode(1)+kind(1)+hash(32)=35 字节。
+	if count > uint64(len(d.Rest())/35) {
+		return nil, fmt.Errorf("tree: 条目数 %d 与剩余字节不符", count)
 	}
 	t := &Tree{Entries: make([]Entry, 0, count)}
 	for i := uint64(0); i < count; i++ {

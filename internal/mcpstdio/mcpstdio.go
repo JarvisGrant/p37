@@ -141,7 +141,12 @@ func connectOnce(ctx context.Context, socket string) (*mcp.ClientSession, error)
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "p37-stdio-proxy",
 		Version: buildinfo.Version,
-	}, nil)
+	}, &mcp.ClientOptions{
+		// daemon 的 Streamable HTTP handler 30 分钟无请求会关闭会话；stdio
+		// 代理平时没有任何流量，必须自己保活，否则一次长思考后所有调用都
+		// 变成 404/ErrSessionMissing。
+		KeepAlive: 10 * time.Minute,
+	})
 
 	attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

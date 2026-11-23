@@ -30,3 +30,28 @@ func TestRevertToLine(t *testing.T) {
 		t.Fatal("revert 未删除 b.txt")
 	}
 }
+
+func TestRevertToIdempotencyKeyReplays(t *testing.T) {
+	e := newEnv(t)
+	e.seed("a.txt", "A\n")
+	if _, err := e.r.Import(e.src); err != nil {
+		t.Fatal(err)
+	}
+	w := e.open("mainline", "rv")
+	e.write(w.ID, "a.txt", "B\n")
+	res, err := e.r.LandTo(w.ID, repo.LandOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := e.r.RevertTo(res.VersionID.String(), "main", "", "rv-idem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := e.r.RevertTo(res.VersionID.String(), "main", "", "rv-idem")
+	if err != nil {
+		t.Fatalf("同 key 重试不应报 UNIQUE 约束: %v", err)
+	}
+	if first != second {
+		t.Fatalf("同 key 应返回同一版本: %s != %s", first, second)
+	}
+}

@@ -21,7 +21,7 @@ func fsType(p string) (string, error) {
 	if err := unix.Statfs(p, &st); err != nil {
 		return "", err
 	}
-	// 0xEF53 同时覆盖 ext2/3/4；P36 的 L2 是 ext4，这里按 ext4 报告。
+	// 0xEF53 同时覆盖 ext2/3/4；P36 的应用卷是 ext4，这里按 ext4 报告。
 	switch uint64(st.Type) {
 	case 0xEF53:
 		return "ext4", nil

@@ -127,6 +127,11 @@ func decodePayload(b []byte) ([]payloadObject, error) {
 	if d.Err() != nil || count > 1<<24 {
 		return nil, fmt.Errorf("%w: payload 索引不可读", ErrCorruptPackage)
 	}
+	// 每条索引至少 id(32)+off(1)+len(1)+type(1)=35 字节；先做边界检查，
+	// 避免 6 字节输入触发 1GB 的 make。
+	if count > uint64(len(d.Rest()))/35 {
+		return nil, fmt.Errorf("%w: payload 索引条目数与剩余字节不符", ErrCorruptPackage)
+	}
 	out := make([]payloadObject, 0, count)
 	expect := int64(0)
 	for i := uint64(0); i < count; i++ {

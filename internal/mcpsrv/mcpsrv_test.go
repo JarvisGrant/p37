@@ -361,10 +361,13 @@ func TestToolsErrorPaths(t *testing.T) {
 		t.Errorf("blame 错误码 = %v，期望 PATH_NOT_FOUND", env["error"])
 	}
 
-	// 未知参数应被忽略而不是报错（附录 K.3）。
+	// 未知参数必须被拒绝：schema 声明 additionalProperties=false，静默
+	// 忽略会把 drop_worspace 这类拼写错误变成危险操作。
 	env = h.call("sync_status", map[string]any{"unknown_param": 1})
-	if ok, _ := env["ok"].(bool); !ok {
-		t.Errorf("未知参数应被忽略: %v", env["error"])
+	if ok, _ := env["ok"].(bool); ok {
+		t.Errorf("未知参数应被拒绝: %v", env)
+	} else if e, _ := env["error"].(map[string]any); e == nil || e["code"] != "invalid_argument" {
+		t.Errorf("未知参数错误码 = %v，期望 invalid_argument", env["error"])
 	}
 }
 

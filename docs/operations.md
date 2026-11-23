@@ -1,7 +1,7 @@
 # 运维手册
 
-本文覆盖升级、迁移、备份、GC 维护窗口、监控和常见故障。P36 的 payload /
-systemd / L1 胶水细节见 [`../packaging/p36/README.md`](../packaging/p36/README.md)。
+本文覆盖升级、迁移、备份、GC 维护窗口、监控和常见故障。P36 的 L1 /
+systemd / 应用卷细节见 [`../packaging/p36/README.md`](../packaging/p36/README.md)。
 
 ## 1. 升级
 
@@ -9,27 +9,27 @@ systemd / L1 胶水细节见 [`../packaging/p36/README.md`](../packaging/p36/REA
 
 ```bash
 make release VERSION=0.5.1
-# dist/p37-linux-amd64-0.4.6.tar.gz
-# dist/p37-linux-amd64-0.4.6.tar.gz.sha256
+# dist/p37-linux-amd64-0.5.1.tar.gz
+# dist/p37-linux-amd64-0.5.1.tar.gz.sha256
 make p36-bootstrap
 # dist/p36-bootstrap/...
 ```
 
-发布 tar 根目录严格只有 `p37`、`p37d`、`manifest.json`。P36 日常升级只换
-payload 盘；改 L1 胶水（`p37-run`/`p37-mcp`/`p37-mount`/unit/config/sysctl）才
-需要重建 L1。
+发布 tar 根目录严格只有 `p37`、`p37d`、`manifest.json`。P36 的 p37/p37d
+内嵌在 L1 的 `/usr/local/lib/p37`；升级 p37 要重建或重新选择 L1。改 L1 胶水
+（`p37-run`/`p37-mcp`/`p37-mount`/unit/config/sysctl）也必须重建 L1。
 
 ### 1.2 步骤
 
 1. 从 GitHub Release 下载 tar 与 `.sha256`，校验 sha256。
-2. 生成新的 `P37PAYLOAD` ext4 盘（同 label，固定 96 MiB）。
-3. 停止实例（或按 P36 方式替换第三块盘 `vdc`）。
+2. 在 P36 控制面构建/选择包含新 p37 的默认 L1。
+3. 对需要升级的实例重建/重新选择应用 L1；旧实例不会自动切换。
 4. 启动实例；`p37-run` 会校验 `manifest.version` 与 `p37d --version`。
 5. 打开仓库时自动处理格式迁移（见下节）。
 6. 跑一次 `p37d --check` 和 `p37 fsck`。
 
-只 `systemctl restart p37d` 时旧 payload 可能仍挂在 `/run/p37-payload`；
-**换盘请重启实例**。
+> 不要试图在实例内替换 `/usr/local/lib/p37` 下的文件：L1 是只读层。
+> 旧 L1 回退可能读不了新格式仓库，P36 应把最低 p37 版本作为硬门槛。
 
 ### 1.3 v1 → v2 格式迁移
 
@@ -161,7 +161,7 @@ auth_token = "<token>"
 
 - copy 模式下每个工作区是一份完整树；磁盘 ≈ 仓库树 × 活跃工作区数。
 - overlay 模式共享只读基底，upper 只存改动；`base_cache_bytes` 控制基底缓存。
-- 20GB L2 的 P36 模板：`max_active=8`、`max_hidden=32`、
+- P36 应用卷模板：`max_active=8`、`max_hidden=32`、
   `warn_disk_bytes=8 GiB`。按 `repo_disk_usage` / `ws_disk_usage` 复核。
 - `land_queue_max` 是排队上限，不是并发执行数；land 本身由 `landMu` 串行。
 - 多 line 仓库 push 当前是全量 checkpoint；大仓库建议按会话保留 VM，减少
@@ -211,7 +211,7 @@ p37 --root /srv/repos repo scan --repair
 p37 doctor <path>              # 输出 repo/line/version/refs 一致性
 ```
 
-## 应用卷迁移：把旧 L2 repo 收养到 /srv/repos/<name>
+## 应用卷迁移：把旧路径 repo 收养到 /srv/repos/<name>
 
 `repo_create` 的历史行为会把 repo 建在 `/srv/repos/repo_<hash>`；P36 保留的
 应用卷路径是 `/srv/repos/<name>`。如果同名 repo 已注册在旧路径，

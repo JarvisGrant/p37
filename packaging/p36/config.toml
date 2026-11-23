@@ -1,4 +1,4 @@
-# P36 实例（20 GiB L2）的 p37 配置模板。
+# P36 L1 的 p37 配置模板（应用卷容量由 P36 分配）。
 #
 # 首次启动时由 p37-run 复制到 /srv/repos/.p37/config.toml，作为多 repo 默认。
 #
@@ -20,12 +20,12 @@ materialize = "auto"
 base_cache_bytes = 4294967296
 # copy 模式每个工作区都是完整树；P34「主管 + N 子会话」至少需要 1+N 个。
 # 4 正好等于「主管 + 3 子会话」，没有任何缓冲（主管每轮 drop 再重开时尤其
-# 容易撞配额），因此默认 8；20 GiB L2 上请按仓库树大小与 repo_disk_usage
-# 复核，必要时收紧。硬上限仍是 64。
+# 容易撞配额），因此默认 8；请按应用卷实际容量与 repo_disk_usage 复核，
+# 必要时收紧。硬上限仍是 64。
 max_active = 8
 # 隐藏 merge/preview 工作区上限（不占 max_active）。
 max_hidden = 32
-# copy 模式磁盘占用更高；剩余空间低于 8 GiB 就告警。
+# copy 模式磁盘占用更高；剩余空间低于该阈值就告警（按应用卷调整）。
 warn_disk_bytes = 8589934592
 # 工作区回收记录（ws_list include_dropped）保留窗口。
 tombstone_ttl = "168h"

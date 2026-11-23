@@ -303,6 +303,16 @@ func (h *Hub) registerPathLocked(name, abs string, opt RegisterOptions) (*Entry,
 	if err := h.upsertEntryLocked(effectiveID, effectiveName, abs, effectiveDefault); err != nil {
 		return nil, err
 	}
+	// 改名后旧的 name 缓存键不能继续指向同一个 repo，否则 registry 已经
+	// 查不到旧名字，Open("old") 却还能读写，甚至返回已关闭的 *repo.Repo。
+	if cached := h.repos[effectiveID]; cached != nil {
+		for k, v := range h.repos {
+			if v == cached && k != effectiveID {
+				delete(h.repos, k)
+			}
+		}
+		h.repos[effectiveName] = cached
+	}
 	h.invalidateHealth(abs)
 	return h.getEnrichedLocked(effectiveID)
 }
@@ -828,7 +838,7 @@ func (h *Hub) validateRepoPath(path string, mustExist bool) (string, error) {
 
 // initRepoAt 初始化目录并写入 repo.json。调用方必须持有 h.mu。
 //
-// 这是 repo_create 的 L2 scratch 路径：明确不要求挂载点（mounted=false），
+// 这是 repo_create 的 VM 根盘 scratch 路径：明确不要求挂载点（mounted=false），
 // 但仍然走统一的原子初始化，避免留下半套 .p37。
 func (h *Hub) initRepoAt(path, id, name, defaultLine string) error {
 	if defaultLine == "" {

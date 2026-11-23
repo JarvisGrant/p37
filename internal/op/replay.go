@@ -371,6 +371,17 @@ func (c *replayCtx) target(path string) string {
 
 // applyHunksTo 把 op 的 hunks 放到 path 上（rename 会改道到新路径）。
 func (c *replayCtx) applyHunksTo(path string, o *Op) error {
+	// 目标已经是本侧要得到的内容：两侧做了完全相同的修改（或崩溃重试）。
+	// 这是幂等，不是冲突。旧 op 没有 NewFile 时跳过这个快路径。
+	if !o.NewFile.IsZero() {
+		if e, ok := c.entries[path]; ok && e.ID == o.NewFile {
+			if o.ModeAfter != nil {
+				e.Mode = resolveMode(o, e.Mode)
+				c.entries[path] = e
+			}
+			return nil
+		}
+	}
 	cur, ok, err := c.contentOf(path)
 	if err != nil {
 		return err
@@ -536,9 +547,22 @@ func (c *replayCtx) applyWholeResolution(o *Op, r Resolution) error {
 		case KindRename:
 			// 跟随重命名：把 old 移到 new（内容沿用对侧当前的）。
 			if e, ok := c.entries[o.Path]; ok {
-				e.Name = o.DestPath
+				e.Name = baseName(o.DestPath)
 				c.entries[o.DestPath] = e
 				delete(c.entries, o.Path)
+				return nil
+			}
+			// 源路径已不存在（父侧删除了它）：take_upper 的语义是“按本侧
+			// 内容创建”。旧实现直接 return nil，land 成功但改动被静默丢弃。
+			if !o.NewFile.IsZero() {
+				mode := codec.ModeNormal
+				if o.ModeAfter != nil {
+					mode = *o.ModeAfter
+				}
+				c.entries[o.DestPath] = tree.Entry{
+					Name: baseName(o.DestPath), Mode: mode,
+					Kind: o.EntryKindOf(), ID: o.NewFile,
+				}
 			}
 			return nil
 		}

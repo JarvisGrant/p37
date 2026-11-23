@@ -31,7 +31,7 @@ runner 的 mtime 精度可能不足；本地测试通常不需要。
 ```text
 cmd/p37         运维 / 调试 CLI
 cmd/p37d        daemon、stdio 代理、--check
-cmd/p37-mount   P36 payload 挂载助手
+cmd/p37-mount   legacy payload 挂载助手（当前 L1 用 p37-mount-local）
 internal/cas    内容寻址存储、CDC、pack
 internal/capture 目录采集与树 diff
 internal/codec  确定性编码与路径校验

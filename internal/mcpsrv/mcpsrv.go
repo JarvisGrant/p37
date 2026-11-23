@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -173,10 +174,19 @@ func (s *Server) repoFor(ref string) (*repo.Repo, error) {
 	}
 	r, err := s.Resolve(ref)
 	if err != nil {
-		if errors.Is(err, hub.ErrRepoQuiesced) {
+		switch {
+		case errors.Is(err, hub.ErrRepoQuiesced):
 			return nil, coded("repo_quiesced", "仓库 %q 已 quiesce，请先 repo_resume", ref)
+		case errors.Is(err, hub.ErrRepoNotFound):
+			return nil, coded("repo_not_found", "仓库 %q 不存在", ref)
+		case errors.Is(err, hub.ErrRepoLocked):
+			return nil, codedDetail("repo_busy",
+				map[string]any{"repo": ref, "reason": "repo_locked", "retryable": true},
+				"仓库 %q 正被另一个进程占用", ref)
+		default:
+			// 保留 DB 损坏/未初始化/路径错误等真实原因，交给 classify。
+			return nil, err
 		}
-		return nil, coded("repo_not_found", "仓库 %q 不存在: %v", ref, err)
 	}
 	return r, nil
 }
@@ -195,16 +205,26 @@ type toolFunc func(ctx context.Context, args json.RawMessage) (any, error)
 
 // register 注册一个工具。
 func (s *Server) register(name, desc, schema string, fn toolFunc) {
+	fullSchema := withRepoParam(json.RawMessage(schema))
 	t := &mcp.Tool{
 		Name:        name,
 		Description: desc,
-		InputSchema: withRepoParam(json.RawMessage(schema)),
+		InputSchema: fullSchema,
 	}
+	allowed, strict := schemaKeys(fullSchema)
 	s.Srv.AddTool(t, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// CallToolRequest.Params.Arguments 已经是 json.RawMessage。
 		raw := req.Params.Arguments
 		if len(raw) == 0 {
 			raw = json.RawMessage("{}")
+		}
+		if strict {
+			if unknown := unknownTopLevelKeys(raw, allowed); len(unknown) > 0 {
+				return envelopeErr(codedDetail("invalid_argument",
+					map[string]any{"unknown_fields": unknown, "retryable": false},
+					"未知参数: %s（schema 声明 additionalProperties=false）",
+					strings.Join(unknown, ", "))), nil
+			}
 		}
 
 		data, err := fn(ctx, raw)
@@ -213,6 +233,38 @@ func (s *Server) register(name, desc, schema string, fn toolFunc) {
 		}
 		return envelopeOK(data), nil
 	})
+}
+
+// schemaKeys 从工具 InputSchema 提取顶层属性名；只有显式声明
+// additionalProperties=false 时才启用严格校验。
+func schemaKeys(schema json.RawMessage) (map[string]bool, bool) {
+	var m struct {
+		Properties           map[string]json.RawMessage `json:"properties"`
+		AdditionalProperties *bool                      `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(schema, &m); err != nil || m.AdditionalProperties == nil || *m.AdditionalProperties {
+		return nil, false
+	}
+	keys := make(map[string]bool, len(m.Properties))
+	for k := range m.Properties {
+		keys[k] = true
+	}
+	return keys, true
+}
+
+func unknownTopLevelKeys(raw json.RawMessage, allowed map[string]bool) []string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	var out []string
+	for k := range m {
+		if !allowed[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func envelopeOK(data any) *mcp.CallToolResult {

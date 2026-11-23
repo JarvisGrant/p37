@@ -18,8 +18,8 @@
 
 ## 我要部署 / 运维
 
-- [`../packaging/p36/README.md`](../packaging/p36/README.md) —— P36 payload、
-  L1 胶水、systemd、应用卷热插拔。
+- [`../packaging/p36/README.md`](../packaging/p36/README.md) —— P36 L1 集成、
+  systemd、应用卷热插拔与升级。
 - [`operations.md`](operations.md) —— 升级、迁移、备份、GC 维护窗口、监控、
   常见故障。
 - [`cli.md`](cli.md) —— `p37` / `p37d` 命令与退出码。

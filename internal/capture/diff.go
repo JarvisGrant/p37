@@ -351,7 +351,7 @@ func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func
 		return op.Op{
 			ID: newOpID(wsID, ch.path, nextSeq(), op.KindModify), WsID: wsID,
 			Kind: op.KindModify, Path: ch.path,
-			BaseFile: ch.old.ID, Hunks: out,
+			BaseFile: ch.old.ID, NewFile: ch.new.ID, Hunks: out,
 			ModeBefore: op.ModePtr(ch.old.Mode), ModeAfter: op.ModePtr(ch.new.Mode),
 			Derived: true,
 		}, nil

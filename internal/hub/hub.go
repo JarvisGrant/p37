@@ -92,9 +92,10 @@ type Entry struct {
 
 // Hub 管理多个仓库。
 type Hub struct {
-	root string
-	cfg  config.Config
-	db   *sql.DB
+	root   string
+	cfg    config.Config
+	socket string
+	db     *sql.DB
 
 	mu    sync.Mutex
 	repos map[string]*repo.Repo
@@ -174,7 +175,8 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	_ = os.Chmod(regPath, 0o600)
 	_ = os.Chmod(regPath+"-wal", 0o600)
 	_ = os.Chmod(regPath+"-shm", 0o600)
-	h := &Hub{root: root, cfg: cfg, db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{},
+	h := &Hub{root: root, cfg: cfg, socket: config.SocketPath(root, cfg),
+		db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{},
 		quiesced:           map[string]bool{},
 		mountProbe:         mountmgr.IsMountPoint,
 		allowNonPersistent: os.Getenv("P37_ALLOW_NONPERSISTENT") == "1",
@@ -205,8 +207,14 @@ func (h *Hub) isMountPoint(path string) bool {
 // Root 返回多仓库根目录。
 func (h *Hub) Root() string { return h.root }
 
-// SocketPath 返回 daemon socket。
-func (h *Hub) SocketPath() string { return filepath.Join(h.root, ".p37", "p37d.sock") }
+// SocketPath 返回 daemon socket。遵循 config.daemon.socket，保证 daemon、
+// CLI 路由和 p37d --stdio 使用同一路径。
+func (h *Hub) SocketPath() string {
+	if h.socket != "" {
+		return h.socket
+	}
+	return filepath.Join(h.root, ".p37", "p37d.sock")
+}
 
 // NewID 生成一个不可猜的 repo id。
 func NewID() (string, error) {
@@ -596,7 +604,7 @@ func CleanName(s string) string { return strings.TrimSpace(s) }
 //
 // 同名候选可能同时存在（历史 repo_<hash> 与新应用卷 /<name>）。这里优先选
 // 目录名 == repo name 的候选；没有则按路径排序取第一个，并把冲突写进
-// RecoverWarnings，由 p37d 启动日志暴露，避免静默选错 L2 旧路径。
+// RecoverWarnings，由 p37d 启动日志暴露，避免静默选错 旧路径。
 func (h *Hub) recoverRegistry() {
 	var n int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM repo`).Scan(&n); err != nil || n > 0 {

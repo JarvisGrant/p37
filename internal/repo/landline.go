@@ -254,7 +254,9 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 	unlockFold := r.WS.LockWorkspaces(lockIDs)
 	defer unlockFold()
 	for _, fw := range fold {
-		if err := r.WS.SyncLocked(fw.ID); err != nil {
+		// land 的采集必须看全：stat_cache/惰性快路径在“文件正在写”或粗
+		// mtime 文件系统上可能漏改动；漏了之后再焚毁工作区就不可恢复。
+		if err := r.syncForLandLocked(fw.ID); err != nil {
 			return nil, err
 		}
 	}
@@ -371,6 +373,28 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 	}
 	if err := r.syncMainlineRefIfDefault(opt.Line, v.ID()); err != nil {
 		return nil, err
+	}
+	// 折叠集合里的中间节点也可能有不在 fold 里的兄弟子工作区；把它们
+	// 重挂到新版本，避免 parent 指向即将被焚毁的旧工作区（悬空指针会让
+	// 子工作区之后的 land/rebase 全部失败）。
+	inFold := make(map[string]bool, len(fold))
+	for _, fw := range fold {
+		inFold[fw.ID] = true
+	}
+	for _, fw := range fold {
+		kids, kerr := r.DB.Children(fw.ID)
+		if kerr != nil {
+			return nil, kerr
+		}
+		for i := range kids {
+			k := &kids[i]
+			if inFold[k.ID] || k.Hidden || k.LandedTS != 0 {
+				continue
+			}
+			if err := r.DB.UpdateWorkspaceParent(k.ID, meta.ParentVersion, v.ID().String(), time.Now().UnixMilli()); err != nil {
+				return nil, err
+			}
+		}
 	}
 	res.TargetHead = v.ID()
 	res.State = "done"
@@ -701,13 +725,22 @@ func (r *Repo) mergeIntoParentLocked(wsID, parentWsID string, opt LandIntoOption
 			forceConflict[p] = true
 		}
 	}
+	// 跟随父工作区已经发生的重命名：子工作区改的是旧路径、父已经改名时，
+	// 应把改动应用到新路径，而不是报 missing_base 假冲突。
+	var follow map[string]string
+	if !child.BaseTree.IsZero() && child.BaseTree != parentTree {
+		follow, err = op.RenameFollows(r.Store, childBase, parentTreeObj)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// 冲突 key 含 WsID：这里必须**恒用子工作区 id**，不能因为调用方传了
 	// preview_id 就换 key 域。否则「preview → resolve → 带 preview_id 重试」
 	// 会算出新 key，解决记录永远匹配不上（沙盒 #66.2 的死循环）。
 	replayed, err := op.Replay(parentTreeObj, ops, r.Store, op.Options{
 		WsID: wsID, MaxMatches: r.maxMatchesOrDefault(),
 		Resolver: r.DB.Resolver(), Candidates: true,
-		ForceConflictPaths: forceConflict,
+		Follow: follow, ForceConflictPaths: forceConflict,
 	})
 	if err != nil {
 		return nil, err
@@ -854,6 +887,18 @@ func (r *Repo) reconcileLandInto() error {
 		}
 		// 只重放 before→result 的差异路径：崩溃恢复同样不能整树覆盖父目录。
 		if err := r.WS.ApplyTreeDelta(j.ParentWsID, before, target); err != nil {
+			continue
+		}
+		// 崩溃可能发生在 ApplyTreeDelta 成功之后、InsertLandedWS 之前。
+		// 只删 journal 会让子工作区仍是 active，重试时重新采集同一批 op，
+		// 在已经包含改动的父树上产生假冲突。这里补齐“已落地”状态并收尾。
+		if err := r.DB.InsertLandedWSWithTarget(j.WsID, j.ResultTree,
+			"workspace", j.ParentWsID, time.Now().UnixMilli()); err != nil {
+			continue
+		}
+		_ = r.DB.ClearConflicts(j.WsID)
+		if _, _, derr := r.WS.Drop(j.WsID, true, false); derr != nil &&
+			!errors.Is(derr, workspace.ErrNotFound) {
 			continue
 		}
 		_ = r.DB.DeleteLandIntoJournal(j.ID)

@@ -133,25 +133,20 @@ p37 status /srv/repo      # 期望：head 要么是旧值要么是新值，无�
 
 前置：
 
-- L0 不改；平台胶水在 L1；`p37`/`p37d` 只来自 payload；
-- L2 的 `/srv/repos` 为 ext4、属主 `p36:p36`（建议 `0750`）；
-- 宿主已投递 label `P37PAYLOAD` 的只读 ext4 盘，固定 **96 MiB**；
-- P36 设备顺序：`vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
+- L0 不改；p37/p37d 内嵌在 L1 的 `/usr/local/lib/p37`，不再有 payload 盘；
+- `/srv/repos` 为 ext4、属主 `p36:p36`（建议 `0750`）；
+- 新建实例只挂 `vda=root`、`vdb=P36AGENT`；没有 `P37PAYLOAD`；
 - `p37d.service` 使用 `User=p36` + `AmbientCapabilities=CAP_SYS_ADMIN`，
   **不要**加会创建私有 mount namespace 的 `PrivateTmp`/`Protect*`；
 - `workspace.materialize = "auto"`；非 root overlay 失败时接受 copy 回退；
-- copy 模式建议按 L2 容量设置 `max_active` / `warn_disk_bytes`；
-- `/run/p37-payload` 由 `/etc/tmpfiles.d/p37.conf` 创建；不要用
-  `RuntimeDirectory=`（service 重启时会在只读 payload 挂载点上重建目录而失败）。
-  停服后 payload 仍挂载。
+- copy 模式建议按应用卷实际容量设置 `max_active` / `warn_disk_bytes`。
 
 GitHub Actions 的 `release.yml` 会自动跑 §6.1–§6.6；也可以在已发布 Release 上
 手动触发 `p36-acceptance.yml`。
 
 ```bash
-# 6.1 服务外 findmnt：payload 与 keeper workspace
-findmnt -T /run/p37-payload                  # 应为 ext4
-find /run/p37-payload -maxdepth 1 -mindepth 1 -printf '%f\n' | sort
+# 6.1 服务外 findmnt：L1 本地 p37 与 keeper workspace
+ls -l /usr/local/lib/p37/p37 /usr/local/lib/p37/p37d /usr/local/lib/p37/manifest.json
 findmnt -T /srv/repos/workspaces/<keeper_ws> # overlay 或 copy 下的 /srv/repos ext4
 # 记录 MATERIALIZE=copy|overlay
 
@@ -159,20 +154,20 @@ findmnt -T /srv/repos/workspaces/<keeper_ws> # overlay 或 copy 下的 /srv/repo
 systemctl stop p37d
 
 # 单仓库 / legacy：完整健康检查（ext4/写探测/OverlayFS/inotify/磁盘）
-/run/p37-payload/p37d --check --strict --repo /srv/repo
-/run/p37-payload/p37d --check --strict --json --repo /srv/repo | jq .
+/usr/local/lib/p37/p37d --check --strict --repo /srv/repo
+/usr/local/lib/p37/p37d --check --strict --json --repo /srv/repo | jq .
 
 # 多仓库：registry 级检查（每个 repo 的 DB，strict 下走 line 链）
-/run/p37-payload/p37d --check --strict --json --root /srv/repos | jq .
+/usr/local/lib/p37/p37d --check --strict --json --root /srv/repos | jq .
 
 # auto 模式下 doctor 的 OverlayFS FAIL 是预期；正式门禁看上面的 check
-/run/p37-payload/p37 doctor /srv/repo || true
+/usr/local/lib/p37/p37 doctor /srv/repo || true
 systemctl start p37d
 
 # 6.3 幂等 init（第二次必须返回 0 且不改 config）
-/run/p37-payload/p37 init --if-missing --config /usr/local/share/p37/config.toml /srv/repo
+/usr/local/lib/p37/p37 init --if-missing --config /usr/local/share/p37/config.toml /srv/repo
 sha256sum /srv/repo/.p37/config.toml
-/run/p37-payload/p37 init --if-missing /srv/repo
+/usr/local/lib/p37/p37 init --if-missing /srv/repo
 sha256sum /srv/repo/.p37/config.toml
 
 # 6.4 两个 agent 经 stdio 并发（MCP 客户端 command=/usr/local/bin/p37-mcp）
@@ -184,13 +179,13 @@ sha256sum /srv/repo/.p37/config.toml
 # 6.5 重启恢复
 systemctl restart p37d
 findmnt -T /srv/repos/workspaces/<keeper_ws>  # overlay 或 /srv/repos ext4
-/run/p37-payload/p37 --root /srv/repos --repo <name> ws-list
+/usr/local/lib/p37/p37 --root /srv/repos --repo <name> ws-list
 
-# 6.6 GC 保护（停服后 payload 仍挂载）
+# 6.6 GC 保护
 systemctl start p37d
-/run/p37-payload/p37 --root /srv/repos --repo <name> gc --prune; echo $?   # 期望非 0
+/usr/local/lib/p37/p37 --root /srv/repos --repo <name> gc --prune; echo $?   # 期望非 0
 systemctl stop p37d
-/run/p37-payload/p37 --root /srv/repos --repo <name> gc --prune --pack     # 期望 0
+/usr/local/lib/p37/p37 --root /srv/repos --repo <name> gc --prune --pack     # 期望 0
 ```
 
 v0.1.13 起默认验收**不再自动 root fallback**：P36 在 `materialize=auto` 下

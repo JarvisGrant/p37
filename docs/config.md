@@ -158,8 +158,8 @@ max_package_bytes = 536870912
 |---|---|
 | `P37_ROOT` | P36 多仓库根目录（默认 `/srv/repos`） |
 | `P37_REPO` | legacy 单仓库路径（默认 `/srv/repo`） |
-| `P37_PAYLOAD_LABEL` | payload 盘 label（默认 `P37PAYLOAD`） |
-| `P37_PAYLOAD_MOUNT` | payload 挂载点（默认 `/run/p37-payload` 或 L1 的 `/usr/local/lib/p37`） |
+| `P37_PAYLOAD_LABEL` | legacy payload 盘 label（默认 `P37PAYLOAD`；当前 P36 不再投递） |
+| `P37_PAYLOAD_MOUNT` | p37 二进制目录（当前 L1 默认 `/usr/local/lib/p37`；legacy 为 `/run/p37-payload`） |
 | `P37_CONFIG` | L1 配置模板路径 |
 | `P37_S3_ACCESS_KEY` / `P37_S3_SECRET_KEY` | S3 凭证；只从环境变量读 |
 | `P37_S3_SESSION_TOKEN` | 可选临时凭证 |
@@ -170,11 +170,11 @@ max_package_bytes = 536870912
 
 ## 注意
 
-- `warn_disk_bytes` 的代码默认是 12 GiB；P36 模板为了 20GB L2 改成 8 GiB。
+- `warn_disk_bytes` 的代码默认是 12 GiB；P36 模板按应用卷容量改成 8 GiB。
   文档里看到 8 GiB 时，指的是 P36 模板。
 - `max_active` / `max_depth` / `max_fanout` 只能调小，不能超过硬上限。
-- 多仓库 daemon 的 unix socket 固定为 `<root>/.p37/p37d.sock`；不要在多仓库
-  配置里改 `daemon.socket`，否则 `p37d --stdio` 可能连接到不同路径。
+- 多仓库 daemon 的 unix socket 默认 `<root>/.p37/p37d.sock`，并遵循
+  `daemon.socket`；daemon、CLI 路由和 `p37d --stdio` 使用同一配置。
 - `auth_token` 不要写进随镜像分发的配置；由实例侧注入。
 - 配置里的相对路径（`outbox` 等）相对 repo 根解析。
 

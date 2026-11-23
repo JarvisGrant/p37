@@ -70,9 +70,16 @@ func unflatten(cs ContentStore, entries map[string]tree.Entry) (*tree.Tree, erro
 	sort.Strings(paths)
 	// 文件不能同时是另一个文件的祖先。重放侧已经会把它变成冲突；这里是
 	// 最后一道防线，避免把 DecodeTree 无法读取的树写进 CAS。
-	for i := 1; i < len(paths); i++ {
-		if strings.HasPrefix(paths[i], paths[i-1]+"/") {
-			return nil, fmt.Errorf("op: 文件/目录同名: %q 与 %q", paths[i-1], paths[i])
+	//
+	// 不能只比较排序后的相邻项：字典序里 "foo"、"foo-bar.txt"、"foo/bar"
+	// 中 "foo" 与 "foo/bar" 并不相邻（'-' < '/'）。逐路径检查祖先集合。
+	for _, p := range paths {
+		dir, _ := splitDir(p)
+		for dir != "" {
+			if _, ok := entries[dir]; ok {
+				return nil, fmt.Errorf("op: 文件/目录同名: %q 与 %q", dir, p)
+			}
+			dir, _ = splitDir(dir)
 		}
 	}
 

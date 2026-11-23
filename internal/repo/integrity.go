@@ -2,6 +2,7 @@ package repo
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,3 +426,59 @@ var (
 	// ErrDBCorrupt 表示元数据库无法读取或结构不可恢复。
 	ErrDBCorrupt = errors.New("repo: 元数据库损坏")
 )
+
+// CheckLinesReadOnly 只读检查全部 line head 的版本/根树对象。
+//
+// `p37d --check --strict --root` 不能用 repo.Open：那会取 flock、重挂
+// overlay、回收工作区。这里只开只读 DB 与只读 CAS，不写任何东西。
+func CheckLinesReadOnly(root string) (int, error) {
+	db, err := meta.OpenReadOnly(root)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = db.Close() }()
+	bs, err := cas.OpenLocalFSReadOnly(filepath.Join(root, ".p37"))
+	if err != nil {
+		return 0, err
+	}
+	store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
+	lines, err := db.ListLines()
+	if err != nil {
+		return 0, err
+	}
+	seen := map[hash.ID]bool{}
+	walk := func(head hash.ID) error {
+		stack := []hash.ID{head}
+		n := 0
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if cur.IsZero() || seen[cur] {
+				continue
+			}
+			seen[cur] = true
+			v, verr := db.GetVersion(cur)
+			if verr != nil {
+				continue // 剪枝边界
+			}
+			if _, terr := store.GetTree(v.Tree); terr != nil {
+				return fmt.Errorf("版本 %s 的树 %s 不可读: %w", cur, v.Tree, terr)
+			}
+			n++
+			if n > 1_000_000 {
+				return errors.New("版本图过大，疑似存在环")
+			}
+			ps, perr := db.ParentIDs(cur)
+			if perr == nil {
+				stack = append(stack, ps...)
+			}
+		}
+		return nil
+	}
+	for i := range lines {
+		if err := walk(lines[i].Head); err != nil {
+			return len(lines), err
+		}
+	}
+	return len(lines), nil
+}
