@@ -330,3 +330,32 @@ func (d *DB) MarkConflictResolved(key hash.ID) error {
 		return err
 	})
 }
+
+// ReplaceConflicts 在一个事务内替换某工作区的冲突集合。
+//
+// 旧实现先 Clear 再 Upsert 两个事务：中间崩溃会得到空冲突列表，preview →
+// resolve → land 流程直接断掉。冲突是派生数据，整组替换必须原子。
+func (d *DB) ReplaceConflicts(wsID string, rows []ConflictRow) error {
+	return d.withWrite(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM conflict WHERE ws_id = ?`, wsID); err != nil {
+			return err
+		}
+		for i := range rows {
+			r := &rows[i]
+			if r.CreatedTS == 0 {
+				r.CreatedTS = time.Now().UnixMilli()
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO conflict(key, ws_id, op_id, hunk_index, path, kind, state,
+				                      base_json, lower_json, upper_json, candidates_json,
+				                      created_ts)
+				 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+				 ON CONFLICT(key) DO UPDATE SET state=excluded.state`,
+				r.Key.String(), r.WsID, r.OpID, r.HunkIdx, r.Path, string(r.Kind), r.State,
+				r.BaseJSON, r.LowerJSON, r.UpperJSON, r.CandsJSON, r.CreatedTS); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

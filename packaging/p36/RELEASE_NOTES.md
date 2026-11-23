@@ -19,6 +19,17 @@
 }
 ```
 
+## 本版重点（v0.6.1）
+
+v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6.0。
+
+- `sync_push` 幂等键绑定请求体（`full`/`lines`/`expected_remote_generation`），
+  同 key 不同请求返回 `idempotency_conflict`；`async=true` 拒绝幂等键。
+- `sync_restore` 幂等键绑定 `repo/remote_prefix/force`，同 key 重试返回首次结果。
+- 冲突列表 `ReplaceConflicts` 改为单事务 DELETE+INSERT，崩溃不再留下空冲突。
+- CLI `Land/Preview` 使用 leaf→root 工作区锁 + strict 采集。
+- 根 daemon 的 `daemon.lock`/socket 配置、`--check` 只读检查等已在 v0.6.0 生效。
+
 ## 本版重点（v0.6.0）
 
 这是 v0.5.2 之后的正确性/性能收敛版本，**`format_ver` 仍为 2**；已有仓库无需

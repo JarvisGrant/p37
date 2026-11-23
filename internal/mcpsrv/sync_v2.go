@@ -42,6 +42,9 @@ func (s *Server) registerSyncV2() {
 				if a.ExpectedRemoteGeneration > 0 {
 					return nil, coded("invalid_argument", "async=true 不支持 expected_remote_generation")
 				}
+				if a.IdempotencyKey != "" {
+					return nil, coded("invalid_argument", "async=true 不支持 idempotency_key（结果无法持久化）")
+				}
 				go func() {
 					if _, err := pushRepo(context.Background(), rr, s.Hub, a.Full, 0); err != nil {
 						// 异步路径没有调用方等待；至少留下可诊断日志。
@@ -50,8 +53,28 @@ func (s *Server) registerSyncV2() {
 				}()
 				return map[string]any{"durable": false, "async": true}, nil
 			}
+			request := map[string]any{
+				"repo": repoArg(raw), "all": a.All, "full": a.Full, "lines": a.Lines,
+				"expected_remote_generation": a.ExpectedRemoteGeneration,
+			}
+			reqJSON, _ := json.Marshal(request)
 			if a.IdempotencyKey != "" {
 				if ir, _ := rr.DB.GetIdempotencyResult("sync_push", a.IdempotencyKey, time.Now().UnixMilli()); ir != nil {
+					var env struct {
+						Request json.RawMessage `json:"request"`
+						Result  map[string]any  `json:"result"`
+					}
+					if json.Unmarshal([]byte(ir.ResultJSON), &env) == nil && len(env.Result) > 0 {
+						if string(env.Request) != string(reqJSON) {
+							return nil, codedDetail("idempotency_conflict", map[string]any{
+								"idempotency_key": a.IdempotencyKey,
+								"field":           "full/expected_remote_generation/lines",
+								"retryable":       false,
+							}, "幂等键 %q 已用于不同的 sync_push 请求", a.IdempotencyKey)
+						}
+						return env.Result, nil
+					}
+					// 兼容旧记录（直接是 result map）
 					var out map[string]any
 					if json.Unmarshal([]byte(ir.ResultJSON), &out) == nil {
 						return out, nil
@@ -60,7 +83,7 @@ func (s *Server) registerSyncV2() {
 			}
 			out, err := pushRepo(ctx, rr, s.Hub, a.Full, a.ExpectedRemoteGeneration)
 			if err == nil && a.IdempotencyKey != "" {
-				if b, merr := json.Marshal(out); merr == nil {
+				if b, merr := json.Marshal(map[string]any{"request": json.RawMessage(reqJSON), "result": out}); merr == nil {
 					now := time.Now().UnixMilli()
 					_ = rr.DB.PutIdempotencyResult("sync_push", a.IdempotencyKey, string(b), now,
 						now+int64(7*24*time.Hour/time.Millisecond))
@@ -129,11 +152,12 @@ func (s *Server) registerSyncV2() {
 				return nil, coded("sync_not_configured", "单仓库模式请用 sync_pull")
 			}
 			var a struct {
-				Repo         string          `json:"repo"`
-				Name         string          `json:"name"`
-				RemotePrefix string          `json:"remote_prefix"`
-				Remote       json.RawMessage `json:"remote"`
-				Force        bool            `json:"force"`
+				Repo           string          `json:"repo"`
+				Name           string          `json:"name"`
+				RemotePrefix   string          `json:"remote_prefix"`
+				Remote         json.RawMessage `json:"remote"`
+				Force          bool            `json:"force"`
+				IdempotencyKey string          `json:"idempotency_key"`
 			}
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
@@ -164,6 +188,28 @@ func (s *Server) registerSyncV2() {
 			rr, err = s.Hub.Open(e.ID)
 			if err != nil {
 				return nil, err
+			}
+			restoreReq, _ := json.Marshal(map[string]any{
+				"repo": name, "remote_prefix": a.RemotePrefix,
+				"force": a.Force, "remote": json.RawMessage(a.Remote),
+			})
+			if a.IdempotencyKey != "" {
+				if rec, _ := rr.DB.GetIdempotencyResult("sync_restore", a.IdempotencyKey, time.Now().UnixMilli()); rec != nil {
+					var env struct {
+						Request json.RawMessage `json:"request"`
+						Result  map[string]any  `json:"result"`
+					}
+					if json.Unmarshal([]byte(rec.ResultJSON), &env) == nil && len(env.Result) > 0 {
+						if string(env.Request) != string(restoreReq) {
+							return nil, codedDetail("idempotency_conflict", map[string]any{
+								"idempotency_key": a.IdempotencyKey,
+								"field":           "repo/remote_prefix/force",
+								"retryable":       false,
+							}, "幂等键 %q 已用于不同的 sync_restore 请求", a.IdempotencyKey)
+						}
+						return env.Result, nil
+					}
+				}
 			}
 			// 先验证远端可读，再决定是否 force 删除本地仓库。否则 prefix
 			// 打错/凭证缺失会先把本地唯一副本 rename 进 trash，再失败。
@@ -257,7 +303,22 @@ func (s *Server) registerSyncV2() {
 			if err != nil {
 				return nil, classifySyncErr(err)
 			}
-			return res, nil
+			out := map[string]any{
+				"downloaded_packages": res.Downloaded, "imported_objects": res.ImportedObjects,
+				"remote_head": res.RemoteHead, "local_head": res.LocalHead,
+				"up_to_date": res.UpToDate, "fast_forward": res.FastForward,
+				"diverged": res.Diverged, "ahead": res.Ahead, "behind": res.Behind,
+			}
+			if a.IdempotencyKey != "" {
+				if b, merr := json.Marshal(map[string]any{
+					"request": json.RawMessage(restoreReq), "result": out,
+				}); merr == nil {
+					now := time.Now().UnixMilli()
+					_ = rr.DB.PutIdempotencyResult("sync_restore", a.IdempotencyKey, string(b), now,
+						now+int64(7*24*time.Hour/time.Millisecond))
+				}
+			}
+			return out, nil
 		})
 
 	s.register("sync_prune", "回收远端旧包（保留最新 checkpoint 及后续 delta）。",

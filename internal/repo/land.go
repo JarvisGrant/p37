@@ -122,6 +122,8 @@ type CandidateView struct {
 // 本次判定出的冲突持久化到 conflict 表 —— 否则 `conflict_resolve(key)` 无法
 // 由 key 反查工作区，而「preview → resolve → land」正是 D22 想要的流程。
 func (r *Repo) Preview(wsID string) (*LandResult, error) {
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
 	res, err := r.plan(wsID, false)
 	if err != nil {
 		return nil, err
@@ -134,12 +136,6 @@ func (r *Repo) Preview(wsID string) (*LandResult, error) {
 
 // persistConflicts 用本次判定的结果替换该工作区的冲突记录。
 func (r *Repo) persistConflicts(wsID string, conflicts []op.Conflict) error {
-	if err := r.DB.ClearConflicts(wsID); err != nil {
-		return err
-	}
-	if len(conflicts) == 0 {
-		return nil
-	}
 	rows := make([]meta.ConflictRow, 0, len(conflicts))
 	for i := range conflicts {
 		c := &conflicts[i]
@@ -156,7 +152,7 @@ func (r *Repo) persistConflicts(wsID string, conflicts []op.Conflict) error {
 			CandsJSON: candsJSON(c.Candidat),
 		})
 	}
-	return r.DB.UpsertConflicts(rows)
+	return r.DB.ReplaceConflicts(wsID, rows)
 }
 
 // plan 是 Preview 与 Land 共用的引擎（同一套 rebase，保证结果一致，§7.5）。
@@ -165,6 +161,14 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 与 landToLocked 一致：leaf → root 锁住整个折叠集合，避免
+	// ws_rebase/ws_drop/采集在“读 op → 重放”之间改写工作区。
+	lockIDs := make([]string, 0, len(fold))
+	for i := len(fold) - 1; i >= 0; i-- {
+		lockIDs = append(lockIDs, fold[i].ID)
+	}
+	unlockFold := r.WS.LockWorkspaces(lockIDs)
+	defer unlockFold()
 	// 1. 校验。
 	for _, w := range fold {
 		switch w.State {
@@ -180,7 +184,7 @@ func (r *Repo) plan(wsID string, commit bool) (*LandResult, error) {
 	// （§5.2 触发源 b）。D22 所说的「无副作用」指的是不改变
 	// 版本/工作区/冲突/血缘状态，而不是不更新 ops 这份可重建缓存。
 	for _, w := range fold {
-		if err := r.WS.Sync(w.ID); err != nil {
+		if err := r.syncForLandLocked(w.ID); err != nil {
 			return nil, err
 		}
 	}

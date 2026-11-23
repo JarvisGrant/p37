@@ -1,4 +1,4 @@
-# 当前状态（v0.6.0）
+# 当前状态（v0.6.1）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.6.0` |
+| 发布版本 | `v0.6.1` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,11 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.6.1 重点（不改 `format_ver`）**：补齐 v0.6.0 之后的接口/恢复细节：
+`sync_push`/`sync_restore` 幂等键绑定请求体，`async=true` 不再接受幂等键；
+冲突列表改为单事务替换；CLI `ws_land`/`ws_preview` 也走 leaf→root 工作区锁和
+strict 采集。P36/P34 最低版本仍为 0.6.0。
 
 **v0.6.0 重点（不改 `format_ver`）**：在 v0.5.2 数据安全修复之上，完成
 GC/同步/并发/性能的一轮收敛：`VersionChain` 改为完整 DAG（merge 第二父不再
