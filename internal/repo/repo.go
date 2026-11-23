@@ -212,6 +212,13 @@ func Open(root string, opt Options) (*Repo, error) {
 		return nil, err
 	}
 	store := cas.NewStore(cas.NewPackStore(bs), db.ObjectIndex())
+	// format_ver=3 迁移会重建 object_index 缓存；首次打开时按磁盘对象回填。
+	if n, cerr := db.ObjectIndex().Count(); cerr == nil && n == 0 {
+		if _, rerr := store.RebuildIndex(); rerr != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("repo: 重建 object_index 失败: %w", rerr)
+		}
+	}
 
 	mm, err := mountmgr.New(root, mountmgr.Options{
 		BaseCacheBytes: opt.BaseCacheBytes,

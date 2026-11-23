@@ -22,7 +22,7 @@ import (
 // FormatVer 是当前的元数据库格式版本（§2.2）。
 //
 // 任何改变 DDL 或对象编码的行为都必须升此值，并提供迁移函数与迁移测试。
-const FormatVer = 2
+const FormatVer = 3
 
 // DB 是元数据库句柄。
 //
@@ -295,6 +295,13 @@ func ensureColumnsTx(tx *sql.Tx) error {
 		  remote_head     TEXT,
 		  last_package_id TEXT,
 		  last_sync_ts    INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS object_index (
+		  id       TEXT NOT NULL,
+		  type     INTEGER NOT NULL CHECK (type IN (1,2,3,4,5)),
+		  size     INTEGER NOT NULL,
+		  raw_size INTEGER NOT NULL,
+		  PRIMARY KEY (id, type)
 		)`,
 	}
 	for _, q := range stmts {
@@ -630,9 +637,10 @@ var ddl = []string{
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS object_index (
-	  id       TEXT PRIMARY KEY,
-	  type     INTEGER NOT NULL CHECK (type IN (1,2,3,4)),
+	  id       TEXT NOT NULL,
+	  type     INTEGER NOT NULL CHECK (type IN (1,2,3,4,5)),
 	  size     INTEGER NOT NULL,
-	  raw_size INTEGER NOT NULL
+	  raw_size INTEGER NOT NULL,
+	  PRIMARY KEY (id, type)
 	)`,
 }

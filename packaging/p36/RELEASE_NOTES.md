@@ -19,6 +19,27 @@
 }
 ```
 
+## 本版重点（v0.7.0）
+
+这是 **`format_ver=3`** 的 typed object 版本。版本 id 不变；对象地址从
+`objects/<id>` 改为 `objects/<type>/<id>`，`object_index` 主键改为
+`(id,type)`。P36/P34 最低 p37 版本提升到 **0.7.0**；旧 L1 必须重建且不得回退。
+
+### 解决
+
+- 同一 raw 可以同时是 Tree / Blob（例如空 Tree 编码 `03 00` 恰好是文件内容）。
+  v2 会静默去重成错误类型，文件永久不可读；v3 用类型命名空间让两者共存。
+- `GetBlob` / `GetTree` / `GetFileContent` / `GetVersion` 全部走 typed 读取；
+  通用 `Get` 在歧义时返回 `ErrAmbiguousType`。
+- 同步包闭包、payload、GC 标记、Scrub、packed 回收全部按 `(id,type)` 处理。
+- `PackLoose` 遇到同 id 多类型时保留第二个类型为松散对象，不构造不可解析的 pack。
+
+### 迁移
+
+- v1/v2 首次打开自动备份并迁移到 v3；`object_index` 作为缓存重建。
+- 旧 `objects/<id>` 仍可读，新对象写 typed key；不需要重写 version/tree id。
+- 旧二进制遇到 v3 会拒绝打开；P36 必须阻止回退旧 L1。
+
 ## 本版重点（v0.6.1）
 
 v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6.0。

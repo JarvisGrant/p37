@@ -3,6 +3,7 @@ package remotesync
 import (
 	"fmt"
 
+	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/codec"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/repo"
@@ -13,8 +14,8 @@ import (
 //
 // 版本对象本身不在树里，必须显式纳入，否则对端拿不到 Version 链，
 // version_show / version_diff / blame 都会缺数据。
-func collectVersionObjects(r *repo.Repo, versions []hash.ID) (map[hash.ID]uint8, error) {
-	set := make(map[hash.ID]uint8, 1024)
+func collectVersionObjects(r *repo.Repo, versions []hash.ID) (map[cas.ObjectKey]bool, error) {
+	set := make(map[cas.ObjectKey]bool, 1024)
 	for _, vid := range versions {
 		// 版本是**元数据行**（version 表），不是 CAS 对象；这里只要它的树。
 		v, err := r.DB.GetVersion(vid)
@@ -29,11 +30,12 @@ func collectVersionObjects(r *repo.Repo, versions []hash.ID) (map[hash.ID]uint8,
 }
 
 // collectTree 递归收集一棵树及其引用的内容对象。
-func collectTree(r *repo.Repo, id hash.ID, set map[hash.ID]uint8) error {
-	if _, ok := set[id]; ok {
+func collectTree(r *repo.Repo, id hash.ID, set map[cas.ObjectKey]bool) error {
+	k := cas.ObjectKey{ID: id, Type: codec.TypeTree}
+	if set[k] {
 		return nil
 	}
-	set[id] = codec.TypeTree
+	set[k] = true
 	t, err := r.Store.GetTree(id)
 	if err != nil {
 		return fmt.Errorf("remotesync: 读取树 %s: %w", id, err)
@@ -45,18 +47,19 @@ func collectTree(r *repo.Repo, id hash.ID, set map[hash.ID]uint8) error {
 				return err
 			}
 		case codec.EntrySymlink:
-			set[e.ID] = codec.TypeBlob
+			set[cas.ObjectKey{ID: e.ID, Type: codec.TypeBlob}] = true
 		default: // EntryFile：id 指向 FileContent，其 chunks 才指向 Blob
-			if _, ok := set[e.ID]; ok {
+			fk := cas.ObjectKey{ID: e.ID, Type: codec.TypeFileContent}
+			if set[fk] {
 				continue
 			}
 			fc, err := r.Store.GetFileContent(e.ID)
 			if err != nil {
 				return fmt.Errorf("remotesync: 读取文件内容 %s: %w", e.ID, err)
 			}
-			set[e.ID] = codec.TypeFileContent
+			set[fk] = true
 			for _, c := range fc.Chunks {
-				set[c] = codec.TypeBlob
+				set[cas.ObjectKey{ID: c, Type: codec.TypeBlob}] = true
 			}
 		}
 	}

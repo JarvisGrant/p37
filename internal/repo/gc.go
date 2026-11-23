@@ -182,18 +182,19 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		return nil, err
 	}
 	rep.ObjectTotal = len(objects)
-	types := make(map[hash.ID]uint8, len(objects))
-	size := make(map[hash.ID]int64, len(objects))
+	present := make(map[cas.ObjectKey]bool, len(objects))
+	size := make(map[cas.ObjectKey]int64, len(objects))
 	for _, o := range objects {
-		types[o.ID] = o.Type
-		size[o.ID] = o.StoredSize
+		k := cas.ObjectKey{ID: o.ID, Type: o.Type}
+		present[k] = true
+		size[k] = o.StoredSize
 	}
 
 	// -- 3. 标记 ------------------------------------------------------------
-	marked := make(map[hash.ID]struct{}, len(objects))
+	marked := make(map[cas.ObjectKey]bool, len(objects))
 	counts := map[string]int{}
-	mark := func(kind, id string, root hash.ID) error {
-		n, err := r.markReachable(root, types, marked)
+	mark := func(kind, id string, root hash.ID, typ uint8) error {
+		n, err := r.markReachable(root, typ, present, marked)
 		if err != nil {
 			return err
 		}
@@ -209,7 +210,7 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := mark("version", vid.String()[:16], v.Tree); err != nil {
+		if err := mark("version", vid.String()[:16], v.Tree, codec.TypeTree); err != nil {
 			return nil, err
 		}
 	}
@@ -217,7 +218,7 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	all := allWs
 	for i := range all {
 		w := &all[i]
-		if err := mark("workspace_tree", w.ID, w.BaseTree); err != nil {
+		if err := mark("workspace_tree", w.ID, w.BaseTree, codec.TypeTree); err != nil {
 			return nil, err
 		}
 		ops, err := r.DB.ListOps(w.ID)
@@ -230,13 +231,11 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 				if id.IsZero() {
 					continue
 				}
-				if _, ok := marked[id]; ok {
-					continue
+				n, merr := r.markAnyType(id, present, marked)
+				if merr != nil {
+					return nil, merr
 				}
-				if _, err := r.markReachable(id, types, marked); err != nil {
-					return nil, err
-				}
-				counts["workspace_ops"]++
+				counts["workspace_ops"] += n
 			}
 		}
 	}
@@ -250,7 +249,7 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	// -- 4. 差集 ------------------------------------------------------------
 	var drop []cas.ObjectInfo
 	for _, o := range objects {
-		if _, ok := marked[o.ID]; ok {
+		if marked[cas.ObjectKey{ID: o.ID, Type: o.Type}] {
 			continue
 		}
 		drop = append(drop, o)
@@ -258,16 +257,16 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	rep.ObjectDrop = len(drop)
 	// packed 对象不能逐个删除：DeleteObject 只删松散副本。这里把 packed
 	// 的字节排除在 drop_bytes 之外，真正回收由 SweepPacks 按“整包全死”统计。
-	packed := map[hash.ID]bool{}
+	packed := map[cas.ObjectKey]bool{}
 	if ps, ok := r.Store.BlobStore().(*cas.PackStore); ok {
 		for _, o := range drop {
-			if isPacked, perr := ps.IsPacked(o.ID); perr == nil && isPacked {
-				packed[o.ID] = true
+			if isPacked, perr := ps.IsPackedTyped(o.ID, o.Type); perr == nil && isPacked {
+				packed[cas.ObjectKey{ID: o.ID, Type: o.Type}] = true
 			}
 		}
 	}
 	for _, o := range drop {
-		if !packed[o.ID] {
+		if !packed[cas.ObjectKey{ID: o.ID, Type: o.Type}] {
 			rep.DropBytes += o.StoredSize
 		}
 	}
@@ -297,18 +296,22 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		}
 		rep.VersionsPruned++
 	}
+	markedIDs := map[hash.ID]struct{}{}
+	for k := range marked {
+		markedIDs[k.ID] = struct{}{}
+	}
 	for _, o := range drop {
-		if packed[o.ID] {
+		if packed[cas.ObjectKey{ID: o.ID, Type: o.Type}] {
 			continue // 由 SweepPacks 整包回收并统计
 		}
-		if err := r.Store.DeleteObject(o.ID); err != nil {
+		if err := r.Store.DeleteObjectTyped(o.Type, o.ID); err != nil {
 			return rep, err
 		}
 		rep.ObjectsDeleted++
 		rep.BytesReclaimed += o.StoredSize
 	}
 	// 打包对象不能逐个删除：只有当 pack 内**所有**对象都不可达时整包删除。
-	sw, err := r.Store.SweepPacks(marked)
+	sw, err := r.Store.SweepPacks(markedIDs)
 	if err != nil {
 		return rep, err
 	}
@@ -372,45 +375,72 @@ func (r *Repo) retentionCount(chain []hash.ID) (int, error) {
 //
 // 只解压 Tree 与 FileContent（都小）；Blob 是叶子，只看类型不解压 ——
 // 所以 10 GB 仓库的标记阶段不需要读那 10 GB。
-func (r *Repo) markReachable(root hash.ID, types map[hash.ID]uint8,
-	marked map[hash.ID]struct{}) (int, error) {
+func (r *Repo) markReachable(root hash.ID, typ uint8,
+	present map[cas.ObjectKey]bool, marked map[cas.ObjectKey]bool) (int, error) {
 	if root.IsZero() {
 		return 0, nil
 	}
 	added := 0
-	stack := []hash.ID{root}
+	stack := []cas.ObjectKey{{ID: root, Type: typ}}
 	for len(stack) > 0 {
-		id := stack[len(stack)-1]
+		k := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if _, ok := marked[id]; ok {
+		if marked[k] || !present[k] {
 			continue
 		}
-		marked[id] = struct{}{}
+		marked[k] = true
 		added++
 
-		switch types[id] {
+		switch k.Type {
 		case codec.TypeTree:
-			tr, err := r.Store.GetTree(id)
+			tr, err := r.Store.GetTree(k.ID)
 			if err != nil {
-				return added, fmt.Errorf("gc: 树 %s 不可读: %w", id, err)
+				return added, fmt.Errorf("gc: 树 %s 不可读: %w", k.ID, err)
 			}
 			for _, e := range tr.Entries {
-				stack = append(stack, e.ID)
+				stack = append(stack, cas.ObjectKey{ID: e.ID, Type: entryObjectType(e.Kind)})
 			}
 		case codec.TypeFileContent:
-			fc, err := r.Store.GetFileContent(id)
+			fc, err := r.Store.GetFileContent(k.ID)
 			if err != nil {
-				return added, fmt.Errorf("gc: FileContent %s 不可读: %w", id, err)
+				return added, fmt.Errorf("gc: FileContent %s 不可读: %w", k.ID, err)
 			}
-			stack = append(stack, fc.Chunks...)
-		case codec.TypeBlob, codec.TypeVersion:
+			for _, c := range fc.Chunks {
+				stack = append(stack, cas.ObjectKey{ID: c, Type: codec.TypeBlob})
+			}
+		case codec.TypeBlob, codec.TypeVersion, codec.TypeVersionMerge:
 			// 叶子。
-		default:
-			// 类型未知（索引缺失）→ 保守起见不再展开，但已算作可达，
-			// 不会被误删。
 		}
 	}
 	return added, nil
+}
+
+// markAnyType 标记一个 id 当前存在的全部类型（op 表没有可靠的类型字段）。
+func (r *Repo) markAnyType(id hash.ID,
+	present map[cas.ObjectKey]bool, marked map[cas.ObjectKey]bool) (int, error) {
+	added := 0
+	for k := range present {
+		if k.ID != id {
+			continue
+		}
+		n, err := r.markReachable(k.ID, k.Type, present, marked)
+		if err != nil {
+			return added, err
+		}
+		added += n
+	}
+	return added, nil
+}
+
+func entryObjectType(kind uint8) uint8 {
+	switch kind {
+	case codec.EntryTree:
+		return codec.TypeTree
+	case codec.EntrySymlink:
+		return codec.TypeBlob
+	default:
+		return codec.TypeFileContent
+	}
 }
 
 // ScrubResult 是一次 scrub 的结果（§10.4）。
@@ -451,7 +481,7 @@ func (r *Repo) Scrub(sample float64) (*ScrubResult, error) {
 		o := objects[i]
 		res.Checked++
 		res.Bytes += o.StoredSize
-		if _, _, err := r.Store.Get(o.ID); err != nil {
+		if _, _, err := r.Store.GetTyped(o.Type, o.ID); err != nil {
 			res.Corrupt = append(res.Corrupt, fmt.Sprintf("%s: %v", o.ID, err))
 			if len(res.Corrupt) >= 32 {
 				break

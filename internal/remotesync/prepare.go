@@ -107,13 +107,18 @@ func prepareLocked(r *repo.Repo, opt Options, force, full bool) (*Manifest, erro
 		return nil, ErrUpToDate
 	}
 
-	ids := make([]hash.ID, 0, len(newSet))
-	for id := range newSet {
-		ids = append(ids, id)
+	keys := make([]cas.ObjectKey, 0, len(newSet))
+	for k := range newSet {
+		keys = append(keys, k)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	sort.Slice(keys, func(i, j int) bool {
+		if c := keys[i].ID.String(); c != keys[j].ID.String() {
+			return c < keys[j].ID.String()
+		}
+		return keys[i].Type < keys[j].Type
+	})
 
-	built, err := buildResultFor(r, ids, opt)
+	built, err := buildResultFor(r, keys, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +149,7 @@ func prepareLocked(r *repo.Repo, opt Options, force, full bool) (*Manifest, erro
 		ResultVersion: head.String(),
 		Epoch:         uint64(st.Epoch),
 		CreatedTS:     meta.NowMS(),
-		ObjectCount:   len(ids),
+		ObjectCount:   len(keys),
 		RawBytes:      built.raw,
 		PayloadBytes:  payloadBytes,
 		PayloadHash:   PayloadHash(built.parts),
@@ -181,7 +186,7 @@ type buildResult struct {
 }
 
 // buildResultFor 把对象集合切成若干 payload 分片（整体 zstd 压缩）。
-func buildResultFor(r *repo.Repo, ids []hash.ID, opt Options) (*buildResult, error) {
+func buildResultFor(r *repo.Repo, keys []cas.ObjectKey, opt Options) (*buildResult, error) {
 	res := &buildResult{bodies: make(map[string][]byte)}
 	var (
 		cur      []payloadObject
@@ -201,23 +206,23 @@ func buildResultFor(r *repo.Repo, ids []hash.ID, opt Options) (*buildResult, err
 		cur, curBytes = nil, 0
 	}
 
-	for _, id := range ids {
-		stored, err := r.Store.GetStored(id)
+	for _, k := range keys {
+		stored, err := r.Store.GetStoredTyped(k.Type, k.ID)
 		if err != nil {
-			return nil, fmt.Errorf("remotesync: 读取对象 %s: %w", id, err)
+			return nil, fmt.Errorf("remotesync: 读取对象 %s: %w", k.ID, err)
 		}
 		typ, raw, err := cas.DecodeStored(stored)
 		if err != nil {
 			return nil, err
 		}
-		if hash.Sum(raw) != id {
-			return nil, fmt.Errorf("remotesync: 对象 %s 内容不符", id)
+		if hash.Sum(raw) != k.ID {
+			return nil, fmt.Errorf("remotesync: 对象 %s 内容不符", k.ID)
 		}
 		res.raw += int64(len(raw))
 		if curBytes > 0 && curBytes+int64(len(raw)) > opt.MaxPackageBytes {
 			flush()
 		}
-		cur = append(cur, payloadObject{id: id, typ: typ, raw: raw})
+		cur = append(cur, payloadObject{id: k.ID, typ: typ, raw: raw})
 		curBytes += int64(len(raw))
 	}
 	flush()

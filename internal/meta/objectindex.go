@@ -31,17 +31,52 @@ func (o *ObjectIndex) Has(id hash.ID) (bool, error) {
 	return true, nil
 }
 
-// Type 实现 cas.ObjectIndex。
-func (o *ObjectIndex) Type(id hash.ID) (uint8, error) {
-	var typ int
-	err := o.db.sql.QueryRow(`SELECT type FROM object_index WHERE id = ?`, id.String()).Scan(&typ)
+// HasType 实现 cas.ObjectIndex。
+func (o *ObjectIndex) HasType(id hash.ID, typ uint8) (bool, error) {
+	var one int
+	err := o.db.sql.QueryRow(`SELECT 1 FROM object_index WHERE id = ? AND type = ?`,
+		id.String(), int(typ)).Scan(&one)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return 0, cas.ErrNotExist
+		return false, nil
 	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
+
+// Type 实现 cas.ObjectIndex；多个类型时返回 ErrAmbiguousType。
+func (o *ObjectIndex) Type(id hash.ID) (uint8, error) {
+	ts, err := o.Types(id)
+	if err != nil {
 		return 0, err
 	}
-	return uint8(typ), nil
+	switch len(ts) {
+	case 0:
+		return 0, cas.ErrNotExist
+	case 1:
+		return ts[0], nil
+	default:
+		return 0, cas.ErrAmbiguousType
+	}
+}
+
+// Types 实现 cas.ObjectIndex。
+func (o *ObjectIndex) Types(id hash.ID) ([]uint8, error) {
+	rows, err := o.db.sql.Query(`SELECT type FROM object_index WHERE id = ? ORDER BY type`, id.String())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []uint8
+	for rows.Next() {
+		var typ int
+		if err := rows.Scan(&typ); err != nil {
+			return nil, err
+		}
+		out = append(out, uint8(typ))
+	}
+	return out, rows.Err()
 }
 
 // Add 实现 cas.ObjectIndex。
@@ -49,14 +84,14 @@ func (o *ObjectIndex) Add(id hash.ID, typ uint8, size, rawSize int64) error {
 	return o.db.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
 			`INSERT INTO object_index(id, type, size, raw_size) VALUES(?,?,?,?)
-			 ON CONFLICT(id) DO UPDATE SET type=excluded.type, size=excluded.size,
+			 ON CONFLICT(id, type) DO UPDATE SET size=excluded.size,
 			                               raw_size=excluded.raw_size`,
 			id.String(), int(typ), size, rawSize)
 		return err
 	})
 }
 
-// Remove 实现 cas.ObjectIndex。
+// Remove 实现 cas.ObjectIndex：删除该 id 的全部类型。
 func (o *ObjectIndex) Remove(id hash.ID) error {
 	return o.db.withWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`DELETE FROM object_index WHERE id = ?`, id.String())
@@ -64,9 +99,18 @@ func (o *ObjectIndex) Remove(id hash.ID) error {
 	})
 }
 
+// RemoveType 实现 cas.ObjectIndex。
+func (o *ObjectIndex) RemoveType(id hash.ID, typ uint8) error {
+	return o.db.withWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM object_index WHERE id = ? AND type = ?`,
+			id.String(), int(typ))
+		return err
+	})
+}
+
 // Iterate 实现 cas.ObjectIndex，按 id 升序回调。
 func (o *ObjectIndex) Iterate(fn func(id hash.ID, typ uint8, size, rawSize int64) error) error {
-	rows, err := o.db.sql.Query(`SELECT id, type, size, raw_size FROM object_index ORDER BY id`)
+	rows, err := o.db.sql.Query(`SELECT id, type, size, raw_size FROM object_index ORDER BY id, type`)
 	if err != nil {
 		return err
 	}

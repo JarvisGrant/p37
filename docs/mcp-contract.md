@@ -1,4 +1,4 @@
-# p37 MCP 契约（v0.5.1 / format_ver=2）
+# p37 MCP 契约（v0.7.0 / format_ver=3）
 
 本文是 MCP 工具的参数、返回字段和错误码参考。工具实现以
 `internal/mcpsrv` 的注册为准；当前注册 68 个工具。

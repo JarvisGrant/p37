@@ -10,7 +10,7 @@
 #   systemctl enable --now p37d-root-overlay.service
 
 [repo]
-format_ver = 2
+format_ver = 3
 # 限制 repo_export 只能写到这里（P34 部署约定见 config.toml）。
 export_root = "/srv/repos/.p37/tmp/p34-deploy"
 

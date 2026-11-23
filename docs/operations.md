@@ -31,16 +31,17 @@ make p36-bootstrap
 > 不要试图在实例内替换 `/usr/local/lib/p37` 下的文件：L1 是只读层。
 > 旧 L1 回退可能读不了新格式仓库，P36 应把最低 p37 版本作为硬门槛。
 
-### 1.3 v1 → v2 格式迁移
+### 1.3 格式迁移（v1/v2 → v3）
 
-- `repo.Open` 发现 `PRAGMA user_version=1` 时自动迁移。
-- 迁移前用 `VACUUM INTO` 备份到 `<repo>/.p37/backup/p37-v1-<ts>.db`。
-- 回填 `version_parent`，用 `mainline_head` 建立 protected 的 `main` line。
-- 历史 CAS 对象不重写；回滚只需恢复 `p37.db` 备份。
+- `repo.Open` 发现 `PRAGMA user_version < 3` 时自动迁移。
+- 迁移前用 `VACUUM INTO` 备份到 `<repo>/.p37/backup/p37-v<旧版本>-<ts>.db`。
+- v3 把对象地址改为 `objects/<type>/<id>`，`object_index` 主键改为 `(id,type)`；
+  版本 id 不变，旧 `objects/<id>` 仍可读。
+- 历史 CAS 对象不重写；回滚只能恢复 `p37.db` 备份，且迁移后新对象不可见。
 - 一般不需要手工执行 `p37 migrate`；该命令只是显式打开并走同一路径。
-- 旧二进制遇到 v2 会明确报错；升级后不要回退到不认识 v2 的版本。
+- 旧二进制遇到 v3 会明确报错；P36 不允许回退到不认识 v3 的旧 L1。
 
-详情见 [`format-v2.md`](format-v2.md)。
+详情见 [`format-v3.md`](format-v3.md)。
 
 ### 1.4 配置迁移
 

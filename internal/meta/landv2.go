@@ -216,6 +216,13 @@ func (d *DB) MigrateIfNeeded() (bool, error) {
 		// VACUUM INTO 不支持参数化时退回文件复制；失败不阻塞升级。
 		_ = copyFile(d.path, backup)
 	}
+	if v < 3 {
+		// object_index 是缓存；v3 改成 (id,type) 复合主键，直接重建表，
+		// 由 repo.Open 的 RebuildIndex 按需回填。
+		if _, err := d.sql.Exec(`DROP TABLE IF EXISTS object_index`); err != nil {
+			return false, err
+		}
+	}
 	if err := d.EnsureSchema(); err != nil {
 		return false, err
 	}

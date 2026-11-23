@@ -266,7 +266,7 @@ func TestPackStoreSeesExternalPack(t *testing.T) {
 
 	// 常驻读端：先读一次，位置表被加载（此时还没有 pack）。
 	reader := NewPackStore(base)
-	if _, _, err := reader.Get(keyFor(ids[0])); err != nil {
+	if _, _, err := reader.Get(typedKeyFor(codec.TypeBlob, ids[0])); err != nil {
 		t.Fatal(err)
 	}
 
@@ -277,7 +277,7 @@ func TestPackStoreSeesExternalPack(t *testing.T) {
 
 	// 读端必须自动发现新 pack。
 	for i, id := range ids {
-		rc, _, err := reader.Get(keyFor(id))
+		rc, _, err := reader.Get(typedKeyFor(codec.TypeBlob, id))
 		if err != nil {
 			t.Fatalf("外部打包后读 %s 失败: %v", id, err)
 		}

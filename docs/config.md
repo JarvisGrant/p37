@@ -10,7 +10,7 @@
 
 ```toml
 [repo]
-format_ver = 2
+format_ver = 3
 # ignore_extra = ["*.log", "dist/"]   # 追加到内置忽略规则之后
 # export_root = "/srv/repos/.p37/tmp/p34-deploy"
 

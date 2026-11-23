@@ -98,8 +98,8 @@ func TestShardingRoundTrip(t *testing.T) {
 	if len(stats) != 1 {
 		t.Fatalf("ListPrefix 返回 %d 项，期望 1", len(stats))
 	}
-	if stats[0].Key != "objects/"+id.String() {
-		t.Fatalf("key 未还原为 S3 形式: %q", stats[0].Key)
+	if stats[0].Key != typedKeyFor(codec.TypeBlob, id) {
+		t.Fatalf("key 未还原为 v3 typed 形式: %q", stats[0].Key)
 	}
 }
 
@@ -357,14 +357,23 @@ func TestCompressionDoesNotAffectID(t *testing.T) {
 //
 // 空 Tree 的编码是 {0x03,0x00}；如果用户文件内容恰好等于它，旧实现会
 // 去重命中 Tree 并返回同一个 id，文件之后永远读不出来。
-func TestTypeConflictIsRejected(t *testing.T) {
+func TestTypeConflictKeepsBothTypes(t *testing.T) {
 	s := newTestStore(t)
 	empty := &tree.Tree{}
 	if _, err := s.PutTree(empty); err != nil {
 		t.Fatal(err)
 	}
 	raw := empty.Encode()
-	if _, err := s.PutBlob(raw); !errors.Is(err, ErrTypeConflict) {
-		t.Fatalf("期望 ErrTypeConflict，得到 %v", err)
+	if _, err := s.PutBlob(raw); err != nil {
+		t.Fatalf("v3 typed 布局应允许同 raw 的 Blob 与 Tree 共存: %v", err)
+	}
+	if _, err := s.GetTree(empty.ID()); err != nil {
+		t.Fatalf("Tree 应仍可读: %v", err)
+	}
+	if got, err := s.GetBlob(hash.Sum(raw)); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("Blob 应仍可读: %v %q", err, got)
+	}
+	if _, _, err := s.Get(hash.Sum(raw)); !errors.Is(err, ErrAmbiguousType) {
+		t.Fatalf("通用 Get 应报告歧义，得到 %v", err)
 	}
 }

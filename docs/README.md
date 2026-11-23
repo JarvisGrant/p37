@@ -33,7 +33,7 @@
   文档维护约定。
 - [`architecture.md`](architecture.md) —— 模块边界与关键不变量。
 - [`concurrency.md`](concurrency.md) —— 代码里实际使用的锁和串行化方式。
-- [`format-v2.md`](format-v2.md) —— 仓库格式与迁移。
+- [`format-v3.md`](format-v3.md) —— 仓库格式与迁移。
 - [`../PROGRESS.md`](../PROGRESS.md) —— 实现历史和真机缺陷复盘（不是当前状态
   的唯一来源）。
 

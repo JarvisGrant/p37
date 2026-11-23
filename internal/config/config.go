@@ -148,7 +148,7 @@ type RemoteConfig struct {
 // Default 返回附录 B 的默认配置。
 func Default() Config {
 	return Config{
-		Repo: RepoConfig{FormatVer: 2},
+		Repo: RepoConfig{FormatVer: 3},
 		Files: FilesConfig{
 			MaxFileSize:      2 << 30,
 			MaxTextSize:      4 << 20,

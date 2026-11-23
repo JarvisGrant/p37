@@ -44,10 +44,23 @@ func contentETag(b []byte) string { return hash.Sum(b).String() }
 // 因此索引可以随时由 objects/ 前缀重建（§8.3、§10）。
 type ObjectIndex interface {
 	Has(id hash.ID) (bool, error)
+	HasType(id hash.ID, typ uint8) (bool, error)
 	Type(id hash.ID) (uint8, error)
+	Types(id hash.ID) ([]uint8, error)
 	Add(id hash.ID, typ uint8, size, rawSize int64) error
 	Remove(id hash.ID) error
+	RemoveType(id hash.ID, typ uint8) error
 	Iterate(fn func(id hash.ID, typ uint8, size, rawSize int64) error) error
+}
+
+// ObjectKey 是「内容 id + 对象类型」的复合标识。
+//
+// 内容 id 只覆盖 raw；同一份 raw 在极少数情况下可以同时是 Tree / Blob
+// （例如空 Tree 的编码恰好等于某文件的两字节内容）。v3 布局用 type 命名空间
+// 区分它们，复合 key 是索引与 GC 的最小单位。
+type ObjectKey struct {
+	ID   hash.ID
+	Type uint8
 }
 
 // Store 是带类型的对象存储，在 BlobStore 之上实现：
@@ -135,8 +148,13 @@ func (s *Store) BlobStore() BlobStore { return s.bs }
 // 调用方**必须**在推进主干 head 之前调用它（§7.3）。
 func (s *Store) Flush() error { return s.bs.Flush() }
 
-// keyFor 返回对象的 BlobStore key。
+// keyFor 返回 v2 legacy 对象的 BlobStore key。
 func keyFor(id hash.ID) string { return "objects/" + id.String() }
+
+// typedKeyFor 返回 v3 类型命名空间 key。
+func typedKeyFor(typ uint8, id hash.ID) string {
+	return fmt.Sprintf("objects/%02x/%s", typ, id)
+}
 
 // storedHeader 是对象存储的前缀：0x01 || type。
 const storedFormat = 0x01
@@ -178,20 +196,23 @@ func decodeStored(b []byte) (uint8, []byte, error) {
 // put 写入一个对象并登记索引，返回其 id。
 func (s *Store) put(typ uint8, raw []byte) (hash.ID, error) {
 	id := hash.Sum(raw)
-
-	if ok, err := s.idx.Has(id); err != nil {
+	if ok, err := s.idx.HasType(id, typ); err != nil {
 		return hash.ID{}, err
 	} else if ok {
-		if oldType, terr := s.idx.Type(id); terr == nil && oldType != typ {
-			return hash.ID{}, fmt.Errorf("%w: id=%s existing=%d new=%d", ErrTypeConflict, id, oldType, typ)
-		}
-		return id, nil // 去重快路径
+		return id, nil
 	}
-
+	// 兼容 v2 legacy 对象：同一 id/type 已在 objects/<id> 时只补索引，
+	// 避免升级后重复写一份 typed 副本。
+	if oldType, ok := s.legacyType(id); ok && oldType == typ {
+		stored := encodeStored(typ, raw)
+		if err := s.idx.Add(id, typ, int64(len(stored)), int64(len(raw))); err != nil {
+			return hash.ID{}, err
+		}
+		return id, nil
+	}
 	stored := encodeStored(typ, raw)
-	key := keyFor(id)
-	err := s.bs.PutIfAbsent(key, bytes.NewReader(stored), int64(len(stored)))
-	if err != nil && !errors.Is(err, ErrExists) {
+	key := typedKeyFor(typ, id)
+	if err := s.bs.PutIfAbsent(key, bytes.NewReader(stored), int64(len(stored))); err != nil && !errors.Is(err, ErrExists) {
 		return hash.ID{}, err
 	}
 	// 索引在对象落盘之后登记；即使此处崩溃，索引也可由扫描重建。
@@ -199,6 +220,18 @@ func (s *Store) put(typ uint8, raw []byte) (hash.ID, error) {
 		return hash.ID{}, err
 	}
 	return id, nil
+}
+
+// legacyType 读取 v2 objects/<id> 的对象类型。
+func (s *Store) legacyType(id hash.ID) (uint8, bool) {
+	hdr, err := s.bs.GetRange(keyFor(id), 0, 2)
+	if err != nil || len(hdr) != 2 || hdr[0] != storedFormat {
+		return 0, false
+	}
+	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersionMerge {
+		return 0, false
+	}
+	return hdr[1], true
 }
 
 // PutBlob 写入一个文件分片的**原文**（未压缩）。
@@ -231,16 +264,83 @@ func (s *Store) PutVersion(v *version.Version) (hash.ID, error) {
 	return s.put(typ, enc)
 }
 
-// Has 报告对象是否已在本地。
-func (s *Store) Has(id hash.ID) (bool, error) { return s.idx.Has(id) }
+// Has 报告对象是否已在本地（任意类型）。
+func (s *Store) Has(id hash.ID) (bool, error) {
+	if ok, err := s.idx.Has(id); err != nil || ok {
+		return ok, err
+	}
+	if _, ok := s.legacyType(id); ok {
+		return true, nil
+	}
+	for typ := uint8(codec.TypeBlob); typ <= codec.TypeVersionMerge; typ++ {
+		if _, err := s.bs.Stat(typedKeyFor(typ, id)); err == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasType 报告指定类型的对象是否已在本地。
+func (s *Store) HasType(id hash.ID, typ uint8) (bool, error) {
+	if ok, err := s.idx.HasType(id, typ); err != nil || ok {
+		return ok, err
+	}
+	if old, ok := s.legacyType(id); ok && old == typ {
+		return true, nil
+	}
+	if _, err := s.bs.Stat(typedKeyFor(typ, id)); err == nil {
+		return true, nil
+	}
+	return false, nil
+}
 
 // Get 读取对象原文与类型。对象缺失或校验失败返回 ErrNotExist / ErrCorrupt。
+// 同一 id 有多个类型时返回 ErrAmbiguousType；调用方应使用 GetTyped。
 func (s *Store) Get(id hash.ID) (uint8, []byte, error) {
-	rc, _, err := s.bs.Get(keyFor(id))
+	types, err := s.idx.Types(id)
 	if err != nil {
-		if errors.Is(err, ErrNotExist) {
-			return 0, nil, ErrNotExist
+		return 0, nil, err
+	}
+	switch len(types) {
+	case 1:
+		return s.GetTyped(types[0], id)
+	case 0:
+		if old, ok := s.legacyType(id); ok {
+			return s.GetTyped(old, id)
 		}
+		for typ := uint8(codec.TypeBlob); typ <= codec.TypeVersionMerge; typ++ {
+			if _, err := s.bs.Stat(typedKeyFor(typ, id)); err == nil {
+				return s.GetTyped(typ, id)
+			}
+		}
+		return 0, nil, ErrNotExist
+	default:
+		return 0, nil, fmt.Errorf("%w: %s", ErrAmbiguousType, id)
+	}
+}
+
+// GetTyped 读取指定类型的对象原文。
+func (s *Store) GetTyped(typ uint8, id hash.ID) (uint8, []byte, error) {
+	keys := []string{typedKeyFor(typ, id), keyFor(id)}
+	for _, key := range keys {
+		gotType, raw, err := s.readAt(key, id)
+		if err != nil {
+			if errors.Is(err, ErrNotExist) {
+				continue
+			}
+			return 0, nil, err
+		}
+		if gotType != typ {
+			continue
+		}
+		return gotType, raw, nil
+	}
+	return 0, nil, ErrNotExist
+}
+
+func (s *Store) readAt(key string, id hash.ID) (uint8, []byte, error) {
+	rc, _, err := s.bs.Get(key)
+	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = rc.Close() }()
@@ -252,9 +352,6 @@ func (s *Store) Get(id hash.ID) (uint8, []byte, error) {
 	if err != nil {
 		return 0, nil, errors.Join(ErrCorrupt, err)
 	}
-	// 读时校验：内容寻址的对象必须与 key 一致（§8.3）。
-	// 策略来自 gc.verify_on_read；off 会跳过这一步，因此只应在明确可信的
-	// 场景下配置。
 	if s.shouldVerify(len(raw)) {
 		if got := hash.Sum(raw); got != id {
 			return 0, nil, errors.Join(ErrCorrupt,
@@ -267,58 +364,46 @@ func (s *Store) Get(id hash.ID) (uint8, []byte, error) {
 // ErrCorrupt 表示对象内容与其 key 不符或无法解码。
 var ErrCorrupt = errors.New("cas: 对象损坏")
 
-// ErrTypeConflict 表示同一个内容哈希已以另一种对象类型存在。
-//
-// 对象 id 只覆盖 raw，不覆盖 type；正常情况下各类型编码互不相交，但用户
-// 文件内容可以恰好等于某类对象的编码（例如空 Tree 的 {0x03,0x00}）。此时
-// 静默去重会让文件指向一个 Tree，之后所有读取都失败。这里显式拒绝，避免
-// 把歧义写成静默损坏（根治需要 typed object 布局）。
+// ErrTypeConflict 表示同一个内容哈希已以另一种对象类型存在，且调用方没有
+// 使用 typed key。
 var ErrTypeConflict = errors.New("cas: 同一内容已存在不同类型")
+
+// ErrAmbiguousType 表示一个 id 同时存在多个对象类型，通用 Get 无法决定。
+var ErrAmbiguousType = errors.New("cas: 同一内容存在多个类型")
 
 // GetBlob 读取一个分片的原文。
 func (s *Store) GetBlob(id hash.ID) ([]byte, error) {
-	typ, raw, err := s.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	if typ != codec.TypeBlob {
-		return nil, fmt.Errorf("cas: 对象 %s 是类型 %d，不是 Blob", id, typ)
-	}
-	return raw, nil
+	_, raw, err := s.GetTyped(codec.TypeBlob, id)
+	return raw, err
 }
 
 // GetFileContent 读取并解析 FileContent。
 func (s *Store) GetFileContent(id hash.ID) (*tree.FileContent, error) {
-	typ, raw, err := s.Get(id)
+	_, raw, err := s.GetTyped(codec.TypeFileContent, id)
 	if err != nil {
 		return nil, err
-	}
-	if typ != codec.TypeFileContent {
-		return nil, fmt.Errorf("cas: 对象 %s 是类型 %d，不是 FileContent", id, typ)
 	}
 	return tree.DecodeFileContent(raw)
 }
 
 // GetTree 读取并解析 Tree。
 func (s *Store) GetTree(id hash.ID) (*tree.Tree, error) {
-	typ, raw, err := s.Get(id)
+	_, raw, err := s.GetTyped(codec.TypeTree, id)
 	if err != nil {
 		return nil, err
-	}
-	if typ != codec.TypeTree {
-		return nil, fmt.Errorf("cas: 对象 %s 是类型 %d，不是 Tree", id, typ)
 	}
 	return tree.DecodeTree(raw)
 }
 
 // GetVersion 读取并解析 Version。
 func (s *Store) GetVersion(id hash.ID) (*version.Version, error) {
-	typ, raw, err := s.Get(id)
+	_, raw, err := s.GetTyped(codec.TypeVersion, id)
 	if err != nil {
-		return nil, err
-	}
-	if typ != codec.TypeVersion && typ != codec.TypeVersionMerge {
-		return nil, fmt.Errorf("cas: 对象 %s 是类型 %d，不是 Version", id, typ)
+		_, raw2, err2 := s.GetTyped(codec.TypeVersionMerge, id)
+		if err2 != nil {
+			return nil, err
+		}
+		raw = raw2
 	}
 	return version.Decode(raw)
 }
@@ -452,27 +537,30 @@ func (s *Store) RebuildIndex() (int, error) {
 	}
 	n := 0
 	for _, st := range stats {
-		id, err := hash.Parse(st.Key[len("objects/"):])
-		if err != nil {
-			continue // 非对象文件，跳过
+		id, ok := objectIDFromKey(st.Key)
+		if !ok {
+			continue
 		}
-		rc, _, err := s.bs.Get(st.Key)
-		if err != nil {
-			return n, err
+		hdr, herr := s.bs.GetRange(st.Key, 0, 2)
+		if herr != nil || len(hdr) != 2 || hdr[0] != storedFormat {
+			return n, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 头部不可读", st.Key))
 		}
-		b, err := io.ReadAll(io.LimitReader(rc, MaxObjectRawSize*2))
-		_ = rc.Close()
-		if err != nil {
-			return n, err
+		typ := hdr[1]
+		if typ < codec.TypeBlob || typ > codec.TypeVersionMerge {
+			return n, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 未知类型 0x%02x", st.Key, typ))
 		}
-		typ, raw, err := decodeStored(b)
-		if err != nil {
-			return n, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s: %w", st.Key, err))
+		b, rerr := s.bs.GetRange(st.Key, 0, st.Size)
+		if rerr != nil {
+			return n, rerr
+		}
+		_, raw, derr := decodeStored(b)
+		if derr != nil {
+			return n, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s: %w", st.Key, derr))
 		}
 		if hash.Sum(raw) != id {
 			return n, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 内容不符", st.Key))
 		}
-		if err := s.idx.Add(id, typ, int64(len(b)), int64(len(raw))); err != nil {
+		if err := s.idx.Add(id, typ, st.Size, int64(len(raw))); err != nil {
 			return n, err
 		}
 		n++
@@ -489,72 +577,105 @@ type ObjectInfo struct {
 }
 
 // Head 只读取对象的**类型与存储长度**，不解压、不校验内容哈希。
-//
-// 全量 Get 会把每个对象解压一遍并算哈希 —— 对 GC 这种「只要知道类型、
-// 好顺着树往下走」的场景是纯浪费（10 GB 仓库要读 10 GB）。
+// 同一 id 有多个类型时返回 ErrAmbiguousType；GC 应使用 ListObjects。
 func (s *Store) Head(id hash.ID) (uint8, int64, error) {
-	// 索引里已有类型与存储长度时直接 Stat。PackStore.Stat 只查索引/读 pack
-	// footer，不会把整个 packed 对象读进内存 —— 旧实现用 Get 会把 GC 的
-	// “只读头”退化成 10GB 仓库全读。
-	if typ, terr := s.idx.Type(id); terr == nil {
-		if st, serr := s.bs.Stat(keyFor(id)); serr == nil {
-			return typ, st.Size, nil
-		} else if !errors.Is(serr, ErrNotExist) {
-			return 0, 0, serr
-		}
-	}
-	rc, st, err := s.bs.Get(keyFor(id))
+	types, err := s.idx.Types(id)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer func() { _ = rc.Close() }()
-	var hdr [2]byte
-	if _, err := io.ReadFull(rc, hdr[:]); err != nil {
-		return 0, 0, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 头部不可读: %w", id, err))
+	if len(types) > 1 {
+		return 0, 0, fmt.Errorf("%w: %s", ErrAmbiguousType, id)
 	}
-	if hdr[0] != storedFormat {
-		return 0, 0, errors.Join(ErrCorrupt,
-			fmt.Errorf("cas: %s 未知存储格式标记 0x%02x", id, hdr[0]))
+	if len(types) == 1 {
+		return s.HeadTyped(types[0], id)
 	}
-	if hdr[1] < codec.TypeBlob || hdr[1] > codec.TypeVersionMerge {
-		return 0, 0, errors.Join(ErrCorrupt,
-			fmt.Errorf("cas: %s 未知对象类型 0x%02x", id, hdr[1]))
+	if old, ok := s.legacyType(id); ok {
+		return s.HeadTyped(old, id)
 	}
-	return hdr[1], st.Size, nil
+	for typ := uint8(codec.TypeBlob); typ <= codec.TypeVersionMerge; typ++ {
+		if _, err := s.bs.Stat(typedKeyFor(typ, id)); err == nil {
+			return s.HeadTyped(typ, id)
+		}
+	}
+	return 0, 0, ErrNotExist
+}
+
+// HeadTyped 只读取指定类型的对象头与存储长度。
+func (s *Store) HeadTyped(typ uint8, id hash.ID) (uint8, int64, error) {
+	for _, key := range []string{typedKeyFor(typ, id), keyFor(id)} {
+		if st, err := s.bs.Stat(key); err == nil {
+			hdr, herr := s.bs.GetRange(key, 0, 2)
+			if herr != nil || len(hdr) != 2 || hdr[0] != storedFormat {
+				return 0, 0, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 头部不可读", key))
+			}
+			if hdr[1] != typ {
+				continue
+			}
+			return typ, st.Size, nil
+		}
+	}
+	return 0, 0, ErrNotExist
 }
 
 // ListObjects 枚举全部对象（类型 + 存储长度），不解压内容。
-//
-// 与 RebuildIndex 的区别：RebuildIndex 会解压每个对象并校验哈希（用于 fsck），
-// 这里只读头部，因此可以随时在大仓库上跑。
 func (s *Store) ListObjects() ([]ObjectInfo, error) {
 	stats, err := s.bs.ListPrefix("objects/")
 	if err != nil {
 		return nil, err
 	}
+	seen := map[ObjectKey]bool{}
 	out := make([]ObjectInfo, 0, len(stats))
 	for _, st := range stats {
-		id, err := hash.Parse(st.Key[len("objects/"):])
-		if err != nil {
-			continue // 非对象文件
+		id, ok := objectIDFromKey(st.Key)
+		if !ok {
+			continue
 		}
-		typ, size, err := s.Head(id)
-		if err != nil {
-			return nil, err
+		hdr, herr := s.bs.GetRange(st.Key, 0, 2)
+		if herr != nil || len(hdr) != 2 || hdr[0] != storedFormat {
+			continue
 		}
-		out = append(out, ObjectInfo{ID: id, Type: typ, StoredSize: size})
+		typ := hdr[1]
+		if typ < codec.TypeBlob || typ > codec.TypeVersionMerge {
+			continue
+		}
+		k := ObjectKey{ID: id, Type: typ}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, ObjectInfo{ID: id, Type: typ, StoredSize: st.Size})
 	}
 	return out, nil
 }
 
-// DeleteObject 删除一个对象并同步从索引中摘除。
-//
-// 对象不存在不报错：GC 是幂等的，重复运行或与并发写入竞争都不应失败。
+// DeleteObjectTyped 删除指定类型并同步从索引中摘除。
+func (s *Store) DeleteObjectTyped(typ uint8, id hash.ID) error {
+	if err := s.idx.RemoveType(id, typ); err != nil {
+		return err
+	}
+	for _, key := range []string{typedKeyFor(typ, id), keyFor(id)} {
+		if key == keyFor(id) {
+			if old, ok := s.legacyType(id); !ok || old != typ {
+				continue
+			}
+		}
+		if err := s.bs.Delete(key); err != nil && !errors.Is(err, ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteObject 删除一个对象的全部类型并同步从索引中摘除。
 func (s *Store) DeleteObject(id hash.ID) error {
-	// 先删索引、再删文件。反过来如果进程在两步之间崩溃，索引会声称对象
-	// 仍存在，后续 put 的去重快路径会永远跳过重写，形成永久性数据丢失。
+	types, _ := s.idx.Types(id)
 	if err := s.idx.Remove(id); err != nil {
 		return err
+	}
+	for _, typ := range types {
+		if err := s.bs.Delete(typedKeyFor(typ, id)); err != nil && !errors.Is(err, ErrNotExist) {
+			return err
+		}
 	}
 	if err := s.bs.Delete(keyFor(id)); err != nil && !errors.Is(err, ErrNotExist) {
 		return err
@@ -563,28 +684,46 @@ func (s *Store) DeleteObject(id hash.ID) error {
 }
 
 // GetStored 返回对象的**存储字节**（0x01||type||zstd(raw)），不解压。
-//
-// 同步打包需要把对象原样放进增量包；无论对象在松散文件还是 P2 pack 里，
-// 都通过 BlobStore 的统一读取路径取得。
 func (s *Store) GetStored(id hash.ID) ([]byte, error) {
-	rc, _, err := s.bs.Get(keyFor(id))
-	if err != nil {
-		return nil, err
+	types, _ := s.idx.Types(id)
+	if len(types) == 1 {
+		return s.GetStoredTyped(types[0], id)
 	}
-	defer func() { _ = rc.Close() }()
-	b, err := io.ReadAll(io.LimitReader(rc, MaxObjectRawSize*2))
-	if err != nil {
-		return nil, err
+	if old, ok := s.legacyType(id); ok {
+		return s.GetStoredTyped(old, id)
 	}
-	if len(b) < 2 || b[0] != storedFormat {
-		return nil, errors.Join(ErrCorrupt, fmt.Errorf("cas: %s 存储字节非法", id))
+	for typ := uint8(codec.TypeBlob); typ <= codec.TypeVersionMerge; typ++ {
+		if b, err := s.GetStoredTyped(typ, id); err == nil {
+			return b, nil
+		}
 	}
-	return b, nil
+	return nil, ErrNotExist
+}
+
+// GetStoredTyped 返回指定类型对象的存储字节。
+func (s *Store) GetStoredTyped(typ uint8, id hash.ID) ([]byte, error) {
+	for _, key := range []string{typedKeyFor(typ, id), keyFor(id)} {
+		rc, _, err := s.bs.Get(key)
+		if err != nil {
+			if errors.Is(err, ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		b, rerr := io.ReadAll(io.LimitReader(rc, MaxObjectRawSize*2))
+		_ = rc.Close()
+		if rerr != nil {
+			return nil, rerr
+		}
+		if len(b) < 2 || b[0] != storedFormat || b[1] != typ {
+			continue
+		}
+		return b, nil
+	}
+	return nil, ErrNotExist
 }
 
 // PutStored 写入一份**已编码**的对象字节（同步拉取用）。
-//
-// 必须先解压校验 id = BLAKE3(raw)，因此远端包里的对象不能绕过完整性检查。
 func (s *Store) PutStored(id hash.ID, stored []byte) error {
 	typ, raw, err := decodeStored(stored)
 	if err != nil {
@@ -593,15 +732,15 @@ func (s *Store) PutStored(id hash.ID, stored []byte) error {
 	if got := hash.Sum(raw); got != id {
 		return errors.Join(ErrCorrupt, fmt.Errorf("cas: 对象 %s 内容哈希为 %s", id, got))
 	}
-	if ok, err := s.idx.Has(id); err != nil {
+	if ok, err := s.idx.HasType(id, typ); err != nil {
 		return err
 	} else if ok {
-		if oldType, terr := s.idx.Type(id); terr == nil && oldType != typ {
-			return fmt.Errorf("%w: id=%s existing=%d new=%d", ErrTypeConflict, id, oldType, typ)
-		}
 		return nil
 	}
-	if err := s.bs.PutIfAbsent(keyFor(id), bytes.NewReader(stored), int64(len(stored))); err != nil && !errors.Is(err, ErrExists) {
+	if old, ok := s.legacyType(id); ok && old == typ {
+		return s.idx.Add(id, typ, int64(len(stored)), int64(len(raw)))
+	}
+	if err := s.bs.PutIfAbsent(typedKeyFor(typ, id), bytes.NewReader(stored), int64(len(stored))); err != nil && !errors.Is(err, ErrExists) {
 		return err
 	}
 	return s.idx.Add(id, typ, int64(len(stored)), int64(len(raw)))

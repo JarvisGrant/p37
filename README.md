@@ -11,7 +11,7 @@ go build -o p37d ./cmd/p37d
 go test ./...
 ```
 
-> 状态：**v0.6.1 / format_ver=2**。多仓库、命名线、会话工作区、子工作区
+> 状态：**v0.7.0 / format_ver=3**。多仓库、命名线、会话工作区、子工作区
 > `ws_land_into`、`line_merge`、历史读取、多 line 同步与恢复、应用卷热插拔
 > 生命周期均已接入。M1–M5 主体已在 P36 实例（Ubuntu 26.04 + ext4 +
 > OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；当前状态和
@@ -118,7 +118,7 @@ copy 模式每个工作区是一份完整树，需要按**应用卷实际容量*
 `max_active` / `warn_disk_bytes`，不要假设固定的可写盘容量。
 
 ```bash
-make release VERSION=0.6.1       # 发布 tar + sha256
+make release VERSION=0.7.0       # 发布 tar + sha256
 make p36-bootstrap               # L1 胶水：p37-run/p37-mcp/p37-mount/...
 ```
 
@@ -161,9 +161,10 @@ p37d --check --strict --root /srv/repos
 
 ### 从 v1 仓库升级
 
-`format_ver` 从 1 升到 2 时，`repo.Open` 会**自动迁移**，并在升级前把
-`p37.db` 备份到 `<repo>/.p37/backup/p37-v1-<ts>.db`；一般不需要手工执行
-`p37 migrate`。迁移细节和回滚方式见 [`docs/format-v2.md`](docs/format-v2.md)。
+`format_ver` 从 1/2 升到 3 时，`repo.Open` 会**自动迁移**，并在升级前把
+`p37.db` 备份到 `<repo>/.p37/backup/p37-v<旧版本>-<ts>.db`；一般不需要手工执行
+`p37 migrate`。v3 把对象改成 `(type,id)` 复合地址，目录布局见
+[`docs/format-v3.md`](docs/format-v3.md)。
 
 从 v0.1.12 升级时，已有 `.p37/config.toml` 若仍是
 `materialize = "overlay"`，需要手工改成 `auto`（或 `copy`）；
@@ -290,7 +291,7 @@ p37 --root /srv/repos --repo <name> sync push
 | [`docs/cli.md`](docs/cli.md) | `p37` / `p37d` 命令行参考 |
 | [`docs/config.md`](docs/config.md) | 配置字段与默认值 |
 | [`docs/operations.md`](docs/operations.md) | 升级、备份、GC、监控与排障 |
-| [`docs/format-v2.md`](docs/format-v2.md) | 仓库格式 v2 与迁移 |
+| [`docs/format-v3.md`](docs/format-v3.md) | 仓库格式 v3（typed object）与迁移 |
 | [`docs/sync-contract.md`](docs/sync-contract.md) | 远端同步与恢复契约 |
 | [`docs/concurrency.md`](docs/concurrency.md) | 实际并发模型与锁顺序 |
 | [`docs/p34-integration.md`](docs/p34-integration.md) | P34 接入示例 |

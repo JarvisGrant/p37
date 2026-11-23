@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/chenyiwen/p37/internal/cas"
 	"github.com/chenyiwen/p37/internal/hash"
 	"github.com/chenyiwen/p37/internal/meta"
 	"github.com/chenyiwen/p37/internal/repo"
@@ -92,12 +93,17 @@ func prepareMultiCheckpoint(r *repo.Repo, opt Options, force bool) (*Manifest, e
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]hash.ID, 0, len(set))
-	for id := range set {
-		ids = append(ids, id)
+	keys := make([]cas.ObjectKey, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
-	built, err := buildResultFor(r, ids, opt)
+	sort.Slice(keys, func(i, j int) bool {
+		if c := keys[i].ID.String(); c != keys[j].ID.String() {
+			return c < keys[j].ID.String()
+		}
+		return keys[i].Type < keys[j].Type
+	})
+	built, err := buildResultFor(r, keys, opt)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +127,7 @@ func prepareMultiCheckpoint(r *repo.Repo, opt Options, force bool) (*Manifest, e
 		Format: FormatVersion, Kind: "checkpoint",
 		BaseVersion: base.String(), ResultVersion: head.String(),
 		Epoch: uint64(st.Epoch), CreatedTS: meta.NowMS(),
-		ObjectCount: len(ids), RawBytes: built.raw, PayloadBytes: payloadBytes,
+		ObjectCount: len(keys), RawBytes: built.raw, PayloadBytes: payloadBytes,
 		PayloadHash: PayloadHash(built.parts), MetaBytes: int64(len(metaBytes)),
 		MetaHash: hash.Sum(metaBytes).String(), Versions: versionStrings(all),
 		Parts: built.parts,

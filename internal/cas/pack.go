@@ -100,7 +100,13 @@ func objectIDFromKey(key string) (hash.ID, bool) {
 	if !strings.HasPrefix(key, p) {
 		return hash.ID{}, false
 	}
-	id, err := hash.Parse(key[len(p):])
+	rest := strings.TrimPrefix(key, p)
+	parts := strings.Split(rest, "/")
+	if len(parts) == 2 && len(parts[0]) == 2 {
+		// v3 typed key: objects/<type>/<id>
+		rest = parts[1]
+	}
+	id, err := hash.Parse(rest)
 	if err != nil {
 		return hash.ID{}, false
 	}
@@ -217,7 +223,7 @@ type PackStore struct {
 
 	mu     sync.RWMutex
 	loaded bool
-	locs   map[hash.ID]packLoc
+	locs   map[ObjectKey]packLoc
 	packs  []hash.ID
 	// loose 记录已知仍在松散文件里的对象（用于打包时挑选）。
 	// 不加载全量，仅按需列举。
@@ -225,7 +231,7 @@ type PackStore struct {
 
 // NewPackStore 包装一个底层 BlobStore。
 func NewPackStore(base BlobStore) *PackStore {
-	return &PackStore{base: base, locs: map[hash.ID]packLoc{}}
+	return &PackStore{base: base, locs: map[ObjectKey]packLoc{}}
 }
 
 // Base 返回底层后端。
@@ -244,7 +250,7 @@ func (ps *PackStore) ensureLoaded() error {
 	if err != nil {
 		return err
 	}
-	locs := make(map[hash.ID]packLoc)
+	locs := make(map[ObjectKey]packLoc)
 	packs := make([]hash.ID, 0, len(stats))
 	for _, st := range stats {
 		pid, err := hash.Parse(strings.TrimPrefix(st.Key, "packs/"))
@@ -260,11 +266,12 @@ func (ps *PackStore) ensureLoaded() error {
 		}
 		packs = append(packs, pid)
 		for _, en := range entries {
-			if _, dup := locs[en.id]; dup {
+			k := ObjectKey{ID: en.id, Type: en.typ}
+			if _, dup := locs[k]; dup {
 				// 同一对象出现在多个 pack（打包未完成就崩了）：保留其一即可。
 				continue
 			}
-			locs[en.id] = packLoc{pack: pid, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
+			locs[k] = packLoc{pack: pid, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
 		}
 	}
 	sort.Slice(packs, func(i, j int) bool { return bytes.Compare(packs[i][:], packs[j][:]) < 0 })
@@ -411,10 +418,11 @@ func (ps *PackStore) refreshPacks() error {
 			continue
 		}
 		for _, en := range entries {
-			if _, dup := ps.locs[en.id]; dup {
+			k := ObjectKey{ID: en.id, Type: en.typ}
+			if _, dup := ps.locs[k]; dup {
 				continue
 			}
-			ps.locs[en.id] = packLoc{pack: f.id, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
+			ps.locs[k] = packLoc{pack: f.id, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
 		}
 		if !ps.hasPackLocked(f.id) {
 			ps.packs = append(ps.packs, f.id)
@@ -424,33 +432,78 @@ func (ps *PackStore) refreshPacks() error {
 	return nil
 }
 
-// lookup 返回对象所在 pack 的位置。
-func (ps *PackStore) lookup(id hash.ID) (packLoc, bool, error) {
+// lookupTyped 返回指定类型对象所在 pack 的位置。
+func (ps *PackStore) lookupTyped(id hash.ID, typ uint8) (packLoc, bool, error) {
 	if err := ps.ensureLoaded(); err != nil {
 		return packLoc{}, false, err
 	}
 	ps.mu.RLock()
-	loc, ok := ps.locs[id]
+	loc, ok := ps.locs[ObjectKey{ID: id, Type: typ}]
 	ps.mu.RUnlock()
 	return loc, ok, nil
 }
 
-// lookupFresh 先查缓存；未命中时增量刷新 pack 列表再查一次。
-func (ps *PackStore) lookupFresh(id hash.ID) (packLoc, bool, error) {
-	loc, ok, err := ps.lookup(id)
-	if err != nil || ok {
-		return loc, ok, err
+// lookupAny 返回任意类型对象所在 pack 的位置（legacy key 用）。
+func (ps *PackStore) lookupAny(id hash.ID) (packLoc, bool, error) {
+	if err := ps.ensureLoaded(); err != nil {
+		return packLoc{}, false, err
+	}
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	for k, loc := range ps.locs {
+		if k.ID == id {
+			return loc, true, nil
+		}
+	}
+	return packLoc{}, false, nil
+}
+
+func (ps *PackStore) lookupFreshKey(key string) (packLoc, bool, error) {
+	id, ok := objectIDFromKey(key)
+	if !ok {
+		return packLoc{}, false, nil
+	}
+	typ, typed := typeFromKey(key)
+	loc, found, err := func() (packLoc, bool, error) {
+		if typed {
+			return ps.lookupTyped(id, typ)
+		}
+		return ps.lookupAny(id)
+	}()
+	if err != nil || found {
+		return loc, found, err
 	}
 	if err := ps.refreshPacks(); err != nil {
 		return packLoc{}, false, err
 	}
-	return ps.lookup(id)
+	if typed {
+		return ps.lookupTyped(id, typ)
+	}
+	return ps.lookupAny(id)
+}
+
+// typeFromKey 从 v3 typed key 解析对象类型。
+func typeFromKey(key string) (uint8, bool) {
+	const p = "objects/"
+	if !strings.HasPrefix(key, p) {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(key, p)
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || len(parts[0]) != 2 {
+		return 0, false
+	}
+	var typ uint8
+	if _, err := fmt.Sscanf(parts[0], "%02x", &typ); err != nil {
+		return 0, false
+	}
+	return typ, true
 }
 
 // Get 实现 BlobStore。
 func (ps *PackStore) Get(key string) (io.ReadCloser, Stat, error) {
 	if id, ok := objectIDFromKey(key); ok {
-		if loc, found, err := ps.lookupFresh(id); err != nil {
+		if loc, found, err := ps.lookupFreshKey(key); err != nil {
 			return nil, Stat{}, err
 		} else if found {
 			b, err := ps.readObject(loc)
@@ -466,8 +519,8 @@ func (ps *PackStore) Get(key string) (io.ReadCloser, Stat, error) {
 
 // GetRange 实现 BlobStore。
 func (ps *PackStore) GetRange(key string, off, length int64) ([]byte, error) {
-	if id, ok := objectIDFromKey(key); ok {
-		if loc, found, err := ps.lookupFresh(id); err != nil {
+	if _, ok := objectIDFromKey(key); ok {
+		if loc, found, err := ps.lookupFreshKey(key); err != nil {
 			return nil, err
 		} else if found {
 			if off < 0 || length < 0 || off > loc.length {
@@ -490,7 +543,7 @@ func (ps *PackStore) readObject(loc packLoc) ([]byte, error) {
 // Stat 实现 BlobStore。
 func (ps *PackStore) Stat(key string) (Stat, error) {
 	if id, ok := objectIDFromKey(key); ok {
-		if loc, found, err := ps.lookupFresh(id); err != nil {
+		if loc, found, err := ps.lookupFreshKey(key); err != nil {
 			return Stat{}, err
 		} else if found {
 			return Stat{Key: key, Size: loc.length, ETag: id.String()}, nil
@@ -530,20 +583,42 @@ func (ps *PackStore) ListPrefix(prefix string) ([]Stat, error) {
 	if err := ps.refreshPacks(); err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{}, len(out))
+	seen := make(map[ObjectKey]bool, len(out))
+	filtered := out[:0]
 	for _, st := range out {
-		seen[st.Key] = struct{}{}
+		id, ok := objectIDFromKey(st.Key)
+		if !ok {
+			filtered = append(filtered, st)
+			continue
+		}
+		typ, typed := typeFromKey(st.Key)
+		if !typed {
+			t, terr := ps.baseHeadType(st.Key)
+			if terr != nil {
+				filtered = append(filtered, st)
+				continue
+			}
+			typ = t
+		}
+		k := ObjectKey{ID: id, Type: typ}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		filtered = append(filtered, st)
 	}
+	out = filtered
 	ps.mu.RLock()
-	for id, loc := range ps.locs {
-		key := keyFor(id)
+	for k, loc := range ps.locs {
+		key := typedKeyFor(k.Type, k.ID)
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if _, dup := seen[key]; dup {
+		if seen[k] {
 			continue
 		}
-		out = append(out, Stat{Key: key, Size: loc.length, ETag: id.String()})
+		seen[k] = true
+		out = append(out, Stat{Key: key, Size: loc.length, ETag: k.ID.String()})
 	}
 	ps.mu.RUnlock()
 	return out, nil
@@ -578,10 +653,10 @@ func (ps *PackStore) DeletePack(pid hash.ID) error {
 	}
 	ps.mu.Lock()
 	deleteSet := map[hash.ID]struct{}{}
-	for id, loc := range ps.locs {
+	for k, loc := range ps.locs {
 		if loc.pack == pid {
-			delete(ps.locs, id)
-			deleteSet[id] = struct{}{}
+			delete(ps.locs, k)
+			deleteSet[k.ID] = struct{}{}
 		}
 	}
 	kept := ps.packs[:0]
@@ -630,12 +705,22 @@ func (ps *PackStore) PackLoose(opt PackOptions) (PackResult, error) {
 		stored []byte
 	}
 	var cands []cand
+	seenID := map[hash.ID]bool{}
 	for _, st := range stats {
 		id, ok := objectIDFromKey(st.Key)
 		if !ok {
 			continue
 		}
-		if _, packed, err := ps.lookup(id); err != nil {
+		if seenID[id] {
+			// 同一 id 的两个类型不能进同一个 pack（pack 索引按 id 唯一）。
+			// 第二个类型保持松散，GC 不会误删。
+			continue
+		}
+		typ, err := ps.baseHeadType(st.Key)
+		if err != nil {
+			return res, err
+		}
+		if _, packed, err := ps.lookupTyped(id, typ); err != nil {
 			return res, err
 		} else if packed {
 			// 已在有效 pack 里：松散副本是上次“pack 成功但删松散前崩溃”
@@ -650,17 +735,17 @@ func (ps *PackStore) PackLoose(opt PackOptions) (PackResult, error) {
 			res.SkippedLarge++
 			continue
 		}
-		typ, err := ps.baseHeadType(st.Key)
-		if err != nil {
-			return res, err
-		}
+		seenID[id] = true
 		cands = append(cands, cand{id: id, key: st.Key, typ: typ, size: st.Size})
 	}
 	if len(cands) < opt.MinObjects {
 		return res, nil
 	}
 	sort.Slice(cands, func(i, j int) bool {
-		return bytes.Compare(cands[i].id[:], cands[j].id[:]) < 0
+		if c := bytes.Compare(cands[i].id[:], cands[j].id[:]); c != 0 {
+			return c < 0
+		}
+		return cands[i].typ < cands[j].typ
 	})
 
 	// 2. 分批构造 pack。
@@ -707,10 +792,11 @@ func (ps *PackStore) PackLoose(opt PackOptions) (PackResult, error) {
 		}
 		ps.mu.Lock()
 		for _, en := range entries {
-			if _, dup := ps.locs[en.id]; dup {
+			k := ObjectKey{ID: en.id, Type: en.typ}
+			if _, dup := ps.locs[k]; dup {
 				continue
 			}
-			ps.locs[en.id] = packLoc{pack: pid, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
+			ps.locs[k] = packLoc{pack: pid, off: en.off, length: en.length, storedSize: en.length, typ: en.typ}
 		}
 		if !ps.hasPackLocked(pid) {
 			ps.packs = append(ps.packs, pid)
@@ -749,9 +835,9 @@ func (ps *PackStore) hasPackLocked(pid hash.ID) bool {
 }
 
 // baseHeadType 读取松散对象头部的类型字节。
-// IsPacked 报告对象当前是否只存在于 pack 中。
-func (ps *PackStore) IsPacked(id hash.ID) (bool, error) {
-	_, ok, err := ps.lookup(id)
+// IsPackedTyped 报告指定类型对象当前是否在 pack 中。
+func (ps *PackStore) IsPackedTyped(id hash.ID, typ uint8) (bool, error) {
+	_, ok, err := ps.lookupTyped(id, typ)
 	return ok, err
 }
 

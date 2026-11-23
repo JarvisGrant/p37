@@ -1,7 +1,7 @@
 # 架构与概念
 
 p37 是「以整合事件为版本原子」的版本控制系统。本文给出阅读其他文档所需的最小
-概念集；格式细节见 [`format-v2.md`](format-v2.md)，MCP 接口见
+概念集；格式细节见 [`format-v3.md`](format-v3.md)，MCP 接口见
 [`mcp-contract.md`](mcp-contract.md)，实际锁模型见 [`concurrency.md`](concurrency.md)。
 
 ## 1. 仓库布局

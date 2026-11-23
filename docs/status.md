@@ -1,4 +1,4 @@
-# 当前状态（v0.6.1）
+# 当前状态（v0.7.0）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,15 +7,20 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.6.1` |
-| 仓库格式 | `format_ver = 2` |
+| 发布版本 | `v0.7.0` |
+| 仓库格式 | `format_ver = 3` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
 | 测试 | `go test ./...` 全绿；`make cross` 通过 |
 
-`format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
-线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
-[`format-v2.md`](format-v2.md)。
+`format_ver=3` 在 v2 基础上把对象地址改为 `(type,id)` 复合 key，版本 id 不变；
+v1/v2 仓库首次被新二进制打开时会自动迁移并备份，见 [`format-v3.md`](format-v3.md)。
+
+**v0.7.0 重点（`format_ver=3`）**：对象存储改为 typed key + `(id,type)` 复合
+索引，彻底消除“同一 raw 既是 Tree 又是 Blob”的地址歧义；旧 `objects/<id>`
+仍可读，首次打开自动迁移并重建 `object_index`。同步包闭包、GC 标记、Scrub、
+packed 回收都改为按 `(id,type)` 处理。P36/P34 最低版本提升到 0.7.0，旧 L1
+必须重建且不得回退。
 
 **v0.6.1 重点（不改 `format_ver`）**：补齐 v0.6.0 之后的接口/恢复细节：
 `sync_push`/`sync_restore` 幂等键绑定请求体，`async=true` 不再接受幂等键；
@@ -30,7 +35,6 @@ S3/Dir ref CAS 使用调用方 ETag/generation、目录远端残留锁 TTL、多
 Relower 失败回滚旧 lower、统一 child→parent 锁序、`version_compare` 直接比较
 version ref、`repo delete` 走 daemon、root daemon 单实例锁、`--check` 只读
 line 检查、zstd 编解码池、mountinfo 缓存、diff 锚点选择修正。
-CAS typed object / `format_ver=3` 仍留到后续格式版本，不在本版混入。
 
 **v0.5.2 重点（不改 `format_ver`）**：以数据安全与 P36 L1 形态对齐为主。
 修复 daemon 重启后 `RemountAll` 把 `materialized_ts` 推到当前时刻导致离线改动
