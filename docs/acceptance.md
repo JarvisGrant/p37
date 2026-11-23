@@ -17,7 +17,7 @@ go test -race ./internal/hub ./internal/repo ./internal/mcpsrv
 CI 使用 `P37_FORCE_HASH=1` 关闭 stat 快路径（GitHub runner 的 mtime 精度不足），
 并跑 `gofmt`、`vet`、`go test ./... -count=1`、`make cross`。
 
-## P36 真机验收（多仓库）
+## VM 平台真机验收（多仓库）
 
 ```bash
 P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
@@ -49,7 +49,7 @@ P37_ROOT=/srv/repos P37_REPO=/srv/repo P37_REPO_NAME=accept \
 | 11 | land 崩溃恢复（version/line head/integrating） | `internal/meta` reconcile + repo 测试 |
 | 12 | MCP stdio 真实客户端 / EOF | `internal/mcpstdio`（含 `TestProxyRespondsBeforeEOF`） |
 | 13 | copy/overlay、磁盘统计 | 既有 mount/workspace 测试、`ws_disk_usage` |
-| 14 | P36 新 VM / 多仓库会话 / legacy default | `packaging/p36/acceptance` + `ci/acceptance.sh`（`P37_ROOT`） |
+| 14 | VM 平台新 VM / 多仓库会话 / legacy default | `packaging/p36/acceptance` + `ci/acceptance.sh`（`P37_ROOT`） |
 | 15 | 幂等/错误码/受保护 line/非祖先 reset | `idem_v2_test.go`、`line_v2_test.go`、MCP 测试 |
 | 16 | 配额回收：landed 不占额度、Drop 清理失败仍删行、fanout 忽略 hidden/landed | `internal/repo/quota_recovery_test.go` |
 | 17 | 子工作区冲突可发现/可重试/父 land 不死锁 + `ws_quota`/quota detail | `quota_recovery_test.go`、`internal/mcpsrv/quota_test.go` |
@@ -130,7 +130,7 @@ go test ./internal/hub -run 'TestRegisterPath|TestRebind|TestScan' -count=1 -v
 真机/沙盒必须额外覆盖：
 
 1. 干净 ext4 持久目录 + `p37 init --if-missing`：`version_count=1`、
-   `line_list` 有 main、`mainline_head` 非零、`.p37` 在 `/srv/repos/p34-<id>` 内、
+   `line_list` 有 main、`mainline_head` 非零、`.p37` 在 `/srv/repos/app-<id>` 内、
    `lost+found` 不影响 empty 判定。
 2. 在 Init 的建库后/写 v0 后/写 refs 后/SetMainlineHead 前/rename 前/父 fsync 前
    注入失败：重跑 `p37 init --if-missing` 必须 repair 成功，不出现第二个 v0。
@@ -142,7 +142,7 @@ go test ./internal/hub -run 'TestRegisterPath|TestRebind|TestScan' -count=1 -v
 6. `repo_import` 失败注入：旧 v0/head 仍可用，不出现 head 指向已删除版本。
 7. `repo_health {path, with_quota:false}` 对半成品返回 200 +
    `initialized=false` + `next_action`，不写库、不 migrate。
-8. P36 attach 初始化失败：卷保持挂载，409 + `mounted=true` +
+8. VM 平台 attach 初始化失败：卷保持挂载，409 + `mounted=true` +
    `initialized=false`，可重试 repair；不 umount、不删 `.p37`。
 9. VM stop/start 同 volumeId 重挂：`repo_info`/`line_list` 仍在，
    `version_count` 不变。
@@ -157,7 +157,7 @@ go test ./internal/workspace -run 'TestVerifyBeforeWrite|TestApplyDelta' -count=
 go test ./internal/mcpsrv -run 'TestLandIntoAPI' -count=1 -v
 ```
 
-真机场景建议按 `docs/p34-integration.md` §5 的调用序列跑一遍，并额外断言：
+真机场景建议按 `docs/agent-platform-integration.md` §5 的调用序列跑一遍，并额外断言：
 
 - 父写 `A=v1` → 派子只改 `B` → 父改 `A=v2` → land 后 `A` 仍是 `v2`；
 - 父子同文件不同位置 → `both_changed_paths` + 明确结果；
@@ -168,7 +168,7 @@ go test ./internal/mcpsrv -run 'TestLandIntoAPI' -count=1 -v
 - preview 后父再改 → 带旧 `expected_parent_tree` 的 land 返回
   `target_moved`，父目录不变。
 
-## v0.3.x 真机补充（建议在 P36 上手工走一遍）
+## v0.3.x 真机补充（建议在 VM 平台上手工走一遍）
 
 自动化测试覆盖了逻辑，但下面这些依赖真实挂载/卷，建议每次发布至少验一次：
 
@@ -206,8 +206,8 @@ p37 --root /srv/repos --repo app-a ws-list
 - 写时打包与 repack 压实未实现；只有离线 `p37 gc --prune --pack`。
 - 多 line push 目前为全量 checkpoint；单 line 可增量。
 - `line_reset` 的旧版本 7 天 grace 由 GC 的 reset 日志保留；尚无独立后台清理任务。
-- `sync_restore` 不恢复 workspace/lease；P34 重新 `ws_open`。
-- 同一 `remote_prefix` 只支持单写者；P34 需串行化同一 app 的 push。
+- `sync_restore` 不恢复 workspace/lease；Agent 平台重新 `ws_open`。
+- 同一 `remote_prefix` 只支持单写者；Agent 平台需串行化同一 app 的 push。
 - `p37d --check --root` 只做 registry/DB/line 链检查；完整健康检查用
   `--check --repo <root>`。
 - `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前由上层确认

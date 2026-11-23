@@ -109,7 +109,7 @@ func persistenceView(rr *repo.Repo) map[string]any {
 	}
 }
 
-// alreadyLandedData 把 landed / landed-and-dropped 统一成 P34 可幂等消费的形状。
+// alreadyLandedData 把 landed / landed-and-dropped 统一成 Agent 平台可幂等消费的形状。
 func alreadyLandedData(rr *repo.Repo, life *repo.WSLifecycle) map[string]any {
 	res := life.LandedView()
 	out := landView2(rr, res)
@@ -227,7 +227,7 @@ func wsOpenView(rr *repo.Repo, w *meta.Workspace, created, reused, replayed bool
 		"base_line": w.BaseLine, "base_version": w.BaseVersion.String(),
 		// base_tree 是子工作区创建时冻结的**不可变基准树**。对 workspace 父
 		// 的子工作区，base_version 是父的 line 基线，不能当合并基准用；
-		// P34 应记录 base_tree（以及 parent_id）作为血缘坐标。
+		// Agent 平台应记录 base_tree（以及 parent_id）作为血缘坐标。
 		"base_tree": w.BaseTree.String(), "ops_epoch": w.OpsEpoch,
 		"materialize": w.Materialize, "state": w.State,
 		"created": created, "reused": reused, "idempotent_replay": replayed,

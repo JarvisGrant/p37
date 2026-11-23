@@ -23,14 +23,14 @@ cd /path/to/p37 && go build -o /usr/local/bin/p37 ./cmd/p37 \
                       && go build -o /usr/local/bin/p37d ./cmd/p37d
 ```
 
-P36 部署还需要 `/srv/repos` 存在、属主 `p36:p36`（建议 `0750`），以及可选的
+VM 平台部署还需要 `/srv/repos` 存在、属主 `p36:p36`（建议 `0750`），以及可选的
 systemd unit（`AmbientCapabilities=CAP_SYS_ADMIN`）。
 
 ## 1. 门禁 spike（必须先过）
 
 在动 `mountmgr` / 工作区之前先验四件事。任一失败就要调整方案。
 
-> P36 默认 `workspace.materialize = "auto"`。Ubuntu 26.04 非 root 下 overlay
+> VM 平台默认 `workspace.materialize = "auto"`。Ubuntu 26.04 非 root 下 overlay
 > mount 可能返回 `EPERM`；此时自动回退 copy。`p37 doctor` 的
 > `[FAIL] OverlayFS` 在 copy 模式下是**预期**，不要误判为部署失败；正式部署
 > 门禁用 `p37d --check`（见 §6.2）。真实工作区模式看 `ws_open`/`ws_list` 的
@@ -126,10 +126,10 @@ p37 status /srv/repo      # 期望：head 要么是旧值要么是新值，无�
 | OverlayFS 上的 **inode 稳定性** | 决定 `stat_cache` 是否能用快路径 |
 | OverlayFS 上的 **fsnotify 可靠性** | 决定采集三重触发的权重分配 |
 | **换 lower 重挂**的实际行为 | 决定 `ws_rebase` 的增量重挂是否需要改 |
-| `CAP_SYS_ADMIN` 下的挂载语义 | 决定 P36 是否只能走 copy |
+| `CAP_SYS_ADMIN` 下的挂载语义 | 决定 VM 平台是否只能走 copy |
 | 真实代码库上的 **place 命中率** | 决定冲突率是否可接受 |
 
-## 6. P36 部署验收
+## 6. VM 平台部署验收
 
 前置：
 
@@ -188,12 +188,12 @@ systemctl stop p37d
 /usr/local/lib/p37/p37 --root /srv/repos --repo <name> gc --prune --pack     # 期望 0
 ```
 
-v0.1.13 起默认验收**不再自动 root fallback**：P36 在 `materialize=auto` 下
+v0.1.13 起默认验收**不再自动 root fallback**：VM 平台在 `materialize=auto` 下
 走 copy，日志输出 `MATERIALIZE=copy`。只有显式 `P37_ALLOW_ROOT_FALLBACK=1`
-才退化 root（用于对照/调试）；它不能替代真实 P36 的 `User=p36` 验收。
+才退化 root（用于对照/调试）；它不能替代真实 VM 平台的 `User=p36` 验收。
 
 root + overlay 是可选变体：`config-overlay.toml` +
-`p37d-root-overlay.service`；仅当 P36 明确允许 root 时使用。
+`p37d-root-overlay.service`；仅当 VM 平台明确允许 root 时使用。
 
 ## 7. v0.3.x 补充验收
 

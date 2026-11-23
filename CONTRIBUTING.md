@@ -58,7 +58,7 @@ internal/tree   tree/diff/ignore/lines
 - 新增/修改错误码时同步更新 `docs/mcp-contract.md` 的错误码表；错误码统一小写
   snake_case。
 - 新增配置项时同步更新 `docs/config.md`，并确认 `config.Default()` 与新字段
-  一致；P36 模板差异单独注明。
+  一致；VM 平台模板差异单独注明。
 - 文档里的版本号必须与最新 git tag、`Makefile` 的 `VERSION`、
   `internal/buildinfo.Version` 一致。
 
@@ -82,7 +82,7 @@ make p36-bootstrap
 
 - `make release` 会拒绝脏工作区，并校验 `manifest.json` 的 version/commit。
 - 发布 tar 根目录严格只有 `p37`、`p37d`、`manifest.json`。
-- P36 验收与 Release 由 `.github/workflows/release.yml` 完成；也可对已发布
+- VM 平台验收与 Release 由 `.github/workflows/release.yml` 完成；也可对已发布
   Release 手动触发 `p36-acceptance.yml`。
 - 发布前更新：`Makefile` 默认 `VERSION`、`internal/buildinfo.Version`、
   `README.md` 的版本/示例、`docs/status.md`、`packaging/p36/RELEASE_NOTES.md`。
@@ -91,5 +91,5 @@ make p36-bootstrap
 
 - 测试会用临时目录；必要时设置 `TMPDIR` 到支持纳秒 mtime 的文件系统。
 - `P37_FORCE_HASH=1` 强制走内容哈希，避免依赖 stat 快路径。
-- P36 真机验收见 [`VERIFY.md`](VERIFY.md)；
+- VM 平台真机验收见 [`VERIFY.md`](VERIFY.md)；
   自动化矩阵见 [`docs/acceptance.md`](docs/acceptance.md)。

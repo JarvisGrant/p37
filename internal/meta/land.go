@@ -125,7 +125,7 @@ func (d *DB) FinishLand(foldWsIDs []string) error {
 // insertLandTombstoneTx 在 FinishLand 的同一事务里写回收记录。
 //
 // landed_ws 行是落地的真相；line head 已经推进，所以 reason 恒为
-// landed_and_dropped。line/line_head 取首次落地版本，便于 P34 幂等重放。
+// landed_and_dropped。line/line_head 取首次落地版本，便于 Agent 平台幂等重放。
 func (d *DB) insertLandTombstoneTx(tx *sql.Tx, wsID string) error {
 	var (
 		name, parentKind, parentID, state string

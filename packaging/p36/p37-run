@@ -1,5 +1,5 @@
 #!/bin/sh
-# p37-run —— P36 实例内的稳定引导脚本（单 daemon 多 repo）。
+# p37-run —— VM 平台实例内的稳定引导脚本（单 daemon 多 repo）。
 #
 # 契约：
 #   1. 按 ext4 label 等宿主投递的只读小盘；

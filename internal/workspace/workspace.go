@@ -101,7 +101,7 @@ const (
 
 // LimitError 是带用量信息的配额错误。
 //
-// 调用方（P34 等）需要事前做准入限流，所以 quota_exceeded 必须在 detail 里
+// 调用方（Agent 平台等）需要事前做准入限流，所以 quota_exceeded 必须在 detail 里
 // 带上 used/limit；仅靠错误文本无法稳定解析。
 type LimitError struct {
 	Scope string
@@ -178,7 +178,7 @@ type Options struct {
 	MaxMatches int
 	// MaxHidden 是隐藏 merge/preview 工作区上限（不占用户 max_active）。
 	MaxHidden int
-	// OnSync 在每次成功采集后回调（用于 P36 的 workspace_changed 事件）。
+	// OnSync 在每次成功采集后回调（用于 VM 平台的 workspace_changed 事件）。
 	OnSync func(wsID string)
 }
 
@@ -950,7 +950,7 @@ type Status struct {
 	EffectiveTree hash.ID `json:"effective_tree,omitempty"`
 	OpsEpoch      int64   `json:"ops_epoch"`
 	// ParentTree 仅对 ParentKind=workspace 的子工作区有意义：父工作区的
-	// 当前有效树。它是 P34 传给 ws_land_into(expected_parent_tree) 的令牌。
+	// 当前有效树。它是 Agent 平台传给 ws_land_into(expected_parent_tree) 的令牌。
 	ParentTree    hash.ID `json:"parent_tree,omitempty"`
 	ParentTreeErr string  `json:"parent_tree_error,omitempty"`
 	Dir           string  `json:"dir"`
@@ -1129,7 +1129,7 @@ func (m *Manager) Drop(wsID string, cascade, keepDir bool) (dropped, reparented 
 //
 // **配额优先**：只要元数据删除成功，max_active 名额立即回收；目录/挂载清理
 // 失败只返回 ErrCleanupFailed 警告，不再让工作区行残留。历史实现把 Close
-// 放在 DeleteWorkspace 之前并直接 return，overlay umount 遇到 EBUSY（P34 的
+// 放在 DeleteWorkspace 之前并直接 return，overlay umount 遇到 EBUSY（Agent 平台的
 // exec 还留着进程/工作目录）时行会永久残留，配额随时间单调衰减。
 func (m *Manager) DropWithOptions(wsID string, opt DropOptions) (dropped, reparented []string, err error) {
 	cascade, keepDir := opt.Cascade, opt.KeepDir

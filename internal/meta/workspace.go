@@ -516,7 +516,7 @@ func (d *DB) ReplaceOps(wsID string, ops []op.Op) error {
 			return err
 		}
 		if cur == next {
-			// 周期扫描 / ws_sync 在「内容没变」时不推进版本，否则 P34 拿到的
+			// 周期扫描 / ws_sync 在「内容没变」时不推进版本，否则 Agent 平台拿到的
 			// ops_epoch 会被无意义地刷新，preview → land 之间凭空出现 target_moved。
 			return nil
 		}

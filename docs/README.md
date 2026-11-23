@@ -1,5 +1,8 @@
 # p37 文档索引
 
+> 术语：**Agent 平台**指调用 p37 MCP 的上游 AI agent 平台；
+> **VM 平台**指提供 microVM、L1 镜像和应用卷热插拔的基础设施。
+
 先看哪里取决于你的角色：
 
 ## 我是第一次接触 p37
@@ -11,21 +14,21 @@
 
 ## 我要接入 p37
 
-- [`p34-integration.md`](p34-integration.md) —— P34 会话、子任务、导出、回滚、
-  新 VM 恢复的完整示例。
+- [`agent-platform-integration.md`](agent-platform-integration.md) —— Agent 平台会话、子任务、导出、
+  回滚、新 VM 恢复的完整示例。
 - [`mcp-contract.md`](mcp-contract.md) —— 参数、返回字段、错误码。
 - [`sync-contract.md`](sync-contract.md) —— 远端包格式、push/fetch/pull/restore。
 
 ## 我要部署 / 运维
 
-- [`../packaging/p36/README.md`](../packaging/p36/README.md) —— P36 L1 集成、
+- [`../packaging/p36/README.md`](../packaging/p36/README.md) —— VM 平台 L1 集成、
   systemd、应用卷热插拔与升级。
 - [`operations.md`](operations.md) —— 升级、迁移、备份、GC 维护窗口、监控、
   常见故障。
 - [`cli.md`](cli.md) —— `p37` / `p37d` 命令与退出码。
 - [`config.md`](config.md) —— 全部配置字段和默认值。
 - [`../VERIFY.md`](../VERIFY.md) —— 真机验证清单。
-- [`acceptance.md`](acceptance.md) —— 自动化与 P36 验收矩阵。
+- [`acceptance.md`](acceptance.md) —— 自动化与 VM 平台验收矩阵。
 
 ## 我要改代码
 
@@ -49,7 +52,7 @@
 - 工具名、参数、返回字段、错误码以 `internal/mcpsrv` 的注册为准；
   `mcp-contract.md` 必须覆盖全部已注册工具。
 - 配置默认值以 `internal/config/config.go` 的 `Default()` 为准；
-  P36 模板的差异在 `packaging/p36/config.toml` 中单独标注。
+  VM 平台模板的差异在 `packaging/p36/config.toml` 中单独标注。
 - 版本号以 git tag 为准；`README.md`、`Makefile`、`internal/buildinfo` 必须与
   最新 tag 一致。
 - 历史记录写在 `PROGRESS.md`；当前状态写在 `status.md`。不要把“本轮”“目前”

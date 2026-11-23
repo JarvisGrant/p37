@@ -366,7 +366,7 @@ func (h *Hub) Get(ref string) (*Entry, error) {
 
 // GetByPath 按 registry 中的挂载路径查已注册 repo（不含 tombstone）。
 //
-// 用于 repo_health(path=...)：P36 /ready 只拿到 mountPath 时也能判断
+// 用于 repo_health(path=...)：VM 平台 /ready 只拿到 mountPath 时也能判断
 // repo 是否仍在 registry 中可见，而不是只凭磁盘数据误判 ready。
 func (h *Hub) GetByPath(path string) (*Entry, error) {
 	h.mu.Lock()

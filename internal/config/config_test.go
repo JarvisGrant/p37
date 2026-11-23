@@ -94,7 +94,7 @@ func TestRepoOptionsWiresEveryKnob(t *testing.T) {
 // TestDefaultConfigIsSane 钉住默认值（附录 B）。
 func TestDefaultConfigIsSane(t *testing.T) {
 	c := Default()
-	// P36 应用卷容量因租户/应用而异：默认值按「8 个活跃工作区」收敛，硬上限仍是 64。
+	// VM 平台应用卷容量因租户/应用而异：默认值按「8 个活跃工作区」收敛，硬上限仍是 64。
 	if c.Workspace.MaxActive != 8 {
 		t.Errorf("默认 max_active = %d，期望 8", c.Workspace.MaxActive)
 	}

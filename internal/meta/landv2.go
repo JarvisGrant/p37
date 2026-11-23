@@ -193,7 +193,7 @@ func (d *DB) ListLineResetLog(line string, limit int) ([]LineResetLog, error) {
 
 // MigrateIfNeeded 把 v1 仓库升级到当前格式。升级前做一次一致性备份。
 //
-// 说明：虽然 cli 有显式 p37 migrate，这里也允许 open 时自动升级，避免 P36
+// 说明：虽然 cli 有显式 p37 migrate，这里也允许 open 时自动升级，避免 VM 平台
 // 旧实例因为升级顺序而无法启动；升级是幂等的。
 func (d *DB) MigrateIfNeeded() (bool, error) {
 	v, err := d.UserVersion()

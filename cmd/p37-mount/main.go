@@ -1,4 +1,4 @@
-// Command p37-mount 是 P36 引导用的最小挂载助手。
+// Command p37-mount 是 VM 平台引导用的最小挂载助手。
 //
 // 它刻意不放进 P37PAYLOAD：payload 还没挂载时，payload 里的二进制执行不到。
 // 它是 L0 的稳定平台胶水，只做一件事：按 ext4 label 等待设备，并以只读方式

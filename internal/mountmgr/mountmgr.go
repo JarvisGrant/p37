@@ -105,7 +105,7 @@ func New(repoRoot string, opt Options) (*Manager, error) {
 	}
 	// 把磁盘上已有的基底目录登记进来：daemon 重启后 bases 这张表是空的，
 	// 旧基底既不会被 BaseCacheSize 统计，也不会被 PruneBases/Evict 回收，
-	// 会随每次会话永久堆积（P36 用户数据包里表现为「删不掉的 20MB」）。
+	// 会随每次会话永久堆积（VM 平台用户数据包里表现为「删不掉的 20MB」）。
 	basesDir := filepath.Join(repoRoot, ".p37", "overlay", "bases")
 	if des, err := os.ReadDir(basesDir); err == nil {
 		for _, de := range des {

@@ -88,7 +88,7 @@ release: release-check test
 	@echo "release notes: $(RELEASE_NOTES)"
 	@cat $(RELEASE_DIR).tar.gz.sha256
 
-## p36-bootstrap 生成平台胶水（P36 使用 L1，不属于发布 tar）：
+## p36-bootstrap 生成平台胶水（VM 平台使用 L1，不属于发布 tar）：
 ##   dist/p37-mount-linux-amd64
 ##   dist/p36-bootstrap/{p37-run,p37-mcp,p37-mount,config.toml,p37d.service,90-p37.conf,tmpfiles-p37.conf}
 ##   可选 root+overlay：config-overlay.toml、p37d-root-overlay.service

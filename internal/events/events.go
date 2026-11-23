@@ -1,4 +1,4 @@
-// Package events 实现 P37 → 本机消费方（P36 guest agent）的语义事件上报。
+// Package events 实现 P37 → 本机消费方（VM 平台 guest agent）的语义事件上报。
 //
 // 设计约束：
 //   - 只做 best-effort：socket 不存在、对端慢或断开都不能影响 repo 操作；
@@ -64,7 +64,7 @@ func init() {
 // EmitAsync 把事件放进有界队列，由单 goroutine 串行写 socket。
 //
 // 用于采集/land 等热路径：调用方不再为 150ms dial/write 阻塞；队列满时
-// 丢弃本次事件（事件是 best-effort，P36 侧有周期兜底）。
+// 丢弃本次事件（事件是 best-effort，VM 平台侧有周期兜底）。
 func EmitAsync(socket string, ev Event) {
 	if socket == "" {
 		return

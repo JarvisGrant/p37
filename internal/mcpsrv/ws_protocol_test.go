@@ -430,7 +430,7 @@ func TestWSReapNamePrefix(t *testing.T) {
 	if _, err := h.r.Import(h.srcDir); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"p34s-a", "p34s-b"} {
+	for _, name := range []string{"agent-a", "agent-b"} {
 		w := h.mustOK("ws_ensure", map[string]any{"name": name})
 		dir := w["dir"].(string)
 		if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(name+"\n"), 0o644); err != nil {
@@ -439,9 +439,9 @@ func TestWSReapNamePrefix(t *testing.T) {
 		h.mustOK("ws_sync", map[string]any{"ws_id": w["ws_id"].(string)})
 		h.mustOK("ws_land", map[string]any{"ws_id": w["ws_id"].(string), "drop_workspace": false})
 	}
-	res := h.mustOK("ws_reap", map[string]any{"dry_run": true, "name_prefix": "p34s-a"})
+	res := h.mustOK("ws_reap", map[string]any{"dry_run": true, "name_prefix": "agent-a"})
 	cands, _ := res["candidates"].([]any)
-	if len(cands) != 1 || cands[0].(map[string]any)["name"] != "p34s-a" {
+	if len(cands) != 1 || cands[0].(map[string]any)["name"] != "agent-a" {
 		t.Fatalf("name_prefix candidates=%v", res)
 	}
 }

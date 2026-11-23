@@ -55,7 +55,7 @@ func TestInitIfMissingDoesNotOverwriteConfig(t *testing.T) {
 
 func TestInitConfigTemplate(t *testing.T) {
 	root := t.TempDir()
-	tpl := filepath.Join(t.TempDir(), "p36.toml")
+	tpl := filepath.Join(t.TempDir(), "p37.toml")
 	if err := os.WriteFile(tpl, []byte(`
 [workspace]
 materialize = "copy"
@@ -238,7 +238,7 @@ func TestInitAcceptsPrecreatedEmptyControlDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code, _, errs := runCLI("init", root); code != 0 {
-		t.Fatalf("旧 P36 预建空 .p37 应可初始化: %s", errs)
+		t.Fatalf("旧 VM 平台预建空 .p37 应可初始化: %s", errs)
 	}
 }
 

@@ -89,10 +89,10 @@ func TestRepoInitMCPEmptyAndIdempotent(t *testing.T) {
 
 func TestRepoInitRepairBadDB(t *testing.T) {
 	hh, _ := newMultiHarness(t)
-	path := filepath.Join(hh.root, "p34-59")
+	path := filepath.Join(hh.root, "app-59")
 	want := halfRepo(t, path)
 	res := hh.mustOK("repo_init", map[string]any{
-		"repo": "p34-59", "path": path, "mode": "repair",
+		"repo": "app-59", "path": path, "mode": "repair",
 	})
 	repo, _ := res["repo"].(map[string]any)
 	if repo["mainline_head"] != want || repo["version_count"] != float64(1) {
@@ -120,7 +120,7 @@ func TestRepoInitRepairBadDB(t *testing.T) {
 
 func TestRepoHealthUninitializedByPath(t *testing.T) {
 	hh, _ := newMultiHarness(t)
-	path := filepath.Join(hh.root, "p34-59")
+	path := filepath.Join(hh.root, "app-59")
 	want := halfRepo(t, path)
 	h := hh.mustOK("repo_health", map[string]any{
 		"path": path, "with_quota": false,
@@ -229,29 +229,29 @@ func TestRepoScanRepair(t *testing.T) {
 
 func TestRepoRegisterHalfRepoStructured(t *testing.T) {
 	hh, _ := newMultiHarness(t)
-	path := filepath.Join(hh.root, "p34-59")
+	path := filepath.Join(hh.root, "app-59")
 	want := halfRepo(t, path)
 	e := hh.mustFail("repo_register", "repo_not_initialized", map[string]any{
-		"repo": "p34-59", "path": path,
+		"repo": "app-59", "path": path,
 	})
 	detail, _ := e["detail"].(map[string]any)
 	if detail["next_action"] != "repo_init_repair" {
 		t.Fatalf("detail=%v", detail)
 	}
 	// 不能因为注册失败就留下 registry 行。
-	if env, err := hh.callSafe("repo_info", map[string]any{"repo": "p34-59"}); err == nil {
+	if env, err := hh.callSafe("repo_info", map[string]any{"repo": "app-59"}); err == nil {
 		if ok, _ := env["ok"].(bool); ok {
 			t.Fatal("半成品不应被注册")
 		}
 	}
 	// init_if_missing 兼容路径必须完整修复。
 	e2 := hh.mustOK("repo_register", map[string]any{
-		"repo": "p34-59", "path": path, "init_if_missing": true,
+		"repo": "app-59", "path": path, "init_if_missing": true,
 	})
 	if e2["available"] != true {
 		t.Fatalf("register=%v", e2)
 	}
-	info := hh.mustOK("repo_info", map[string]any{"repo": "p34-59"})
+	info := hh.mustOK("repo_info", map[string]any{"repo": "app-59"})
 	if info["version_count"] != float64(1) || info["mainline_head"] != want {
 		t.Fatalf("info=%v want=%s", info, want)
 	}

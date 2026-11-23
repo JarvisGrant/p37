@@ -339,7 +339,7 @@ func (h *Hub) upsertEntryLocked(id, name, path, defaultLine string) error {
 
 // Health 返回 path/ref 对应的只读完整性快照。
 //
-// path 优先于 ref：P36 /ready 在 attach 失败后可能还没有 registry 行，
+// path 优先于 ref：VM 平台 /ready 在 attach 失败后可能还没有 registry 行，
 // 必须能只凭 mountPath 探测。
 func (h *Hub) Health(ref, path string, deep bool) (*repo.Integrity, error) {
 	var e *Entry

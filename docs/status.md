@@ -43,13 +43,13 @@ daemon 重启后不会自动重挂已 quiesce 的卷。
 **v0.7.0 重点（`format_ver=3`）**：对象存储改为 typed key + `(id,type)` 复合
 索引，彻底消除“同一 raw 既是 Tree 又是 Blob”的地址歧义；旧 `objects/<id>`
 仍可读，首次打开自动迁移并重建 `object_index`。同步包闭包、GC 标记、Scrub、
-packed 回收都改为按 `(id,type)` 处理。P36/P34 最低版本提升到 0.7.0，旧 L1
+packed 回收都改为按 `(id,type)` 处理。VM 平台/Agent 平台最低版本提升到 0.7.0，旧 L1
 必须重建且不得回退。
 
 **v0.6.1 重点（不改 `format_ver`）**：补齐 v0.6.0 之后的接口/恢复细节：
 `sync_push`/`sync_restore` 幂等键绑定请求体，`async=true` 不再接受幂等键；
 冲突列表改为单事务替换；CLI `ws_land`/`ws_preview` 也走 leaf→root 工作区锁和
-strict 采集。P36/P34 最低版本仍为 0.6.0。
+strict 采集。VM 平台/Agent 平台最低版本仍为 0.6.0。
 
 **v0.6.0 重点（不改 `format_ver`）**：在 v0.5.2 数据安全修复之上，完成
 GC/同步/并发/性能的一轮收敛：`VersionChain` 改为完整 DAG（merge 第二父不再
@@ -60,20 +60,20 @@ Relower 失败回滚旧 lower、统一 child→parent 锁序、`version_compare`
 version ref、`repo delete` 走 daemon、root daemon 单实例锁、`--check` 只读
 line 检查、zstd 编解码池、mountinfo 缓存、diff 锚点选择修正。
 
-**v0.5.2 重点（不改 `format_ver`）**：以数据安全与 P36 L1 形态对齐为主。
+**v0.5.2 重点（不改 `format_ver`）**：以数据安全与 VM 平台 L1 形态对齐为主。
 修复 daemon 重启后 `RemountAll` 把 `materialized_ts` 推到当前时刻导致离线改动
 被惰性快路径吞掉、broken 工作区被重挂成空 overlay、`reconcileMainlineRef`
 回退已提交 land、`AdvanceHead` 不校验 fast-forward、`ws_land` 非 strict 采集、
 `fold=stack` 孤立兄弟子工作区、`unflatten` 文件/目录同名漏检、CAS 同内容不同
 类型静默别名、`repo_import`/`version_revert` 幂等、`land_into` rename-follow、
-MCP 未知参数校验、stdio 空闲会话失效等。P36 文档/模板改为“p37 内嵌 L1、
+MCP 未知参数校验、stdio 空闲会话失效等。VM 平台文档/模板改为“p37 内嵌 L1、
 应用卷 staging/OSS”，不再把 L2 当 p37 用户数据层。
 
 **v0.5.1 重点（不改 `format_ver`）**：修复 `version_tree` / `version_archive`
 在 `path` 指向目录时的 off-by-one：此前会列出父目录的同级项（并按 path
 前缀拼接），归档目录时也会把同级文件带进去。现在目录路径返回该目录自身的
 子树，文件路径仍返回单条；空目录返回 `[]` 而不是 `null`。同时提升
-P36/P34 最低 p37 版本到 0.5.1，旧 L1 需要重建。
+VM 平台/Agent 平台最低 p37 版本到 0.5.1，旧 L1 需要重建。
 
 **v0.5.0 重点（不改 `format_ver`）**：以正确性/恢复能力为主。修复 land
 提交点（refs 权威）与 integrating 孤儿；GC 先清 `stat_cache`/`ws_effective_tree`
@@ -81,10 +81,10 @@ P36/P34 最低 p37 版本到 0.5.1，旧 L1 需要重建。
 长度自洽校验、Flush 串行化、DeleteObject 顺序；新增 `path_collision` 冲突、
 `missing_base + take_upper` 整文件重建、delete 跟随 rename、`StartHint` 偏移
 修正；`repo_quiesce` 期间业务工具返回 `repo_quiesced`；`repo_import` 限制在
-root 内；`sync_prune` 的 local/remote 语义修正。P36/P34 最低版本提升到 0.5.0。
+root 内；`sync_prune` 的 local/remote 语义修正。VM 平台/Agent 平台最低版本提升到 0.5.0。
 
 **v0.4.12 重点（不改 `format_ver`）**：新增只读 `repo_usage`，用
-`object_index` 聚合 objects/db/refs/config/durable/workspaces，P36 不再需要从
+`object_index` 聚合 objects/db/refs/config/durable/workspaces，VM 平台不再需要从
 卷外 NBD/mount/find 测量；新增 `[events] unix_socket` 语义事件，在 workspace
 变化、land/merge、revert、sync_pull、import、gc 完成后通知本机消费方，事件只
 带“哪个 repo 变了”，不带数据。保留版本数从 200 降到 50，`P37_KEEP_VERSIONS`
@@ -169,13 +169,13 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 | 在线 GC | 未实现 | 维护窗口停 daemon 后执行 `p37 gc --prune --pack`；daemon 持锁时 `p37 gc` 会拒绝 |
 | 写时打包 / repack 压实 | 未实现 | 只有离线 `p37 gc --pack`；pack 内对象全部不可达才整包删除 |
 | 多 line push | 使用全量 checkpoint | 单 line 可增量；大仓库建议按会话保留 VM |
-| `sync_restore` | 不恢复 workspace / lease / tombstone / 幂等记录 | 恢复后由 P34 重新 `ws_ensure`；旧 ws_id 跨 VM 不保证可重放 |
-| `remote_prefix` 单写者 | 同一前缀只允许一个写者 | P34 需串行化同一 app 的 push |
+| `sync_restore` | 不恢复 workspace / lease / tombstone / 幂等记录 | 恢复后由 Agent 平台重新 `ws_ensure`；旧 ws_id 跨 VM 不保证可重放 |
+| `remote_prefix` 单写者 | 同一前缀只允许一个写者 | Agent 平台需串行化同一 app 的 push |
 | `line_reset` 旧版本 grace | 由 GC 的 reset 日志保留 7 天 | 尚无独立后台清理任务 |
 | `p37d --check --root` | 只做 registry / DB / line 链检查 | 完整 ext4/写探测/OverlayFS/inotify/磁盘检查用 `--check --repo <root>` |
-| P36 L1 升级 | 需要重建/重新选择 L1 | 已有实例不会自动切换；旧 L1 不应回退读新格式仓库 |
+| VM 平台 L1 升级 | 需要重建/重新选择 L1 | 已有实例不会自动切换；旧 L1 不应回退读新格式仓库 |
 | `p37d --stdio` | 启动时快照工具清单 | daemon 升级后客户端应重连 |
-| `repo_unregister` | 不等待已经进入执行中的 MCP 调用 | detach 前由 P36 在上层确认应用空闲 |
+| `repo_unregister` | 不等待已经进入执行中的 MCP 调用 | detach 前由 VM 平台在上层确认应用空闲 |
 | `repo_import.idempotency_key` | 保留但未接 root `init_idempotency` 表 | 需要跨重启幂等时用 `repo_init(mode=import)` |
 | root 幂等索引丢失 | 同 path 仍靠 `.p37/init.json`；跨 path 冲突降级 | 接受 warning；重启后同 path key 仍有效 |
 | 非 root OverlayFS | Ubuntu 26.04 可能 `EPERM` | 默认 `materialize=auto` 回退 copy；按应用卷容量收紧 `max_active` / `warn_disk_bytes` |
@@ -187,7 +187,7 @@ p37 init → p37 import → ws_open → 直接改文件 → ws_sync → land_pre
 1. 在线 GC 与 daemon/CLI 共享写锁。
 2. 写时打包与 repack 压实。
 3. 多 line 增量同步。
-4. P36 应用卷 detach 的 in-flight 调用排空机制。
+4. VM 平台应用卷 detach 的 in-flight 调用排空机制。
 
 文档与工具面的自动校验已加入 `internal/mcpsrv/docs_test.go` 和
 `internal/buildinfo/buildinfo_test.go`。

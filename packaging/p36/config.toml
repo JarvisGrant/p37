@@ -1,4 +1,4 @@
-# P36 L1 的 p37 配置模板（应用卷容量由 P36 分配）。
+# VM 平台 L1 的 p37 配置模板（应用卷容量由 VM 平台分配）。
 #
 # 首次启动时由 p37-run 复制到 /srv/repos/.p37/config.toml，作为多 repo 默认。
 #
@@ -8,7 +8,7 @@
 [repo]
 format_ver = 3
 # 限制 repo_export 只能写到这里，避免 MCP 调用方把文件导出到任意路径。
-# P34 部署约定：/srv/repos/.p37/tmp/p34-deploy/<jobId>。
+# Agent 平台部署约定：/srv/repos/.p37/tmp/p34-deploy/<jobId>。
 # 如果不使用导出能力或需要其它目录，删除/修改本行即可。
 export_root = "/srv/repos/.p37/tmp/p34-deploy"
 
@@ -18,7 +18,7 @@ export_root = "/srv/repos/.p37/tmp/p34-deploy"
 materialize = "auto"
 # 4 GiB 基底缓存；只有 overlay 模式使用，copy 模式不使用。
 base_cache_bytes = 4294967296
-# copy 模式每个工作区都是完整树；P34「主管 + N 子会话」至少需要 1+N 个。
+# copy 模式每个工作区都是完整树；Agent 平台「主管 + N 子会话」至少需要 1+N 个。
 # 4 正好等于「主管 + 3 子会话」，没有任何缓冲（主管每轮 drop 再重开时尤其
 # 容易撞配额），因此默认 8；请按应用卷实际容量与 repo_disk_usage 复核，
 # 必要时收紧。硬上限仍是 64。
@@ -33,7 +33,7 @@ scan_interval = "30s"
 debounce = "500ms"
 
 [daemon]
-# socket 默认 <root>/.p37/p37d.sock；P36 的 root 是 /srv/repos。
+# socket 默认 <root>/.p37/p37d.sock；VM 平台的 root 是 /srv/repos。
 # 要改路径时再显式写 socket = "..."
 # HTTP 默认关闭：MCP 客户端与 daemon 同实例，优先 unix socket。
 listen_http = false
@@ -49,6 +49,6 @@ scrub_sample = 0.01
 verify_on_read = "sample"
 
 [events]
-# P36 guest agent 监听；P37 在 land/revert/sync/workspace 变化时写一行 JSON。
+# VM 平台 guest agent 监听；P37 在 land/revert/sync/workspace 变化时写一行 JSON。
 # 为空表示关闭事件上报（P37 业务不受影响）。
 unix_socket = "/srv/repos/.p36/p37-events.sock"

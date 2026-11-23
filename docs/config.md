@@ -66,7 +66,7 @@ scrub_sample = 0.01
 verify_on_read = "sample"            # off | sample | always
 
 [events]
-# P36 guest agent 监听的本地 unix socket；为空表示关闭事件上报。
+# VM 平台 guest agent 监听的本地 unix socket；为空表示关闭事件上报。
 # P37 在 workspace 变化 / land / revert / sync_pull / gc 后写一行 JSON。
 unix_socket = "/srv/repos/.p36/p37-events.sock"
 
@@ -111,7 +111,7 @@ max_package_bytes = 536870912
 | `workspace.max_fanout` | `16` | 单父工作区直接子工作区上限 |
 | `workspace.max_hidden` | `32` | 隐藏 merge/preview 上限；代码里 0 表示取 32 |
 | `workspace.inotify_fallback` | `false` | inotify 额度不足时是否降级为只监听根目录 |
-| `workspace.warn_disk_bytes` | 12 GiB | 剩余空间告警阈值；P36 模板改为 8 GiB |
+| `workspace.warn_disk_bytes` | 12 GiB | 剩余空间告警阈值；VM 平台模板改为 8 GiB |
 | `workspace.tombstone_ttl` | `168h` | 工作区回收记录保留窗口；`include_recently_dropped` 默认 1h |
 | `merge.context_lines` | `3` | hunk 上下文行数 |
 | `merge.move_similarity` | `0.6` | 块移动相似度阈值 |
@@ -154,9 +154,9 @@ max_package_bytes = 536870912
 
 | 变量 | 用途 |
 |---|---|
-| `P37_ROOT` | P36 多仓库根目录（默认 `/srv/repos`） |
+| `P37_ROOT` | VM 平台多仓库根目录（默认 `/srv/repos`） |
 | `P37_REPO` | legacy 单仓库路径（默认 `/srv/repo`） |
-| `P37_PAYLOAD_LABEL` | legacy payload 盘 label（默认 `P37PAYLOAD`；当前 P36 不再投递） |
+| `P37_PAYLOAD_LABEL` | legacy payload 盘 label（默认 `P37PAYLOAD`；当前 VM 平台不再投递） |
 | `P37_PAYLOAD_MOUNT` | p37 二进制目录（当前 L1 默认 `/usr/local/lib/p37`；legacy 为 `/run/p37-payload`） |
 | `P37_CONFIG` | L1 配置模板路径 |
 | `P37_S3_ACCESS_KEY` / `P37_S3_SECRET_KEY` | S3 凭证；只从环境变量读 |
@@ -164,12 +164,12 @@ max_package_bytes = 536870912
 | `P37_FORCE_HASH` | 测试/CI 用：关闭 stat 快路径 |
 | `P37_ALLOW_NONPERSISTENT` | 开发/CI 用：允许在非挂载点目录初始化；生产不要设置 |
 | `P37_DAEMON_SOCKET` | CLI 显式指定要路由到的 p37d socket（默认向上查找 `.p37/p37d.sock`） |
-| `P37_ALLOW_ROOT_FALLBACK` | P36 验收可选：允许 root + overlay 对照 |
+| `P37_ALLOW_ROOT_FALLBACK` | VM 平台验收可选：允许 root + overlay 对照 |
 
 ## 注意
 
-- `warn_disk_bytes` 的代码默认是 12 GiB；P36 模板按应用卷容量改成 8 GiB。
-  文档里看到 8 GiB 时，指的是 P36 模板。
+- `warn_disk_bytes` 的代码默认是 12 GiB；VM 平台模板按应用卷容量改成 8 GiB。
+  文档里看到 8 GiB 时，指的是 VM 平台模板。
 - `max_active` / `max_depth` / `max_fanout` 只能调小，不能超过硬上限。
 - 多仓库 daemon 的 unix socket 默认 `<root>/.p37/p37d.sock`，并遵循
   `daemon.socket`；daemon、CLI 路由和 `p37d --stdio` 使用同一配置。

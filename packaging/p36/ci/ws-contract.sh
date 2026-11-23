@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 工作区协议验收（v0.4.1）。
 #
-# 用法（P36 VM 或任意 Linux/macOS 开发机）：
+# 用法（VM 平台实例或任意 Linux/macOS 开发机）：
 #   P37_BIN=/usr/local/bin/p37 bash packaging/p36/ci/ws-contract.sh
 #
 # 覆盖：
@@ -10,7 +10,7 @@
 #   - ws_drop 后 include_dropped 可查 tombstone
 #   - 进程退出/重开后 line/version 仍在（同一卷的本地真相源）
 #
-# 真正的 P36 stop → rebuild 需要在 P36 侧停止/重建实例后，再对同一
+# 真正的 VM 平台 stop → rebuild 需要在 VM 平台侧停止/重建实例后，再对同一
 # /srv/repos/<app> 跑本脚本的持久性段；脚本不会自行 systemctl stop/start。
 set -euo pipefail
 
@@ -29,7 +29,7 @@ say() { echo "==> $*"; }
 
 say "5 个独立进程并发 ws-ensure 同名工作区"
 for i in 1 2 3 4 5; do
-  "$P37_BIN" ws-ensure "$ROOT" --name p34s-sess-42 --task t --json \
+  "$P37_BIN" ws-ensure "$ROOT" --name agent-sess-42 --task t --json \
     > "$WORK/out.$i" 2> "$WORK/err.$i" &
 done
 wait
@@ -47,7 +47,7 @@ echo "WS_LIST_COUNT=$WS_COUNT"
 
 say "再次并发 ensure，ws_id 不变"
 for i in 1 2 3 4 5; do
-  "$P37_BIN" ws-ensure "$ROOT" --name p34s-sess-42 --json > "$WORK/again.$i" &
+  "$P37_BIN" ws-ensure "$ROOT" --name agent-sess-42 --json > "$WORK/again.$i" &
 done
 wait
 jq -r '.ws_id' "$WORK"/again.* | sort -u | grep -qx "$WS" \
@@ -65,4 +65,4 @@ say "进程退出/重开后的本地真相源"
   | jq -e --arg ws "$WS" '.[] | select(.ws_id==$ws and .reason=="abandoned")' >/dev/null
 echo "PERSIST_OK"
 
-say "PASS（若在 P36 上，请再重启实例后重跑本脚本的持久性段）"
+say "PASS（若在 VM 平台上，请再重启实例后重跑本脚本的持久性段）"

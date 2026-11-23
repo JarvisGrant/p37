@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P36 / Ubuntu 验收脚本。
+# VM 平台 / Ubuntu 验收脚本。
 #
 # 设计为在 GitHub Actions 的 Ubuntu runner（有 systemd、sudo）上运行；
 # 也可以在有 sudo 的 Ubuntu VM 上手工跑。脚本自己调用 sudo，不要求整段以
@@ -171,7 +171,7 @@ ROOT_FALLBACK=0
 
 # GitHub-hosted runner 可能禁止非 root 进程挂载 overlay（即使有 ambient
 # CAP_SYS_ADMIN）。此时为了继续跑功能验收，退化为 root 直接进程并在日志里
-# 明确标出 ROOT_FALLBACK=1；真实 P36 仍应用 User=p36。
+# 明确标出 ROOT_FALLBACK=1；真实 VM 平台仍应用 User=p36。
 as_caps() {
   if [ "$ROOT_FALLBACK" = 1 ]; then
     sudo env TMPDIR="$P37_TMP" "$@"
@@ -201,7 +201,7 @@ echo "REPO_DIR=$REPO_DIR"
 
 say "启动 systemd 服务"
 [ -d /run/systemd/system ] || {
-  echo "runner 没有 systemd；P36 验收要求真实 unit，请换 VM runner" >&2
+  echo "runner 没有 systemd；VM 平台验收要求真实 unit，请换 VM runner" >&2
   exit 1
 }
 sudo systemctl daemon-reload

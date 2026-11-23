@@ -1,21 +1,21 @@
-# P34 接入示例
+# Agent 平台接入示例
 
 ## 1. 新建应用仓库（应用卷）
 
-P34 **不再**用 `repo_create` 建应用卷仓库，也不再复制 `.p37`。P36 attach 后
-卷已挂载到 `/srv/repos/p34-<projectID>`；首次打开/重试初始化时调用：
+Agent 平台 **不再**用 `repo_create` 建应用卷仓库，也不再复制 `.p37`。VM 平台 attach 后
+卷已挂载到 `/srv/repos/app-<projectID>`；首次打开/重试初始化时调用：
 
 ```json
 POST tools/call repo_init
 {
-  "repo": "p34-59",
-  "path": "/srv/repos/p34-59",
+  "repo": "app-59",
+  "path": "/srv/repos/app-59",
   "default_line": "main",
   "mode": "empty",
-  "idempotency_key": "p34-init-p34-59"
+  "idempotency_key": "app-init-app-59"
 }
 → {
-  "repo": {"name":"p34-59","path":"/srv/repos/p34-59",
+  "repo": {"name":"app-59","path":"/srv/repos/app-59",
            "default_line":"main","mainline_head":"<v0>","version_count":1},
   "line": {"name":"main","head":"<v0>"},
   "version": {"id":"<v0>"}
@@ -32,15 +32,15 @@ POST tools/call repo_init
     currentTree/v0Tree，相同只 repair，不同需 `force=true`；
   - `repair`：`repo_health.initialized=false` 且**没有用户文件**时修复元数据
     （认领已有 v0）；有用户文件必须走 import。
-- 初始化 key：P36 建议 `p36-attach-<repo>-<volumeId>`，P34 建议
-  `p34-repair-<repo>-<requestId>`；同 key 不同请求返回
+- 初始化 key：VM 平台建议 `vm-attach-<repo>-<volumeId>`，Agent 平台建议
+  `app-repair-<repo>-<requestId>`；同 key 不同请求返回
   `idempotency_conflict`，不要复用 key。
 - `repo_health {path, with_quota:false}` 返回 `initialized=false` 时按
   `next_action` 走 `repo_init` / `repo_init_repair` / `repo_init_import`。
 - 远端配置在仓库完整后用 `repo_set_remote` 写（凭证仍只从环境变量读）：
 
 ```json
-repo_set_remote { "repo": "p34-59", "remote": {
+repo_set_remote { "repo": "app-59", "remote": {
   "enabled": true, "backend": "s3", "endpoint": "https://...",
   "region": "auto", "bucket": "p37", "prefix": "users/u1/apps",
   "path_style": true } }
@@ -58,7 +58,7 @@ P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 ## 2. 每个会话一条 line
 
 ```json
-{ "name": "p34/session/<sessionID>", "from": "line:main" }
+{ "name": "agent/session/<sessionID>", "from": "line:main" }
 ```
 
 ## 3. 每回合 root workspace
@@ -66,8 +66,8 @@ P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 推荐用 `ws_ensure`（原子 open-or-get），而不是“先 ws_list 再 ws_open”：
 
 ```json
-{ "repo": "my-app", "name": "p34s-<sessionID>",
-  "parent": { "kind": "line", "id": "p34/session/<sessionID>" },
+{ "repo": "my-app", "name": "agent-<sessionID>",
+  "parent": { "kind": "line", "id": "agent/session/<sessionID>" },
   "task_desc": "...",
   "idempotency_key": "<session>/<turn>/ws" }
 ```
@@ -77,7 +77,7 @@ P37_S3_ACCESS_KEY / P37_S3_SECRET_KEY / P37_S3_SESSION_TOKEN
 `ws_open` 仍可用，并新增 `idempotency_key`；不传 key 时保持旧语义。
 
 **命名规则：**
-- `name` 是**会话级稳定**，例如 `p34s-<sessionID>`，不要带 turn 编号。
+- `name` 是**会话级稳定**，例如 `agent-<sessionID>`，不要带 turn 编号。
 - `idempotency_key` 是 **turn 级**，例如 `<sessionID>/<turn>/ws`、`<sessionID>/<turn>/land`。
 - 上一 turn 未 land 的 live ws 会被同 name+parent 的新 key 复用；land+drop 后
   新 key 会创建新一代。
@@ -89,13 +89,13 @@ agent 直接读写 `dir`。不要调用 `line_write_file`。
 
 ```text
 ws_sync(repo, ws_id)
-land_preview(repo, ws_id, target={kind:"line", id:"p34/session/<id>"})
+land_preview(repo, ws_id, target={kind:"line", id:"agent/session/<id>"})
 → target_head, ws_tree, ws_ops_epoch, conflicts
 
-P34 跑验收
+Agent 平台跑验收
 
 ws_land(repo, ws_id,
-        target={kind:"line", id:"p34/session/<id>"},
+        target={kind:"line", id:"agent/session/<id>"},
         expected_head=<target_head>,
         expected_ws_tree=<ws_tree>,
         expected_ws_ops_epoch=<ws_ops_epoch>,
@@ -111,8 +111,8 @@ ws_land(repo, ws_id,
 ## 5. 子任务
 
 ```text
-parent = ws_ensure(name="p34s-<sessionID>", parent=session line)
-child  = ws_ensure(name="p34s-<sessionID>-task-1",
+parent = ws_ensure(name="agent-<sessionID>", parent=session line)
+child  = ws_ensure(name="agent-<sessionID>-task-1",
                    parent={kind:"workspace", id:parent.ws_id})
 # child.base_tree = 父工作区创建子时的有效树（不可变血缘坐标）。
 ... worker 改文件 ...
@@ -150,7 +150,7 @@ r = ws_land_into(child.ws_id, parent.ws_id,
 ## 6. 用户并入应用线
 
 ```text
-line_merge(source="p34/session/<id>", target="main", preview=true)
+line_merge(source="agent/session/<id>", target="main", preview=true)
 → merge_id, conflicts, target_head
 
 conflict_list(ws_id=merge_id)
@@ -206,7 +206,7 @@ sync_restore(repo="my-app", name="my-app", remote_prefix="<...>/rk_...",
 
 `sync_push` 必须 durable 成功后才能删 VM；`async=true` 不算 durable。
 `sync_restore` 恢复所有 line；
-workspace 不恢复，P34 重新 `ws_open`。
+workspace 不恢复，Agent 平台重新 `ws_open`。
 
 ## 11. 自动部署（不产生版本，不占 workspace 配额）
 
@@ -218,14 +218,14 @@ repo_export(repo,
             ref="version:"+head,
             dest_dir="/srv/repos/.p37/tmp/p34-deploy/<jobId>",
             async=false)                 # 大仓库可用 true + repo_export_status
-P36 exec: cd dest_dir && npm ci && npm run build
-P34 直接读 dest_dir/dist/**（P37 没有读 workspace 文件的工具）
+VM 平台 exec: cd dest_dir && npm ci && npm run build
+Agent 平台直接读 dest_dir/dist/**（P37 没有读 workspace 文件的工具）
 finally: rm -rf dest_dir
 ```
 
 - `repo_export` 不创建 workspace、不占 `max_active`、不出现在 `ws_list`，也不会
   被 fs watcher 采集；构建产物不会进入 CAS/op/版本。
-- `dest_dir` 由 P34 服务端生成，必须是绝对路径、仓库外、且（P36 默认配置）
+- `dest_dir` 由 Agent 平台服务端生成，必须是绝对路径、仓库外、且（VM 平台默认配置）
   位于 `/srv/repos/.p37/tmp/p34-deploy` 之下；不要使用用户输入。
 - 每次 job 用唯一目录，finally 删除；P37 不清理导出目录。
 - 大仓库/Cloudflare 100s 场景用 `async=true` + `repo_export_status(job_id)`；
@@ -244,7 +244,7 @@ ws_info/ws_sync/land_preview 对已落地并回收的 ws → ok=true, state=alre
 目录/挂载异常 → ws_broken / ws_not_mounted（不是 gone）
 ```
 
-P34 的会话级缓存建议保存 `{repo,name,parent,key,wsId}`：
+Agent 平台的会话级缓存建议保存 `{repo,name,parent,key,wsId}`：
 
 ```text
 on ws_gone(reason=landed_and_dropped): 视为成功，刷新 line_head
@@ -260,7 +260,7 @@ on ws_not_found: 最多重试一次（新 key），仍失败则上报
 路径/挂载、`persistence`、`quota`、workspace 计数、line heads 与 warnings；
 比 `repo_info + ws_quota + sync_status + ws_list` 少 3~4 次往返。
 
-P36 `/ready` 应使用 `repo_health {path, with_quota:false}`，只消费
+VM 平台 `/ready` 应使用 `repo_health {path, with_quota:false}`，只消费
 `initialized`/`default_line_ready`/`refs_ok`/`refs_match`/`next_action`；
 未初始化是 200 而不是 p37d down。0.4.4 起 default line 的 land/merge/reset/
 revert/sync 都会同步 `refs/mainline`，`refs_match=true` 可作为就绪门槛。
@@ -268,7 +268,7 @@ revert/sync 都会同步 `refs/mainline`，`refs_match=true` 可作为就绪门�
 `reason=refs_mismatch, next_action=repo_init_repair`；调用 `repo_init(mode=repair)`
 做 refs-only repair（有活跃 workspace/lease 时先 `stop_workspaces`）。
 
-P34 不再调用 `EnsureRepoDefaultLine`（它假设 `line_create` 不带 `from` 会创建
+Agent 平台不再调用 `EnsureRepoDefaultLine`（它假设 `line_create` 不带 `from` 会创建
 根版本，真实 P37 从 0.3.x 起就返回 `meta: 记录不存在`）。
 
 应用卷迁移（旧 `repo_<hash>` → `/srv/repos/<name>`）见
@@ -277,7 +277,7 @@ P34 不再调用 `EnsureRepoDefaultLine`（它假设 `line_create` 不带 `from`
 
 ## 注意
 
-- 同一 `remote_prefix` 只允许单写者；P34 需要保证同一 app 的 push 串行。
+- 同一 `remote_prefix` 只允许单写者；Agent 平台需要保证同一 app 的 push 串行。
 - 每个 app 持久化 `remote_prefix` / `remote_key`，不要从 repo name/id 推导。
 - `ws_land` / `line_merge` 的 `idempotency_key` 写入 version 并随 sync 恢复；
   `ws_land_into` 的幂等只保证同一 VM。

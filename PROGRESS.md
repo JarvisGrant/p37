@@ -77,13 +77,13 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 - 新增 MCP/CLI `repo_quiesce` / `repo_resume`：quiesce 关闭 repo 的
   overlay workspace、SQLite 和 flock，但保留 registry 行；resume 重新打开。
-  P36 detach 改为 `quiesce → umount → unregister`，umount 失败则 resume，
+  VM 平台 detach 改为 `quiesce → umount → unregister`，umount 失败则 resume，
   避免留下“VM 运行中、repo 却 unregistered”的中间态。
 - `repo_health` 新增 `registered`：registry 视角与磁盘完整性分开；被
   `repo_unregister` 的 repo 即使 `initialized=true` 也返回
   `registered=false`。
 - `repo_register` 继续支持 tombstone 恢复（`deleted_ts=0`，id/name 不变），
-  作为 P36/P34 在 umount 失败或 `registered=false` 时的显式修复入口。
+  作为 VM 平台/Agent 平台在 umount 失败或 `registered=false` 时的显式修复入口。
 - 新增 Hub `Quiesce` / `Resume` / `GetByPath`；`Unregister` 抽出
   `stopWorkspacesLocked`，两条路径共享活跃 workspace/lease 检查与 overlay
   卸载逻辑。
@@ -143,11 +143,11 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
   未初始化结果，避免 `refs_match` 过期。
 - **refs/mainline 对齐**：default line 的 `ws_land` / `line_merge` /
   `line_reset` / `version_revert` / `sync fetch` 都写 refs；`refs_match`
-  成为 P36 `/ready` 可靠门槛。
+  成为 VM 平台 `/ready` 可靠门槛。
 - **import 故障注入**：`swap_after_delete` / `swap_after_insert` /
   `swap_before_commit` / `after_commit_before_refs`；前者回滚，后者由
   `repo_init(mode=repair)` 对齐 refs。
-- 文档、验收、CLI、P34 接入与发布说明同步到 0.4.4；`format_ver` 不变。
+- 文档、验收、CLI、Agent 平台接入与发布说明同步到 0.4.4；`format_ver` 不变。
 
 ## v0.4.3 应用卷仓库初始化闭环
 
@@ -155,7 +155,7 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 新应用首次 attach 后，如果 `p37 init` 在「v0 已写、mainline_head/line/refs
 未写」之间中断，重试时 `p37 init --if-missing` 只看 `p37.db` 是否存在就跳过，
-`repo_register` 又只注册任何已存在的 DB，最终 P34 看到
+`repo_register` 又只注册任何已存在的 DB，最终 Agent 平台看到
 `version_count=0`、`lines=[]`；`line_create(from=main)` 报
 `version_not_found`，工作区打不开。
 
@@ -184,7 +184,7 @@ refs 缺失。修复必须认领这个 v0，不能再造第二个根。
   `p37 doctor` 增加 repo/line/version/refs 一致性检查。
 - `repo_create` 增加可选 `path`（等价 `repo_init(mode=empty)`）；不传 path
   仍是 L2 scratch。
-- 文档同步：MCP 契约、P34 接入、CLI、配置、运维、验收、状态与发布说明。
+- 文档同步：MCP 契约、Agent 平台接入、CLI、配置、运维、验收、状态与发布说明。
 - 版本升到 0.4.3，`format_ver` 不变。
 
 ## v0.4.2：land_into 一致性与三方合并可观测（2026-10-25）
@@ -250,7 +250,7 @@ refs 缺失。修复必须认领这个 v0，不能再造第二个根。
 
 | 改动 | 落点 |
 |---|---|
-| README / 状态 / 验收 / VERIFY / P36 文档对齐 v0.3.x | `README.md`、`docs/status.md`、`docs/acceptance.md`、`VERIFY.md`、`packaging/p36/README.md` |
+| README / 状态 / 验收 / VERIFY / VM 平台文档对齐 v0.3.x | `README.md`、`docs/status.md`、`docs/acceptance.md`、`VERIFY.md`、`packaging/p36/README.md` |
 | MCP 契约重写 | `docs/mcp-contract.md`：61 个工具、参数/返回、`detail`（单数）、45 个实际错误码 |
 | 并发文档改为实际锁模型 | `docs/concurrency.md`：`Hub.mu`、per-repo flock、`landMu`、`landSem`、`syncMu`、`DB.wmu` |
 | 新增文档 | `docs/README.md`、`docs/architecture.md`、`docs/cli.md`、`docs/config.md`、`docs/operations.md`、`CONTRIBUTING.md` |
@@ -263,7 +263,7 @@ refs 缺失。修复必须认领这个 v0，不能再造第二个根。
 
 ## v0.3.2：多仓库应用卷生命周期（2026-10-24）
 
-P36 把「每应用一个持久卷」做成 qcow2 挂到 `/srv/repos/<app>`。v0.3.2 让 p37d
+VM 平台把「每应用一个持久卷」做成 qcow2 挂到 `/srv/repos/<app>`。v0.3.2 让 p37d
 支持运行中 attach/detach：不重启 daemon 注册/注销 repo，启动时按实际挂载
 reconcile registry。
 
@@ -284,7 +284,7 @@ reconcile registry。
 
 ## v0.3.1：部署导出加固（2026-10-23）
 
-P34 改用 `repo_export` 做自动部署（不创建 workspace、不产生版本）后，补齐
+Agent 平台改用 `repo_export` 做自动部署（不创建 workspace、不产生版本）后，补齐
 导出路径的生产级缺口：
 
 | 问题 | 修复 |
@@ -297,12 +297,12 @@ P34 改用 `repo_export` 做自动部署（不创建 workspace、不产生版本
 | Cloudflare 100s / 大仓库同步超时 | 新增 `async=true` + `repo_export_status(job_id)` |
 | umask 可能抹掉可执行位 | 导出文件显式 chmod |
 
-P36 模板新增 `[repo] export_root = "/srv/repos/.p37/tmp/p34-deploy"`。
+VM 平台模板新增 `[repo] export_root = "/srv/repos/.p37/tmp/p34-deploy"`。
 仓库格式仍为 `format_ver=2`，无需迁移。
 
 ## v0.3.0：工作区生命周期与配额修复（2026-10-23）
 
-P34「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增、子工作区冲突后
+Agent 平台「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增、子工作区冲突后
 父工作区永久无法 land。根因不是单一 bug，而是四条链路叠加：
 
 | 问题 | 修复 |
@@ -321,9 +321,9 @@ P34「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增�
 新增 `max_hidden=32`。回归测试见 `internal/repo/quota_recovery_test.go` 与
 `internal/mcpsrv/quota_test.go`。
 
-## P36 可部署性适配（v0.1.x 历史）
+## VM 平台可部署性适配（v0.1.x 历史）
 
-目标：把 p37 做成 P36 microVM 里“实例启动即有”的版本控制工具，同时**不改
+目标：把 p37 做成 VM 平台的 microVM 里“实例启动即有”的版本控制工具，同时**不改
 当时的仓库格式与核心版本控制语义**。这一轮 `format_ver` 仍为 1；v0.2 起才引入
 `format_ver=2`（见后文与 [`docs/format-v2.md`](docs/format-v2.md)）。改动集中在
 外围。
@@ -337,18 +337,18 @@ P34「主管会话 + 子会话」在沙盒连续跑时出现配额只减不增�
 | 部署健康检查 | `internal/health` + `p37d --check [--json] [--strict]`；可写/ext4/同 FS/OverlayFS/inotify/磁盘/daemon 状态 |
 | GC 维护保护 | `internal/repolock`；daemon 持锁时 `p37 gc` 拒绝，`--force` 才显式跳过 |
 | 默认值适配 20GB L2 | `base_cache_bytes=4 GiB`、`warn_disk_bytes=8 GiB`、`max_active=4`（v0.1.13 copy 回退；v0.3.0 起为 8；硬上限仍 64） |
-| P36 部署包 | `packaging/p36/`：`p37d.service`、`p37-run`、`p37-mcp`、`config.toml`、`p37-mount` Go 挂载助手 |
+| VM 平台部署包 | `packaging/p36/`：`p37d.service`、`p37-run`、`p37-mcp`、`config.toml`、`p37-mount` Go 挂载助手 |
 
 测试新增：stdio 双客户端并发闭环、daemon 不在时的错误、init 幂等/模板、
 `--check` 退出码与 JSON、GC 拒绝、只读目录执行、工具名一致性。`go test ./...`
 全绿；linux/amd64 发布物由 `make release` 生成。当前仓库格式由
 `meta.FormatVer=2` 与黄金向量测试保证。
 
-### P36 返工（L1 胶水 / 共享 mount namespace / 96 MiB payload）
+### VM 平台返工（L1 胶水 / 共享 mount namespace / 96 MiB payload）
 
-P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制语义仍未变：
+VM 平台侧确认后，部署形态做了以下修正；仓库格式与版本控制语义仍未变：
 
-- **胶水放 L1**：P36 不改 L0；`p37-run`/`p37-mcp`/`p37-mount`/config/unit/
+- **胶水放 L1**：VM 平台不改 L0；`p37-run`/`p37-mcp`/`p37-mount`/config/unit/
   sysctl 都放 L1。只有 `p37`/`p37d` 在 payload。
 - **不创建私有 mount namespace**：`p37d.service` 删除 `PrivateTmp`、
   `ProtectSystem`、`ProtectHome`、`ReadWritePaths`、`ProtectKernel*`、
@@ -360,16 +360,16 @@ P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制�
   `ExecStopPost=umount`；否则停服后维护窗口没有 `p37` 可执行。
 - **payload 固定 96 MiB**：32 MiB 的 ext4 扣掉 journal/元数据后放不下约
   30 MiB 的两个二进制；生成示例使用 `mkfs.ext4 -m 0`。
-- **设备顺序**：P36 中 `vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
+- **设备顺序**：VM 平台中 `vda=root`、`vdb=P36AGENT`、`vdc=P37PAYLOAD`；
   `p37-mount` 仍按 label 挂载。
-- **新增 `packaging/p36/90-p37.conf`**：inotify 额度由 P36 L1 install.sh 安装。
+- **新增 `packaging/p36/90-p37.conf`**：inotify 额度由 VM 平台 L1 install.sh 安装。
 - **发布流程**：`make release` 增加 dirty 检查、manifest version/commit 自检、
-  release notes 生成；GitHub Actions 负责 tag → build → P36 验收 → Release，
+  release notes 生成；GitHub Actions 负责 tag → build → VM 平台验收 → Release，
   另保留对已发布 Release 的 `workflow_dispatch` 验收。
 
-### v0.1.13（P36 非 root overlay EPERM 的默认回退）
+### v0.1.13（VM 平台非 root overlay EPERM 的默认回退）
 
-真实 P36 实测：`User=p36 + NoNewPrivileges=yes + CAP_SYS_ADMIN` 下 payload
+真实 VM 平台实测：`User=p36 + NoNewPrivileges=yes + CAP_SYS_ADMIN` 下 payload
 挂载、MCP/CLI/land/GC 正常，但 overlay mount 返回 `permission denied`；root
 下 overlay 正常。因此 v0.1.13 只改 packaging/docs：
 
@@ -385,7 +385,7 @@ P36 侧确认后，部署形态做了以下修正；仓库格式与版本控制�
 
 ## 真机第二遍（S30–S34 + 采集提速）
 
-在 P36 实例（Ubuntu 26.04 / ext4 / overlay，2 vCPU / 1 GiB）上按 `VERIFY.md` 又走了一遍
+在 VM 平台实例（Ubuntu 26.04 / ext4 / overlay，2 vCPU / 1 GiB）上按 `VERIFY.md` 又走了一遍
 完整功能与性能清单，抓到并修掉以下问题；两项核心功能（权限位、rename 跟随）在真机上复验通过。
 
 | 编号 | 问题 | 处理 | 回归测试 |
@@ -478,7 +478,7 @@ cmd/p37, cmd/p37d     p37 sync ...、定时打包
 internal/mcpsrv        sync_status / sync_prepare / sync_list / sync_show
 ```
 
-真机（P36 实例，Ubuntu 26.04 / ext4）复验：200 文件仓库 checkpoint 18.2 KiB
+真机（VM 平台实例，Ubuntu 26.04 / ext4）复验：200 文件仓库 checkpoint 18.2 KiB
 上传 → 空仓库 pull 后 200 文件与源 `diff -r` 一致、`fsck` 通过、blame/版本链正常；
 随后 A 追加一版生成 delta（1.3 KiB）并推送，B pull 快进。daemon 运行时的
 `sync_prepare/list/show/status` 也通过 MCP 验证。
@@ -510,7 +510,7 @@ internal/mcpsrv        sync_status / sync_prepare / sync_list / sync_show
 
 ### 真机发现并修正的问题（S15 / S16）
 
-在 P36 平台的 Ubuntu 26.04 / ext4 上做端到端验证时，发现两个**会造成数据丢失**
+在 VM 平台的 Ubuntu 26.04 / ext4 上做端到端验证时，发现两个**会造成数据丢失**
 的缺口。两者都已修复并在真机上复验。
 
 | 编号 | 问题 | 处理 | 回归测试 |
@@ -908,7 +908,7 @@ go test ./internal/cas -update     # 重新冻结 gear 表（仅格式变更时�
 
 ## v0.2 · 目标形态改造（format_ver=2）
 
-v0.2 把 p37 从「单仓库 + 单父 mainline」扩到 P34 需要的目标形态。
+v0.2 把 p37 从「单仓库 + 单父 mainline」扩到 Agent 平台需要的目标形态。
 
 ### 多仓库
 
@@ -953,4 +953,4 @@ v0.2 把 p37 从「单仓库 + 单父 mainline」扩到 P34 需要的目标形�
 新增：多仓库生命周期/重启、line 会话循环、line_merge 冲突、land_into 冲突、line reset/protect、历史读取、rebase、幂等、目录同步 push/restore（含 merge parents）。`go test ./...` 全绿。
 
 契约文档：`docs/mcp-contract.md`、`docs/format-v2.md`、`docs/sync-contract.md`、
-`docs/concurrency.md`、`docs/p34-integration.md`。
+`docs/concurrency.md`、`docs/agent-platform-integration.md`。

@@ -32,7 +32,7 @@ func TestLandToIdempotent(t *testing.T) {
 		t.Fatalf("again=%+v first=%+v", again, res)
 	}
 	// 同一个 key 被另一个工作区复用属于调用方错误：必须显式冲突，不能静默
-	// 返回首次结果（否则 P34 会把别人的版本当成自己的交付）。
+	// 返回首次结果（否则 Agent 平台会把别人的版本当成自己的交付）。
 	w2 := e.open("line:s", "t2")
 	e.write(w2.ID, "c.txt", "C\n")
 	if _, err := e.r.LandTo(w2.ID, repo.LandOptions{Line: "s", IdempotencyKey: "k1"}); err == nil {

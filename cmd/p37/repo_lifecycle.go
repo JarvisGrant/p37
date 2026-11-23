@@ -431,7 +431,7 @@ func routeRepoCommand(root, tool string, args any) (json.RawMessage, bool, error
 
 // routeInit 尝试把 p37 init 路由到上层 root 的 p37d。
 //
-// 旧 P36 镜像只调用 `p37 init <mountPath>`；如果同一 repo 已经被 p37d
+// 旧 VM 平台镜像只调用 `p37 init <mountPath>`；如果同一 repo 已经被 p37d
 // 打开，CLI 直接修复会撞上 .p37/lock。这里向上查找 .p37/p37d.sock，
 // 有 daemon 就走 MCP repo_init，让修复在 h.mu 内完成。
 func routeInit(root, name, defLine, mode, idemKey string, force bool) (*repo.EnsureResult, bool, error) {

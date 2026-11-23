@@ -11,13 +11,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-
-env:
-  # 可选，配置位置见 .env.example。
-  # 留空时 GH_TOKEN 回退到 GitHub Actions 自动注入的 github.token。
-  P37_RELEASE_TOKEN: ${{ secrets.P37_RELEASE_TOKEN }}
-  GH_TOKEN: ${{ secrets.P37_RELEASE_TOKEN || github.token }}
+  contents: read
 
 concurrency:
   group: release-${{ inputs.tag || github.ref }}
@@ -137,7 +131,7 @@ jobs:
         with:
           name: p37-l1-bootstrap
           path: dist/p36-bootstrap
-      - name: run P36 acceptance
+      - name: run VM 平台 acceptance
         env:
           P37_VERSION: ${{ needs.build.outputs.version }}
           P37_TAG: ${{ needs.build.outputs.tag }}
@@ -184,6 +178,9 @@ jobs:
         env:
           TAG: ${{ needs.build.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
+          # 只在真正需要写 Release 的步骤注入 PAT：build/验收会执行仓库代码，
+          # 不应拿到长期凭据。未配置 PAT 时回退到短期的 github.token。
+          GH_TOKEN: ${{ secrets.P37_RELEASE_TOKEN || github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -203,5 +200,6 @@ jobs:
       - name: print release URL
         env:
           TAG: ${{ needs.build.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "release: $(gh release view "$TAG" --json url -q .url --repo "$GITHUB_REPOSITORY")"

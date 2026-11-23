@@ -1,6 +1,6 @@
 # 可选：root + OverlayFS 部署的配置模板。
 #
-# 仅当 P36 明确允许 p37d 以 root 运行、且希望使用 OverlayFS 时使用。
+# 仅当 VM 平台明确允许 p37d 以 root 运行、且希望使用 OverlayFS 时使用。
 # 默认部署应使用 config.toml（User=p36 + materialize=auto + copy 回退）。
 #
 # 安装示例：
@@ -11,7 +11,7 @@
 
 [repo]
 format_ver = 3
-# 限制 repo_export 只能写到这里（P34 部署约定见 config.toml）。
+# 限制 repo_export 只能写到这里（Agent 平台部署约定见 config.toml）。
 export_root = "/srv/repos/.p37/tmp/p34-deploy"
 
 [workspace]

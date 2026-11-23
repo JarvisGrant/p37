@@ -8,7 +8,7 @@ Conflicts=p37d.service
 
 [Service]
 Type=simple
-# 仅用于 P36 明确允许 root、且需要 OverlayFS 的场景。
+# 仅用于 VM 平台明确允许 root、且需要 OverlayFS 的场景。
 # 默认部署请使用 p37d.service（User=p36 + auto + copy 回退）。
 User=root
 Group=root

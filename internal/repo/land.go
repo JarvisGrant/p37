@@ -25,7 +25,7 @@ type FileStat struct {
 	DestPath string `json:"dest_path,omitempty"`
 }
 
-// PathState 是路径级三方分类，供 P34 在落地前做审计/拦截。
+// PathState 是路径级三方分类，供 Agent 平台在落地前做审计/拦截。
 type PathState struct {
 	Path   string `json:"path"`
 	State  string `json:"state"` // child_only | parent_only | both_changed | both_auto_merged | conflict

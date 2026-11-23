@@ -13,10 +13,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # 公开仓库通常不需要；私有仓库/组织策略可用同一个可选 secret。
-  GH_TOKEN: ${{ secrets.P37_RELEASE_TOKEN || github.token }}
-
 concurrency:
   group: p36-acceptance-${{ inputs.tag || github.event.release.tag_name || github.ref }}
   cancel-in-progress: false
@@ -58,6 +54,8 @@ jobs:
       - name: download release assets
         env:
           TAG: ${{ steps.meta.outputs.tag }}
+          # 本仓库的 Release 资产只需要读取权限，不需要可选 PAT。
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p dist/release
           gh release download "$TAG" \
@@ -68,7 +66,7 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: make p36-bootstrap VERSION="$VERSION"
-      - name: run P36 acceptance
+      - name: run VM 平台 acceptance
         env:
           P37_VERSION: ${{ steps.meta.outputs.version }}
           P37_TAG: ${{ steps.meta.outputs.tag }}

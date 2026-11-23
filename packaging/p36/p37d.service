@@ -2,7 +2,7 @@
 Description=p37 version control daemon
 Documentation=https://github.com/JarvisGrant/p37
 After=local-fs.target
-# /srv/repos 由 P36 的 L1 install.sh 预创建（p36:p36 0750）。
+# /srv/repos 由 VM 平台的 L1 install.sh 预创建（p36:p36 0750）。
 # 不存在时服务不启动，这是故意的 fail-fast。
 ConditionPathIsDirectory=/srv/repos
 # 可选的 root + OverlayFS 单元不能同时运行。
@@ -12,7 +12,7 @@ Conflicts=p37d-root-overlay.service
 Type=simple
 User=p36
 Group=p36
-# legacy payload 模式需要读 /dev/disk/by-label/P37PAYLOAD；当前 P36 L1
+# legacy payload 模式需要读 /dev/disk/by-label/P37PAYLOAD；当前 VM 平台 L1
 # 已把 p37 内嵌到 /usr/local/lib/p37，不再投递该盘。
 SupplementaryGroups=disk
 
@@ -21,7 +21,7 @@ Environment=P37_REPO=/srv/repo
 Environment=P37_PAYLOAD_LABEL=P37PAYLOAD
 Environment=P37_PAYLOAD_MOUNT=/usr/local/lib/p37
 Environment=P37_CONFIG=/usr/local/share/p37/config.toml
-# P36 guest agent 监听的事件 socket；覆盖各 repo 自己的 config.toml，
+# VM 平台 guest agent 监听的事件 socket；覆盖各 repo 自己的 config.toml，
 # 保证已有仓库不需要重建也能收到 land/merge/workspace 事件。
 Environment=P37_EVENT_SOCKET=/srv/repos/.p36/p37-events.sock
 Environment=P37_KEEP_VERSIONS=50
@@ -49,7 +49,7 @@ NoNewPrivileges=yes
 # ProtectControlGroups 等会创建私有 mount namespace 的选项：
 # p37d 在里面挂载 workspace overlay（legacy 还有 payload），而 agent 的 shell
 # 与 /usr/local/bin/p37-mcp 在宿主 namespace，看不到私有 namespace 的挂载。
-# 这是 P36 验收里必须从“服务外 shell”执行 findmnt 的原因。
+# 这是 VM 平台验收里必须从“服务外 shell”执行 findmnt 的原因。
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native

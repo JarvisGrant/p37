@@ -53,10 +53,10 @@ func TestMultiRepoMCPLineLoop(t *testing.T) {
 		t.Fatalf("lines=%v", ls)
 	}
 
-	hh.mustOK("line_create", map[string]any{"repo": "app", "name": "p34/session/s1", "from": "mainline"})
+	hh.mustOK("line_create", map[string]any{"repo": "app", "name": "agent/session/s1", "from": "mainline"})
 	w := hh.mustOK("ws_open", map[string]any{
 		"repo": "app", "task": "turn 1",
-		"parent": map[string]any{"kind": "line", "id": "p34/session/s1"},
+		"parent": map[string]any{"kind": "line", "id": "agent/session/s1"},
 	})
 	wsID, _ := w["ws_id"].(string)
 	dir, _ := w["dir"].(string)
@@ -69,14 +69,14 @@ func TestMultiRepoMCPLineLoop(t *testing.T) {
 	hh.mustOK("ws_sync", map[string]any{"repo": "app", "ws_id": wsID})
 	preview := hh.mustOK("land_preview", map[string]any{
 		"repo": "app", "ws_id": wsID,
-		"target": map[string]any{"kind": "line", "id": "p34/session/s1"},
+		"target": map[string]any{"kind": "line", "id": "agent/session/s1"},
 	})
 	if ok, _ := preview["can_land"].(bool); !ok {
 		t.Fatalf("preview=%v", preview)
 	}
 	land := hh.mustOK("ws_land", map[string]any{
 		"repo": "app", "ws_id": wsID,
-		"target":        map[string]any{"kind": "line", "id": "p34/session/s1"},
+		"target":        map[string]any{"kind": "line", "id": "agent/session/s1"},
 		"expected_head": preview["target_head"], "expected_ws_tree": preview["ws_tree"],
 	})
 	if land["version_id"] == nil {
@@ -85,7 +85,7 @@ func TestMultiRepoMCPLineLoop(t *testing.T) {
 
 	w2 := hh.mustOK("ws_open", map[string]any{
 		"repo": "app", "task": "turn 2",
-		"parent": map[string]any{"kind": "line", "id": "p34/session/s1"},
+		"parent": map[string]any{"kind": "line", "id": "agent/session/s1"},
 	})
 	dir2, _ := w2["dir"].(string)
 	b, err := os.ReadFile(filepath.Join(dir2, "a.txt"))
@@ -94,7 +94,7 @@ func TestMultiRepoMCPLineLoop(t *testing.T) {
 	}
 
 	tree := hh.mustOK("version_tree", map[string]any{
-		"repo": "app", "ref": "line:p34/session/s1", "recursive": true,
+		"repo": "app", "ref": "line:agent/session/s1", "recursive": true,
 	})
 	items, _ := tree["items"].([]any)
 	if len(items) == 0 {

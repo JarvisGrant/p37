@@ -23,7 +23,7 @@ var ErrPreviewExpired = errors.New("repo: land_into preview 已过期")
 
 // ErrParentMoved 表示父工作区在「读树 → 重放 → 写盘」窗口里被改动。
 //
-// 调用方（P34）应重读父有效树、重跑 preview 后重试；绝不能忽略后继续写。
+// 调用方（Agent 平台）应重读父有效树、重跑 preview 后重试；绝不能忽略后继续写。
 var ErrParentMoved = errors.New("repo: 父工作区在合并期间被改动")
 
 // ErrPathNotAllowed 表示子工作区改了工作卡允许范围之外的路径。
@@ -55,7 +55,7 @@ func (e *ParentMovedError) Error() string {
 
 func (e *ParentMovedError) Unwrap() error { return ErrParentMoved }
 
-// PathNotAllowedError 列出越界路径，供 P34 直接回显给主管。
+// PathNotAllowedError 列出越界路径，供 Agent 平台直接回显给主管。
 type PathNotAllowedError struct {
 	Paths []string
 }

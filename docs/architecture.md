@@ -15,7 +15,7 @@ p37 是「以整合事件为版本原子」的版本控制系统。本文给出�
     packs/                 # 离线打包后的不可变 pack
     workspaces/            # 工作区挂载点 / copy 目录
     sync/outbox/           # 待上传的同步包
-    tmp/                   # 临时文件（P36 把 TMPDIR 指到这里）
+    tmp/                   # 临时文件（VM 平台把 TMPDIR 指到这里）
     backup/                # 格式迁移前的 DB 备份
     trash/                 # repo 删除/恢复时的旧数据
     repo.json              # 多仓库模式下的身份锚（id/name/default_line）
@@ -140,7 +140,7 @@ root 外路径。
 本地 repo 的 `<repo>/.p37/p37.db` + `.p37/objects` + `.p37/packs` 是 line/version/
 对象的语义真相源（`/srv/repos/.p37/registry.db` 只是控制面，可从 repo.json 重建）；`.p37/workspaces`、op、stat_cache 是派生数据。S3 远端是
 跨 VM 灾备真相，不是在线语义真相。`ws_land` 默认 `durable=false`（仅本地已提交），
-`sync_push` 成功后才 `durable=true`。P36 负责卷/字节是否真的留在盘上。
+`sync_push` 成功后才 `durable=true`。VM 平台负责卷/字节是否真的留在盘上。
 
 ## 9. 同步
 

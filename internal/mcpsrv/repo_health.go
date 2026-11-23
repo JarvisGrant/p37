@@ -15,7 +15,7 @@ import (
 
 // registerRepoHealth 注册启动自检聚合工具。
 //
-// 0.4.3 起它是 P36 /ready 的廉价入口：
+// 0.4.3 起它是 VM 平台 /ready 的廉价入口：
 //   - 未初始化返回 ok=true + initialized=false + next_action，不返回 5xx；
 //   - with_quota=false 时不打开 repo、不跑 EnsureSchema/migrate；
 //   - repo 未注册时可用 path 探测（attach 失败后 registry 可能还没有行）。
@@ -25,7 +25,7 @@ func (s *Server) registerRepoHealth() {
 		`{"type":"object","properties":{
 		  "path":{"type":"string","description":"repo 未注册时可直接用挂载路径探测"},
 		  "deep":{"type":"boolean","default":false,"description":"额外校验 head 的对象树（doctor 用）"},
-		  "with_quota":{"type":"boolean","default":true,"description":"P36 /ready 可传 false 走只读快路径"}
+		  "with_quota":{"type":"boolean","default":true,"description":"VM 平台 /ready 可传 false 走只读快路径"}
 		},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
 			var a struct {
@@ -60,7 +60,7 @@ func (s *Server) registerRepoHealth() {
 			}
 			// registered 是 registry 视角，不是磁盘完整性视角：repo 被
 			// repo_unregister 后数据仍然完整，但 line/version 工具已经不可用。
-			// P36 /ready 必须能区分“数据在但未注册”和“真正 ready”。
+			// VM 平台 /ready 必须能区分“数据在但未注册”和“真正 ready”。
 			registered := false
 			var entry *hub.Entry
 			if a.Repo != "" {
@@ -107,7 +107,7 @@ func healthBase(in *repo.Integrity, e *hub.Entry, path string) map[string]any {
 		repoInfo["degraded"] = e.Degraded
 		repoInfo["mount_point"] = e.Mounted
 		if path != "" {
-			// 调用方显式给了 path（P36 /ready）时以它为准，避免 registry
+			// 调用方显式给了 path（VM 平台 /ready）时以它为准，避免 registry
 			// 还指向旧路径时把探测结果标错。
 			repoInfo["path"] = path
 		}

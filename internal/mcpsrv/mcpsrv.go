@@ -344,7 +344,7 @@ func envelopeErr(err error) *mcp.CallToolResult {
 }
 
 // envelopeErrCtx 在统一出口补齐错误上下文：code + repo + 标识符 + reason。
-// 这里不依赖各 handler 记得填 detail，避免 P34 只能退化成“操作失败”。
+// 这里不依赖各 handler 记得填 detail，避免 Agent 平台只能退化成“操作失败”。
 func envelopeErrCtx(s *Server, raw json.RawMessage, err error) *mcp.CallToolResult {
 	code, msg, detail := classify(err)
 	m := map[string]any{}

@@ -21,7 +21,7 @@
 
 ## 本版重点（v0.7.4）
 
-v0.7.3 的锁范围补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0。
+v0.7.3 的锁范围补丁，**`format_ver` 仍为 3**，VM 平台/Agent 平台最低版本仍为 0.7.0。
 
 - GC 的互斥范围扩展到 `sync push/pull/fetch` 与 `repo_import`，统一锁序为
   `syncMu → landMu → objMu`；所有写对象路径都不会在“对象已写、ref/op 未
@@ -30,7 +30,7 @@ v0.7.3 的锁范围补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍�
 
 ## 本版重点（v0.7.3）
 
-v0.7.2 的并发/恢复补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0。
+v0.7.2 的并发/恢复补丁，**`format_ver` 仍为 3**，VM 平台/Agent 平台最低版本仍为 0.7.0。
 
 - 外部 `ws_sync` / `ws_diff` 持对象读锁，GC 持写锁：并发采集写入、但 op
   尚未提交的对象不会再被 GC 当成不可达删除。
@@ -44,7 +44,7 @@ v0.7.2 的并发/恢复补丁，**`format_ver` 仍为 3**，P36/P34 最低版本
 
 ## 本版重点（v0.7.2）
 
-v0.7.1 的收尾补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0，
+v0.7.1 的收尾补丁，**`format_ver` 仍为 3**，VM 平台/Agent 平台最低版本仍为 0.7.0，
 不需要重建 L1。
 
 - `object_index` 批量登记：capture 一次写入几千个对象时不再逐条开 SQLite
@@ -62,7 +62,7 @@ v0.7.1 的收尾补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 
 
 ## 本版重点（v0.7.1）
 
-v0.7.0 的小补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0。
+v0.7.0 的小补丁，**`format_ver` 仍为 3**，VM 平台/Agent 平台最低版本仍为 0.7.0。
 
 - fsnotify `ErrEventOverflow` 会把全部工作区标脏，交给 debounce + 周期扫描。
 - 监听 Add 失败后 reconcile 会重试根目录。
@@ -76,7 +76,7 @@ v0.7.0 的小补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7
 
 这是 **`format_ver=3`** 的 typed object 版本。版本 id 不变；对象地址从
 `objects/<id>` 改为 `objects/<type>/<id>`，`object_index` 主键改为
-`(id,type)`。P36/P34 最低 p37 版本提升到 **0.7.0**；旧 L1 必须重建且不得回退。
+`(id,type)`。VM 平台/Agent 平台最低 p37 版本提升到 **0.7.0**；旧 L1 必须重建且不得回退。
 
 ### 解决
 
@@ -91,11 +91,11 @@ v0.7.0 的小补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7
 
 - v1/v2 首次打开自动备份并迁移到 v3；`object_index` 作为缓存重建。
 - 旧 `objects/<id>` 仍可读，新对象写 typed key；不需要重写 version/tree id。
-- 旧二进制遇到 v3 会拒绝打开；P36 必须阻止回退旧 L1。
+- 旧二进制遇到 v3 会拒绝打开；VM 平台必须阻止回退旧 L1。
 
 ## 本版重点（v0.6.1）
 
-v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6.0。
+v0.6.0 的小补丁，**`format_ver` 仍为 2**，VM 平台/Agent 平台最低版本仍为 0.6.0。
 
 - `sync_push` 幂等键绑定请求体（`full`/`lines`/`expected_remote_generation`），
   同 key 不同请求返回 `idempotency_conflict`；`async=true` 拒绝幂等键。
@@ -107,7 +107,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 ## 本版重点（v0.6.0）
 
 这是 v0.5.2 之后的正确性/性能收敛版本，**`format_ver` 仍为 2**；已有仓库无需
-迁移。P36 最低 p37 版本提升到 **0.6.0**。
+迁移。VM 平台最低 p37 版本提升到 **0.6.0**。
 
 ### 同步与 GC
 
@@ -138,8 +138,8 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 
 ## 本版重点（v0.5.2）
 
-这是数据安全与 P36 L1 集成形态对齐版本，**`format_ver` 仍为 2**；已有仓库
-无需迁移。P36 最低 p37 版本提升到 **0.5.2**，旧 L1 需要重建。
+这是数据安全与 VM 平台 L1 集成形态对齐版本，**`format_ver` 仍为 2**；已有仓库
+无需迁移。VM 平台最低 p37 版本提升到 **0.5.2**，旧 L1 需要重建。
 
 ### 数据安全
 
@@ -176,7 +176,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 - 多仓库 daemon 增加 root 级单实例锁，并遵循 `daemon.socket`。
 - CLI `sync status` 不再写 config/生成 remote_key。
 - `p37d --check --root` 不再走会重挂/回收工作区的写路径（后续版本继续收敛）。
-- P36 文档/模板改为“p37 内嵌 L1、应用卷 staging/OSS”，移除 payload/L2 作为
+- VM 平台文档/模板改为“p37 内嵌 L1、应用卷 staging/OSS”，移除 payload/L2 作为
   p37 用户数据层的描述。
 
 ## 本版重点（v0.5.1）
@@ -199,7 +199,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 
 ### 版本门槛
 
-- P36/P34 最低 p37 版本提升到 **0.5.1**；旧 L1 需要重建。
+- VM 平台/Agent 平台最低 p37 版本提升到 **0.5.1**；旧 L1 需要重建。
 
 ## 本版重点（v0.5.0）
 
@@ -249,7 +249,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
   `invalid_argument`，避免客户端把参数错误当服务端故障重试。
 - 启动时不再每次全表回填 `version_parent`；`ws_list` 的
   `dropped_within` 现在按 `created_ts` 过滤。
-- P36/P34 最低 p37 版本提升到 **0.5.0**；旧 L1 需要重建。
+- VM 平台/Agent 平台最低 p37 版本提升到 **0.5.0**；旧 L1 需要重建。
 
 ## 本版重点（v0.4.13）
 
@@ -265,15 +265,15 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 
 ## 本版重点（v0.4.12）
 
-- **保留版本数从 200 降到 50**：`retention.keep_versions` 默认值和 P36 L1 模板都改为 50；`P37_KEEP_VERSIONS` 环境变量覆盖已有 repo 的旧 config。
+- **保留版本数从 200 降到 50**：`retention.keep_versions` 默认值和 VM 平台 L1 模板都改为 50；`P37_KEEP_VERSIONS` 环境变量覆盖已有 repo 的旧 config。
 - **补齐 line merge / line reset 事件**：`MergeLines` 发 `version_landed`，
   `ResetLine` / `RevertTo` 发 `version_reverted`；所有会推进 head 的路径都能
-  触发 P36 刷新用量。
+  触发 VM 平台刷新用量。
 - **已有仓库无需重建也能收到事件**：`P37_EVENT_SOCKET` 环境变量覆盖各 repo
   自己的 `.p37/config.toml`；L1 的 `p37d.service` 已设置
   `P37_EVENT_SOCKET=/srv/repos/.p36/p37-events.sock`。旧仓库的 config 没有
   `[events]` 也能工作。
-- **新增 MCP `repo_usage`**：只读返回仓库用量快照，P36 不再需要从卷外
+- **新增 MCP `repo_usage`**：只读返回仓库用量快照，VM 平台不再需要从卷外
   NBD/mount/find 测量。字段：
   - `head` / `version_count` / `epoch` / `last_land_ts`
   - `objects.count/stored_bytes/raw_bytes`（来自 `object_index` 聚合）
@@ -283,12 +283,12 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
   - `measured_at`
 - **新增 `[events] unix_socket` 语义事件**：P37 在 workspace 文件变化、
   land/merge、revert、sync_pull、repo import、gc 完成后向本地 socket 写一行
-  JSON。P36 guest agent 监听后立即刷新 `repo_usage`，不再周期轮询。
+  JSON。VM 平台 guest agent 监听后立即刷新 `repo_usage`，不再周期轮询。
 - **`workspace.Options.OnSync`**：所有成功采集（MCP `ws_sync`、daemon watcher、
   子工作区）统一发 `workspace_changed`；root 多仓库模式也能收到文件变化事件。
 - 事件只做 best-effort：socket 不存在/对端断开不影响 repo 操作。
 - 修复 CI 慢机上的 `TestStabilizeNoDelayWhenNothingRecent` 抖动。
-- `format_ver` 不变；旧 P36 可忽略 `repo_usage` 和事件。
+- `format_ver` 不变；旧 VM 平台可忽略 `repo_usage` 和事件。
 
 ## 上一版（v0.4.11）
 
@@ -312,15 +312,15 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 ## 上一版（v0.4.7）
 
 - **`repo_quiesce` / `repo_resume`**：把“关闭 repo 的 DB/overlay/flock”和
-  “从 registry 隐藏”拆开。P36 detach 的顺序改为
+  “从 registry 隐藏”拆开。VM 平台 detach 的顺序改为
   `repo_quiesce → guest umount → repo_unregister`；umount 失败时
   `repo_resume`，registry 保持可见，不再留下“VM 还在运行、repo 却
   repo_not_found”的中间态。
 - **`repo_health.registered`**：新增 registry 视角字段。repo 被
   `repo_unregister` 后，即使磁盘数据完整、`initialized=true`，该字段也是
-  `false`；P36 `/ready` 不应再把这种状态判为 ready。
+  `false`；VM 平台 `/ready` 不应再把这种状态判为 ready。
 - **`repo_register` 作为 tombstone 恢复入口**：显式 `repo_register`（可带
-  `rebind=true`）会把 `deleted_ts` 置回 0，id/name 保持不变；P36/P34 可在
+  `rebind=true`）会把 `deleted_ts` 置回 0，id/name 保持不变；VM 平台/Agent 平台可在
   umount 失败或发现 `registered=false` 时自动恢复。
 - **CLI**：新增 `p37 --root <root> repo quiesce <id|name> [--force]` 和
   `repo resume <id|name>`，与 MCP 工具同源。
@@ -388,7 +388,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
   允许有用户文件的元数据 repair；健康缓存只缓存未初始化结果。
 - **`refs/mainline` 对齐**：default line 的 `ws_land` / `line_merge` /
   `line_reset` / `version_revert` / `sync fetch` 都会写 refs；
-  `refs_match` 可作为 P36 `/ready` 的可靠门槛。
+  `refs_match` 可作为 VM 平台 `/ready` 的可靠门槛。
 - **import 事务故障注入**：`swap_after_delete` / `swap_after_insert` /
   `swap_before_commit` 回滚旧 v0；`after_commit_before_refs` 暴露
   DB 已提交、refs 未写的窗口，由 `repo_init(mode=repair)` 对齐。
@@ -408,7 +408,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 - **`repo_register` 只注册完整仓库**：缺 DB/head/line/refs 时返回
   `repo_not_initialized` 或 `repo_db_corrupt`，`detail.next_action` 指向
   `repo_init`/`repo_init_repair`；`init_if_missing=true` 保留但 deprecated。
-- **`repo_health` 成为 P36 `/ready` 的廉价入口**：新增
+- **`repo_health` 成为 VM 平台 `/ready` 的廉价入口**：新增
   `initialized/default_line_ready/repo_db_ok/next_action`；支持
   `path`（未注册时按挂载点探测）、`with_quota=false`（不打开 repo、不跑
   EnsureSchema/migrate）与 `deep=true`（doctor 用）。
@@ -436,7 +436,7 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
   `applied_paths`、`child_only/parent_only/both_changed/auto_merged/conflict_paths`、
   `paths[]`（含三方 blob 坐标）。
 - **乐观锁**：`expected_parent_tree/expected_child_tree/expected_base_tree`；
-  `ws_info` 暴露 `effective_tree/ops_epoch/parent_tree`，P34 可直接回传。
+  `ws_info` 暴露 `effective_tree/ops_epoch/parent_tree`，Agent 平台可直接回传。
 - **工作卡范围**：`allowed_paths/allowed_prefixes`，越界 `path_not_allowed`。
 - **严格合并**：`merge_policy=strict` 时间一路径双方都改即冲突。
 - **采集可见性**：`ws_land_into` 使用 `SyncStrict`（禁用快路径）；不稳定文件重试后返回
@@ -479,13 +479,13 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 布局和 MCP 工具面。
 
 - **文档对齐当前实现**：README、MCP 契约、状态、并发、同步、验收、VERIFY 和
-  P36 部署说明全部按 v0.3.x 的实际行为重写；修正了错误的版本号、
+  VM 平台部署说明全部按 v0.3.x 的实际行为重写；修正了错误的版本号、
   `format_ver`、`/srv/repo` 路径、错误码和错误信封字段名。
 - **MCP 契约补全**：覆盖全部 61 个工具；错误字段统一为 `detail`（单数）；
   错误码表与代码实际返回的 45 个码对齐。
 - **`ws_land.expected_ws_ops_epoch` 真正生效**：此前参数被解析但未校验。
   现在传过期 epoch 会返回 `target_moved`；不传或传当前 epoch 不受影响。
-  这是本版唯一有意的行为收紧，符合 `docs/p34-integration.md` 的原有示例。
+  这是本版唯一有意的行为收紧，符合 `docs/agent-platform-integration.md` 的原有示例。
 - **文档防漂移**：新增测试校验 MCP 工具覆盖、错误码、错误字段、相对链接，
   以及 `Makefile` / `buildinfo` / README 的版本一致性。
 - **文档结构**：新增文档索引、当前状态、架构、CLI、配置、运维手册和贡献指南；
@@ -522,25 +522,25 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 - 0.4.4 可以打开 0.4.3/0.4.2 及更早的完整仓库；`repo_init(mode=repair)` 可修复
   历史半成品。
 - **最低兼容矩阵**：
-  - P36：需要能返回 409 + `mounted=true` + `initialized=false`，并且
+  - VM 平台：需要能返回 409 + `mounted=true` + `initialized=false`，并且
     初始化失败不 umount；`/ready` 消费 `refs_ok/refs_match/next_action`；
     `refs_mismatch` 时调用 `repo_init(mode=repair)`；P37 < 0.4.3 时返回
-    `p37_version_too_old`。旧 P36 仍可依赖 `p37 init --if-missing`，但
+    `p37_version_too_old`。旧 VM 平台仍可依赖 `p37 init --if-missing`，但
     “半成品 + 用户文件”需要显式 `--mode=import`。
-  - P34：需要改用 `repo_init`/`repo_health`，删除 `EnsureRepoDefaultLine`；
+  - Agent 平台：需要改用 `repo_init`/`repo_health`，删除 `EnsureRepoDefaultLine`；
     有用户文件时用 `mode=import`，v0 非空且内容不同时显式 `force=true`；
-    旧 P34 的 `line_create` 不带 `from` 无法创建根版本，不能修复半成品。
+    旧 Agent 平台的 `line_create` 不带 `from` 无法创建根版本，不能修复半成品。
   - P37：应用卷统一用 `repo_init` 或 `p37 init`；`repo_create` 不带 path
     仅用于 L2 scratch。
 
-## P36 集成要点
+## VM 平台集成要点
 
 - 应用卷 attach：guest mount 后调用 `p37 init <mountPath> --if-missing`
   （旧镜像）或 MCP `repo_init(mode=empty)`（新镜像）；成功后再
   `repo_register`。
 - 初始化失败：**保持卷挂载、不删除 `.p37`**，返回 409 + `mounted=true` +
   `initialized=false` + `next_action`；用户可点“重试初始化”。
-- P36 `/ready`：调用 `repo_health {path, with_quota:false}`，消费
+- VM 平台 `/ready`：调用 `repo_health {path, with_quota:false}`，消费
   `initialized/default_line_ready/refs_ok/refs_match/next_action`；
   `initialized=false` 不是 p37d down。0.4.4 起 default line 的 land/merge/reset/
   revert/sync 已同步 refs。
@@ -553,8 +553,8 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 - 在线 GC 未实现；`p37 gc` 在 daemon 运行时拒绝，需维护窗口。
 - 写时打包与 repack 压实未实现；只有离线 `p37 gc --prune --pack`。
 - 多 line push 当前每次生成全量 checkpoint；单 line 可增量。
-- `sync_restore` 不恢复 workspace/lease；P34 重新 `ws_open`。
-- 同一 `remote_prefix` 只支持单写者；P34 需串行化同一 app 的 push。
+- `sync_restore` 不恢复 workspace/lease；Agent 平台重新 `ws_open`。
+- 同一 `remote_prefix` 只支持单写者；Agent 平台需串行化同一 app 的 push。
 - `repo_unregister` 会等待 MCP 调用结束（v0.7.2 起）；如果调用长时间不返回，
   detach 会一直阻塞，需要上层先停止业务请求。
 - `p37d --check --repo` 有写探测，不适合在线高频探针；`--check --root` 只做

@@ -449,7 +449,7 @@ func cmdInit(args []string, out, errw io.Writer) int {
 		return fail(errw, fmt.Errorf("%w: %s", repo.ErrAlreadyInitialized, root))
 	}
 
-	// 允许旧 P36 镜像在“已有半成品”时自动修复；新代码统一走 repo.Ensure。
+	// 允许旧 VM 平台镜像在“已有半成品”时自动修复；新代码统一走 repo.Ensure。
 	cfg := config.Default()
 	if cfgPath := config.Path(root); template == "" {
 		if _, err := os.Stat(cfgPath); err == nil {

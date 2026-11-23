@@ -24,7 +24,7 @@
   "generation": 12,
   "lines": {
     "main": { "head": "...", "protected": true },
-    "p34/session/s1": { "head": "...", "protected": false }
+    "agent/session/s1": { "head": "...", "protected": false }
   }
 }
 ```
@@ -118,6 +118,6 @@ sync_restore(repo, remote_prefix, name?, remote?, force?)
 - `sync_push` 必须在删 VM 前成功；失败不得删 VM。
 - 建议 checkpoint 周期：每 N 个版本或 N 字节；远端保留最新 checkpoint + 后续
   delta。
-- 目标（P36 2 vCPU / 1 GiB / copy）：1 GiB restore < 30s，10 GiB < 120s；
-  以真机为准。达不到时优先改 P34 生命周期（VM 按会话保留 / 持久卷 /
+- 目标（VM 平台 2 vCPU / 1 GiB / copy）：1 GiB restore < 30s，10 GiB < 120s；
+  以真机为准。达不到时优先改 Agent 平台生命周期（VM 按会话保留 / 持久卷 /
   snapshot），而不是继续压 p37。

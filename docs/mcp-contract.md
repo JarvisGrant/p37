@@ -145,7 +145,7 @@ repo_export(repo, ref, dest_dir, async=false)
 - 不创建 workspace、不占 `ws_quota`、不出现在 `ws_list`，也不会被 fs watcher
   监听；导出目录里的构建产物不会进入 CAS/op/版本。
 - `dest_dir` 必须是绝对路径、位于仓库目录之外。配置了 `[repo] export_root` 时
-  还必须位于该目录之下（P36 模板默认 `/srv/repos/.p37/tmp/p34-deploy`）。
+  还必须位于该目录之下（VM 平台模板默认 `/srv/repos/.p37/tmp/p34-deploy`）。
 - `dest_dir` 必须不存在或为空；非空返回 `destination_not_empty`。
 - 文件按分块流式写出，内存占用上界为单个 CAS 分块；`files` 统计普通文件与
   symlink，不统计目录；`bytes` 是普通文件字节数加 symlink 目标字符串长度。
@@ -156,12 +156,12 @@ repo_export(repo, ref, dest_dir, async=false)
 
 ## 应用卷生命周期
 
-P36 把「每应用一个持久卷」挂到 guest 的 `/srv/repos/<app>`。p37d 看到的仍是
+VM 平台把「每应用一个持久卷」挂到 guest 的 `/srv/repos/<app>`。p37d 看到的仍是
 本地 ext4；不需要 NFS 专用模式。卷在运行中 attach/detach 时使用：
 
 ```text
 attach: 宿主热加 qcow2 → guest mount /srv/repos/<app>
-        → repo_init(mode=empty)（P36 旧镜像可继续用 p37 init --if-missing）
+        → repo_init(mode=empty)（VM 平台旧镜像可继续用 p37 init --if-missing）
         → repo_register 只在仓库已完整时成功
 detach: repo_quiesce → guest umount → repo_unregister → 宿主 remove-device
         （umount 失败时 repo_resume，registry 保持可见，不能留 tombstone）
@@ -171,9 +171,9 @@ detach: repo_quiesce → guest umount → repo_unregister → 宿主 remove-devi
 `repo_quiesce` 之后，除 `repo_resume` / `repo_unregister` / `repo_health`
 （只读快路径）外的业务工具返回 `repo_quiesced`，不会把 repo 重新打开或重挂。
 `repo_quiesce` / `repo_unregister` 的分工：前者只关闭 DB/overlay/锁，registry
-仍可见；后者才写 tombstone。P36 必须先 quiesce、再 umount、成功后才 unregister；
+仍可见；后者才写 tombstone。VM 平台必须先 quiesce、再 umount、成功后才 unregister；
 如果 umount 失败，调用 `repo_resume` 恢复，避免“VM 还在运行、repo 却
-repo_not_found”的中间态。旧版 P37 没有 quiesce 时，P36 可退回
+repo_not_found”的中间态。旧版 P37 没有 quiesce 时，VM 平台可退回
 `repo_unregister`，但必须在 umount 失败时用 `repo_register` 回滚。
 
 所有 registry 写操作都由运行中的 p37d 执行（Hub mutex + SQLite 事务）。CLI 在
@@ -182,16 +182,16 @@ daemon socket 可连接时通过 MCP 路由 init/register/unregister/quiesce/res
 ### repo_init
 
 在已挂载的持久目录上**原子**初始化一个完整仓库。这是应用卷的推荐入口；
-P36 attach、P34 首次打开和“重试初始化”都走它。
+VM 平台 attach、Agent 平台首次打开和“重试初始化”都走它。
 
 ```json
 {
-  "repo": "p34-59",
-  "path": "/srv/repos/p34-59",
+  "repo": "app-59",
+  "path": "/srv/repos/app-59",
   "default_line": "main",
   "mode": "empty",
   "force": false,
-  "idempotency_key": "p34-init-p34-59"
+  "idempotency_key": "app-init-app-59"
 }
 ```
 
@@ -199,7 +199,7 @@ P36 attach、P34 首次打开和“重试初始化”都走它。
 
 ```json
 {
-  "repo": {"name":"p34-59","path":"/srv/repos/p34-59","default_line":"main",
+  "repo": {"name":"app-59","path":"/srv/repos/app-59","default_line":"main",
            "mainline_head":"<v0>","version_count":1},
   "line": {"name":"main","head":"<v0>"},
   "version": {"id":"<v0>"},
@@ -433,11 +433,11 @@ fast-forward；`no_ff=true` 产生双亲 merge 版本。
 
 ```json
 {
-  "ws_id": "ws_...", "name": "p34s-sess-42", "state": "tombstone",
+  "ws_id": "ws_...", "name": "agent-sess-42", "state": "tombstone",
   "reason": "landed_and_dropped", "dropped_at": 1792831200000,
-  "line": "p34/session/s1", "line_head": "v...",
+  "line": "agent/session/s1", "line_head": "v...",
   "landed_version": "v...", "target_kind": "line",
-  "target_id": "p34/session/s1", "tombstone_expires_at": 1793436000000
+  "target_id": "agent/session/s1", "tombstone_expires_at": 1793436000000
 }
 ```
 
@@ -582,12 +582,12 @@ parent、当前子有效树为 child 做三方重放。只把 `child` 相对 bas
 ### 会话与子任务
 
 ```text
-line_create("p34/session/<id>", from="line:<app>")
-ws = ws_open(parent={kind:"line", id:"p34/session/<id>"})
+line_create("agent/session/<id>", from="line:<app>")
+ws = ws_open(parent={kind:"line", id:"agent/session/<id>"})
 ... 改文件 ...
 ws_sync(ws)
-p = land_preview(ws, target={kind:"line", id:"p34/session/<id>"})
-ws_land(ws, target={kind:"line", id:"p34/session/<id>"},
+p = land_preview(ws, target={kind:"line", id:"agent/session/<id>"})
+ws_land(ws, target={kind:"line", id:"agent/session/<id>"},
         expected_head=p.target_head, expected_ws_tree=p.ws_tree,
         drop_workspace=true, idempotency_key=...)
 ```
@@ -627,7 +627,7 @@ r = ws_land_into(child, parent_ws,
 
 ## 启动自检
 
-`repo_health` 是 P36 `/ready` 的廉价入口，也是 P34 的聚合只读视图：
+`repo_health` 是 VM 平台 `/ready` 的廉价入口，也是 Agent 平台的聚合只读视图：
 
 ```json
 repo_health { "repo": "my-app" }
@@ -639,7 +639,7 @@ repo_health { "repo": "my-app", "deep": true }
 
 - `repo`：已注册仓库的 id/name。`path` 优先于 `repo`，用于 attach 失败、
   registry 还没有行时直接探测挂载点。
-- `with_quota=false`：P36 `/ready` 用。不打开 repo、不跑 EnsureSchema/migrate，
+- `with_quota=false`：VM 平台 `/ready` 用。不打开 repo、不跑 EnsureSchema/migrate，
   只做 repo.json + 只读 SQLite + 短 TTL 缓存。
 - `deep=true`：doctor/attach 用，额外校验 head（或唯一 root v0）的对象树存在。
 
@@ -651,7 +651,7 @@ repo_health { "repo": "my-app", "deep": true }
   "initialized": false,
   "reason": "mainline_head_missing",
   "next_action": "repo_init_repair",
-  "path": "/srv/repos/p34-59",
+  "path": "/srv/repos/app-59",
   "default_line": "main",
   "default_line_ready": false,
   "mainline_head": "0000...",
@@ -703,7 +703,7 @@ repo_health { "repo": "my-app", "deep": true }
 
 `registered=false` 表示磁盘数据可能完整，但 registry 已经把该 repo 隐藏
 （`repo_unregister` tombstone）。此时 `line/version/ws` 工具都会返回
-`repo_not_found`，P36 `/ready` 不能只凭 `initialized=true` 判 ready；应先
+`repo_not_found`，VM 平台 `/ready` 不能只凭 `initialized=true` 判 ready；应先
 `repo_register`（可带 `rebind=true`）恢复。`registered` 字段从 0.4.12 起提供；
 旧版 p37 不返回该字段时调用方应按 `registered=true` 兼容。
 
@@ -728,7 +728,7 @@ repo_health { "repo": "my-app", "deep": true }
 
 `refs_ok=true` 表示 ref 存在且指向存在的 version；`refs_match=true` 表示 ref
 等于 DB head。0.4.5 起 default line 的 land/merge/reset/revert/sync 都会同步
-`refs/mainline`，P36 `/ready` 应要求两者都为 true。
+`refs/mainline`，VM 平台 `/ready` 应要求两者都为 true。
 
 refs 落后（指向仍然存在的旧 ancestor）时，`repo_health` 返回：
 
@@ -744,7 +744,7 @@ refs 落后（指向仍然存在的旧 ancestor）时，`repo_health` 返回：
 }
 ```
 
-`initialized` 仍为 true（数据和 line 完整，仓库可用），但 P36 `/ready` 不能放行；
+`initialized` 仍为 true（数据和 line 完整，仓库可用），但 VM 平台 `/ready` 不能放行；
 调用 `repo_init(mode=repair)` / `p37 init --if-missing` /
 `repo_register(init_if_missing=true)` 做 refs-only repair。有活跃 workspace/lease
 时返回 `repo_busy` + `next_action=stop_workspaces`。

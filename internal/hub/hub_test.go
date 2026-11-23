@@ -39,10 +39,10 @@ func TestMultiRepoLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ra.CreateLine("p34/session/1", "mainline", false); err != nil {
+	if _, err := ra.CreateLine("agent/session/1", "mainline", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ra.WS.Open(workspace.OpenRequest{Parent: "line:p34/session/1", TaskDesc: "t"}); err != nil {
+	if _, err := ra.WS.Open(workspace.OpenRequest{Parent: "line:agent/session/1", TaskDesc: "t"}); err != nil {
 		t.Fatal(err)
 	}
 

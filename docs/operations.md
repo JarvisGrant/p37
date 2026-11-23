@@ -1,6 +1,6 @@
 # 运维手册
 
-本文覆盖升级、迁移、备份、GC 维护窗口、监控和常见故障。P36 的 L1 /
+本文覆盖升级、迁移、备份、GC 维护窗口、监控和常见故障。VM 平台的 L1 /
 systemd / 应用卷细节见 [`../packaging/p36/README.md`](../packaging/p36/README.md)。
 
 ## 1. 升级
@@ -15,21 +15,21 @@ make p36-bootstrap
 # dist/p36-bootstrap/...
 ```
 
-发布 tar 根目录严格只有 `p37`、`p37d`、`manifest.json`。P36 的 p37/p37d
+发布 tar 根目录严格只有 `p37`、`p37d`、`manifest.json`。VM 平台的 p37/p37d
 内嵌在 L1 的 `/usr/local/lib/p37`；升级 p37 要重建或重新选择 L1。改 L1 胶水
 （`p37-run`/`p37-mcp`/`p37-mount`/unit/config/sysctl）也必须重建 L1。
 
 ### 1.2 步骤
 
 1. 从 GitHub Release 下载 tar 与 `.sha256`，校验 sha256。
-2. 在 P36 控制面构建/选择包含新 p37 的默认 L1。
+2. 在 VM 平台控制面构建/选择包含新 p37 的默认 L1。
 3. 对需要升级的实例重建/重新选择应用 L1；旧实例不会自动切换。
 4. 启动实例；`p37-run` 会校验 `manifest.version` 与 `p37d --version`。
 5. 打开仓库时自动处理格式迁移（见下节）。
 6. 跑一次 `p37d --check` 和 `p37 fsck`。
 
 > 不要试图在实例内替换 `/usr/local/lib/p37` 下的文件：L1 是只读层。
-> 旧 L1 回退可能读不了新格式仓库，P36 应把最低 p37 版本作为硬门槛。
+> 旧 L1 回退可能读不了新格式仓库，VM 平台应把最低 p37 版本作为硬门槛。
 
 ### 1.3 格式迁移（v1/v2 → v3）
 
@@ -39,7 +39,7 @@ make p36-bootstrap
   版本 id 不变，旧 `objects/<id>` 仍可读。
 - 历史 CAS 对象不重写；回滚只能恢复 `p37.db` 备份，且迁移后新对象不可见。
 - 一般不需要手工执行 `p37 migrate`；该命令只是显式打开并走同一路径。
-- 旧二进制遇到 v3 会明确报错；P36 不允许回退到不认识 v3 的旧 L1。
+- 旧二进制遇到 v3 会明确报错；VM 平台不允许回退到不认识 v3 的旧 L1。
 
 详情见 [`format-v3.md`](format-v3.md)。
 
@@ -93,7 +93,7 @@ systemctl start p37d
   再启动并跑 `fsck`。
 - 新 VM / 新 daemon：用 `sync_restore(repo, remote_prefix, remote?, force?)`
   从远端恢复；它恢复所有 line/protected/default_line，不恢复 workspace/lease，
-  之后由 P34 重新 `ws_open`。
+  之后由 Agent 平台重新 `ws_open`。
 - `sync_restore` 对非空仓库需要 `force=true`；旧数据移到 `.p37/trash/`。
 - 恢复后跑 `p37d --check --strict --repo <root>` 和 `p37 fsck <root>`。
 
@@ -133,7 +133,7 @@ auth_token = "<token>"
 
 ### 4.3 日志
 
-- `p37d` 日志写 stderr，P36 由 systemd journal 收集。
+- `p37d` 日志写 stderr，VM 平台由 systemd journal 收集。
 - `log_level` 默认 `info`。
 - `daemon.metrics_http=true` 但 `listen_http=false` 时启动会告警。
 
@@ -146,7 +146,7 @@ auth_token = "<token>"
 | `ws_broken` | 工作区目录缺失或未挂载 | `ws_reap` 回收，或 `ws_drop` 后重开 |
 | `repo_busy` | 活跃工作区/lease，或 per-repo flock 被占 | 先 `ws_list`/`lease_query` 确认；必要时 `force`，但会丢未落地数据 |
 | `repo_is_mountpoint` | 对应用卷挂载点调用 `repo_delete` | 走 `repo_unregister → guest umount → 宿主删卷` |
-| `repo_not_initialized` | path 下没有 p37 DB，或 DB 缺 head/line/refs | 读 `detail.next_action`：无用户文件用 `repo_init_repair`；有用户文件用 `repo_init(mode=import)`；旧 P36 可继续 `p37 init`（有用户文件时需显式 `--mode=import`） |
+| `repo_not_initialized` | path 下没有 p37 DB，或 DB 缺 head/line/refs | 读 `detail.next_action`：无用户文件用 `repo_init_repair`；有用户文件用 `repo_init(mode=import)`；旧 VM 平台可继续 `p37 init`（有用户文件时需显式 `--mode=import`） |
 | `repo_not_empty` | `repo_init(mode=empty)` 遇到用户文件，或 import 覆盖已有版本 | 用 `mode=import`，或显式 `repo_import(force=true)`；不要删用户文件 |
 | `repo_db_corrupt` | DB 可打开但结构不可恢复（多根/对象缺失/format 不匹配） | 先看 `detail.backup_path`；0.4.5 起不自动重建，需显式 `repo_init(mode=repair)` 或人工处理 |
 | `quota_exceeded` | `max_active`/`max_hidden`/`max_depth`/`max_fanout` 达到上限 | 读 `ws_quota`，先 `ws_drop`/`ws_reap`；不要把它当成模型空转 |
@@ -162,7 +162,7 @@ auth_token = "<token>"
 
 - copy 模式下每个工作区是一份完整树；磁盘 ≈ 仓库树 × 活跃工作区数。
 - overlay 模式共享只读基底，upper 只存改动；`base_cache_bytes` 控制基底缓存。
-- P36 应用卷模板：`max_active=8`、`max_hidden=32`、
+- VM 平台应用卷模板：`max_active=8`、`max_hidden=32`、
   `warn_disk_bytes=8 GiB`。按 `repo_disk_usage` / `ws_disk_usage` 复核。
 - `land_queue_max` 是排队上限，不是并发执行数；land 本身由 `landMu` 串行。
 - 多 line 仓库 push 当前是全量 checkpoint；大仓库建议按会话保留 VM，减少
@@ -170,7 +170,7 @@ auth_token = "<token>"
 
 ## 半初始化仓库修复（0.4.3+）
 
-新应用第一次 attach 时，P36 应调用 MCP `repo_init(mode=empty)`（或兼容旧镜像的
+新应用第一次 attach 时，VM 平台应调用 MCP `repo_init(mode=empty)`（或兼容旧镜像的
 `p37 init <mountPath>`）。0.4.4 的初始化是原子的：在 `<path>/.p37.tmp` 里建完整
 布局（p37.db + v0 + default line + refs）后 rename；失败回滚。
 
@@ -179,7 +179,7 @@ auth_token = "<token>"
 ```bash
 p37 --root /srv/repos repo health <name>        # initialized=false + next_action
 p37 --root /srv/repos repo init <name> <path> --mode=repair
-# 或旧入口（兼容 P36 旧镜像）
+# 或旧入口（兼容 VM 平台旧镜像）
 p37 init <path> --if-missing            # 无用户文件时自动 repair
 p37 init <path> --mode=import            # 有用户文件：先比较 v0，相同则 repair
 p37 init <path> --mode=import --force    # 显式替换非空 v0（危险）
@@ -214,7 +214,7 @@ p37 doctor <path>              # 输出 repo/line/version/refs 一致性
 
 ## 应用卷迁移：把旧路径 repo 收养到 /srv/repos/<name>
 
-`repo_create` 的历史行为会把 repo 建在 `/srv/repos/repo_<hash>`；P36 保留的
+`repo_create` 的历史行为会把 repo 建在 `/srv/repos/repo_<hash>`；VM 平台保留的
 应用卷路径是 `/srv/repos/<name>`。如果同名 repo 已注册在旧路径，
 `repo_register` 默认返回 `repo_path_mismatch`，不会静默继续用旧路径。
 
@@ -251,5 +251,5 @@ systemctl start p37d
 注意：
 - `p37 init` 是单 repo 初始化，不重建多仓库 registry；多仓库 registry 由
   `p37d --root` 启动或 `repo scan` 重建。
-- 不要同时保留 `/srv/repos/p34-50` 和 `/srv/repos/repo_<hash>` 两个有效
+- 不要同时保留 `/srv/repos/app-50` 和 `/srv/repos/repo_<hash>` 两个有效
   `.p37/repo.json`；先 unregister/移走旧目录，再启动。

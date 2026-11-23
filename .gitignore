@@ -29,7 +29,7 @@ coverage.txt
 # 本地临时目录
 /tmp/
 
-# P36 CI 验收产物
+# VM 平台 CI 验收产物
 /acceptance-output.log
 /acceptance.json
 /acceptance-ws.txt

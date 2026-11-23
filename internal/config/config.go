@@ -103,7 +103,7 @@ type JournalConfig struct {
 
 // EventsConfig 对应 [events]。
 //
-// UnixSocket 是 P37 写语义事件的本地 unix socket（P36 guest agent 监听）。
+// UnixSocket 是 P37 写语义事件的本地 unix socket（VM 平台 guest agent 监听）。
 // 为空时关闭事件上报；P37 只做 best-effort，不因为 socket 不在而阻塞业务。
 type EventsConfig struct {
 	UnixSocket string `toml:"unix_socket"`

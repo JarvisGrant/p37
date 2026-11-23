@@ -13,7 +13,7 @@ go test ./...
 
 > 状态：**v0.7.4 / format_ver=3**。多仓库、命名线、会话工作区、子工作区
 > `ws_land_into`、`line_merge`、历史读取、多 line 同步与恢复、应用卷热插拔
-> 生命周期均已接入。M1–M5 主体已在 P36 实例（Ubuntu 26.04 + ext4 +
+> 生命周期均已接入。M1–M5 主体已在 VM 平台实例（Ubuntu 26.04 + ext4 +
 > OverlayFS）上按 [`VERIFY.md`](VERIFY.md) 验证通过；当前状态和
 > 已知缺口见 [`docs/status.md`](docs/status.md)，历史实现记录见
 > [`PROGRESS.md`](PROGRESS.md)。
@@ -59,7 +59,7 @@ p37 import /srv/repo ./my-project
 p37d --repo /srv/repo          # daemon；MCP 客户端还要加 --stdio 或走 HTTP
 ```
 
-### 多仓库（P34 目标形态）
+### 多仓库（Agent 平台目标形态）
 
 ```bash
 mkdir -p /srv/repos
@@ -72,7 +72,7 @@ p37d --root /srv/repos
 
 MCP 工具表与调用契约见 [`docs/mcp-contract.md`](docs/mcp-contract.md)；
 概念和数据模型见 [`docs/architecture.md`](docs/architecture.md)；
-P34 接入示例见 [`docs/p34-integration.md`](docs/p34-integration.md)；
+Agent 平台接入示例见 [`docs/agent-platform-integration.md`](docs/agent-platform-integration.md)；
 验收清单见 [`docs/acceptance.md`](docs/acceptance.md)。
 
 agent 侧 MCP 配置（stdio 代理 → 同实例 daemon 的 unix socket）：
@@ -86,7 +86,7 @@ agent 侧 MCP 配置（stdio 代理 → 同实例 daemon 的 unix socket）：
 单仓库模式把 `--root /srv/repos` 换成 `--repo /srv/repo`。
 
 > `p37d --root` / `p37d --repo` 是 daemon，不是 stdio MCP server。MCP 客户端
-> 必须加 `--stdio`（P36 实例内用稳定包装 `/usr/local/bin/p37-mcp`）。stdio 代理
+> 必须加 `--stdio`（VM 平台实例内用稳定包装 `/usr/local/bin/p37-mcp`）。stdio 代理
 > 只连接已有 daemon，不取仓库锁，也不会自动启动第二个 daemon。
 
 HTTP 模式（**必须**配置 `auth_token`）：
@@ -98,9 +98,9 @@ HTTP 模式（**必须**配置 `auth_token`）：
     "headers": { "Authorization": "Bearer <auth_token>" } } } }
 ```
 
-## P36 microVM 部署
+## VM 平台部署
 
-P36 当前把 p37/p37d **内嵌在 L1**：L0 只读，L1 只读，新建实例只挂
+VM 平台当前把 p37/p37d **内嵌在 L1**：L0 只读，L1 只读，新建实例只挂
 `vda=root` 和 `vdb=P36AGENT`，不再有 `P37PAYLOAD`/`vdc` 投递盘。
 
 - `/usr/local/lib/p37/` 放 `p37`、`p37d`、`manifest.json`；`/usr/local/bin/p37-run`
@@ -108,11 +108,11 @@ P36 当前把 p37/p37d **内嵌在 L1**：L0 只读，L1 只读，新建实例�
 - `/srv/repos` 由 L1 预创建（`p36:p36`，`0750`），是 VM 根盘上的多仓库根；
   **根上的 repo 是临时的**，VM close 后消失。
 - 用户数据是**每个应用一个应用卷**，挂到 `/srv/repos/<repo>`；本地在
-  P36 的 `staging/appdata`，唯一持久副本归档到对象存储。P36 已不再把
+  VM 平台的 `staging/appdata`，唯一持久副本归档到对象存储。VM 平台已不再把
   “L2 用户数据池/租户 L2 配额”作为用户数据模型。
 
 p37d 以非 root 用户 `p36` 运行，systemd 只授予 `CAP_SYS_ADMIN`。Ubuntu 26.04
-非 root 下 OverlayFS 可能返回 `EPERM`（即使有 `CAP_SYS_ADMIN`），因此 P36
+非 root 下 OverlayFS 可能返回 `EPERM`（即使有 `CAP_SYS_ADMIN`），因此 VM 平台
 默认 `workspace.materialize = "auto"`：优先 overlay，失败自动回退 copy。
 copy 模式每个工作区是一份完整树，需要按**应用卷实际容量**调整
 `max_active` / `warn_disk_bytes`，不要假设固定的可写盘容量。
@@ -137,17 +137,17 @@ p37d --check --strict --root /srv/repos
 会做少量写探测；`--root` 模式的检查范围见 [`docs/operations.md`](docs/operations.md)。
 两者都适合 daemon 启动前检查，不建议作为在线高频探针。
 
-### P36 模板默认值
+### VM 平台模板默认值
 
 下表是 [`packaging/p36/config.toml`](packaging/p36/config.toml) 的值；代码里的
 `config.Default()` 在个别项上不同（例如 `warn_disk_bytes` 代码默认 12 GiB），
-以实际模板为准。应用卷容量由 P36 按租户配额与应用实际用量决定，不是固定值。
+以实际模板为准。应用卷容量由 VM 平台按租户配额与应用实际用量决定，不是固定值。
 
-| 配置 | P36 模板值 | 说明 |
+| 配置 | VM 平台模板值 | 说明 |
 |---|---:|---|
 | `workspace.materialize` | `auto` | 优先 overlay，失败回退 copy |
 | `workspace.base_cache_bytes` | 4 GiB | overlay 基底缓存上限（copy 不用） |
-| `workspace.warn_disk_bytes` | 8 GiB | P36 模板值；代码默认 12 GiB，按应用卷调整 |
+| `workspace.warn_disk_bytes` | 8 GiB | VM 平台模板值；代码默认 12 GiB，按应用卷调整 |
 | `workspace.max_active` | 8 | 主管 + 子会话至少 1+N；硬上限仍是 64 |
 | `workspace.max_hidden` | 32 | 隐藏 merge/preview 工作区上限，不占 max_active |
 | `repo.export_root` | `/srv/repos/.p37/tmp/p34-deploy` | 限制 `repo_export` 只能写到这里；部署导出用 |
@@ -155,7 +155,7 @@ p37d --check --strict --root /srv/repos
 完整配置字段和默认值见 [`docs/config.md`](docs/config.md)。
 
 `p37 doctor` 在 copy 模式下仍会把 `OverlayFS` 标成 `FAIL`（这是检查器的既有
-严格判定）；P36 的正式部署门禁应使用上面的 `p37d --check`。实际工作区模式看
+严格判定）；VM 平台的正式部署门禁应使用上面的 `p37d --check`。实际工作区模式看
 `ws_open`/`ws_list` 的 `materialize`，或验收脚本输出的
 `MATERIALIZE=copy|overlay`。
 
@@ -170,10 +170,10 @@ p37d --check --strict --root /srv/repos
 `materialize = "overlay"`，需要手工改成 `auto`（或 `copy`）；
 `p37 init --if-missing` 不会覆盖旧配置。
 
-发布与 P36 验收由 GitHub Actions 完成：
+发布与 VM 平台验收由 GitHub Actions 完成：
 
-- `.github/workflows/release.yml`：tag `v*` → build → P36 验收 → 发布 Release；
-- `.github/workflows/p36-acceptance.yml`：对已发布 Release 重新下载并跑 P36 验收；
+- `.github/workflows/release.yml`：tag `v*` → build → VM 平台验收 → 发布 Release；
+- `.github/workflows/p36-acceptance.yml`：对已发布 Release 重新下载并跑 VM 平台验收；
 - 可选 token 的配置位置见 [`.env.example`](.env.example)（不填则用
   Actions 自动的 `GITHUB_TOKEN`）。
 
@@ -188,7 +188,7 @@ p37 --root /srv/repos --repo <id|name> gc --prune --pack
 systemctl start p37d
 ```
 
-P36 的 p37 二进制在只读 L1 的 `/usr/local/lib/p37/`，不随仓库数据变化。
+VM 平台的 p37 二进制在只读 L1 的 `/usr/local/lib/p37/`，不随仓库数据变化。
 维护窗口内停掉 `p37d` 后，可直接使用 `/usr/local/lib/p37/p37` 执行 GC/fsck。
 升级 p37 需要重建或重新选择 L1，不能只替换单个二进制。
 
@@ -276,7 +276,7 @@ p37 --root /srv/repos --repo <name> sync push
   分叉时保持本地不动并报告 ahead/behind（不自动合并）。
 - 远端布局：`<prefix>/<remote_key>/packages/<id>/{manifest.json,meta.json,payload-*.pack}`
   与 `<prefix>/<remote_key>/refs/lines.json`。
-- 同一 `remote_prefix` 只支持单写者；P34 需串行化同一 app 的 push。
+- 同一 `remote_prefix` 只支持单写者；Agent 平台需串行化同一 app 的 push。
 
 完整格式与恢复语义见 [`docs/sync-contract.md`](docs/sync-contract.md)。
 
@@ -294,11 +294,11 @@ p37 --root /srv/repos --repo <name> sync push
 | [`docs/format-v3.md`](docs/format-v3.md) | 仓库格式 v3（typed object）与迁移 |
 | [`docs/sync-contract.md`](docs/sync-contract.md) | 远端同步与恢复契约 |
 | [`docs/concurrency.md`](docs/concurrency.md) | 实际并发模型与锁顺序 |
-| [`docs/p34-integration.md`](docs/p34-integration.md) | P34 接入示例 |
+| [`docs/agent-platform-integration.md`](docs/agent-platform-integration.md) | Agent 平台接入示例 |
 | [`docs/acceptance.md`](docs/acceptance.md) | 验收清单 |
 | [`VERIFY.md`](VERIFY.md) | 真机（Ubuntu + ext4）验证清单 |
 | [`PROGRESS.md`](PROGRESS.md) | 实现历史、缺陷复盘、设计修正记录 |
-| [`packaging/p36/`](packaging/p36/) | P36 L1 集成包、systemd unit、升级与集成字段 |
+| [`packaging/p36/`](packaging/p36/) | VM 平台 L1 集成包、systemd unit、升级与集成字段 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 开发、测试、发布与文档维护约定 |
 
 ## 安全

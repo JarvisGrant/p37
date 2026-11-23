@@ -279,7 +279,7 @@ func Ensure(root string, opt EnsureOptions) (*EnsureResult, error) {
 
 	hasDB := fileExists(filepath.Join(p37, "p37.db"))
 	if !hasDB {
-		// .p37 存在但没有 DB：只接受空目录（P36 旧镜像会预建 .p37）。
+		// .p37 存在但没有 DB：只接受空目录（VM 平台旧镜像会预建 .p37）。
 		if dirExists(p37) && !controlDirTrivial(p37) {
 			return nil, &DBCorruptError{Path: root, Reason: "control_dir_without_db"}
 		}

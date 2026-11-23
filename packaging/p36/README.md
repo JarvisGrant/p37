@@ -1,20 +1,20 @@
-# P36 L1 集成包
+# VM 平台 L1 集成包
 
-P36 当前把 **p37 / p37d 内嵌在 L1**：L0 只读，L1 只读，新建实例只挂
+VM 平台当前把 **p37 / p37d 内嵌在 L1**：L0 只读，L1 只读，新建实例只挂
 `vda=root`、`vdb=P36AGENT`，不再有 `P37PAYLOAD` / `vdc` 投递盘，也不再有
 “每实例可写的 L2 系统盘 + 应用卷”这套 p37 专用模型。
 
 - p37 二进制与 manifest 在 `/usr/local/lib/p37/`；
 - 稳定入口是 `/usr/local/bin/p37-run`、`/usr/local/bin/p37-mcp`；
 - `/srv/repos` 由 L1 预创建（`p36:p36`，`0750`），是 VM 根盘上的多仓库根；
-- 每个应用卷挂到 `/srv/repos/<repo>`，本地在 P36 的 `staging/appdata`，
+- 每个应用卷挂到 `/srv/repos/<repo>`，本地在 VM 平台的 `staging/appdata`，
   唯一持久副本归档到对象存储；
 - `/srv/repos` 根上的 repo 是临时的，VM close 后消失。
 
 ## 1. 文件落点
 
 ```text
-L0 只读 Ubuntu（P36 不改 L0）
+L0 只读 Ubuntu（VM 平台不改 L0）
 
 L1 应用层（只读）
 ├── /usr/local/lib/p37/p37
@@ -35,7 +35,7 @@ L1 应用层（只读）
 ```
 
 `p37d.service` 有 `ConditionPathIsDirectory=/srv/repos`，所以 `/srv/repos`
-必须在服务启动前存在；P36 的 L1 install/注入负责创建它。
+必须在服务启动前存在；VM 平台的 L1 install/注入负责创建它。
 
 默认 `materialize = "auto"`：先尝试 OverlayFS，失败自动回退 copy。
 Ubuntu 26.04 非 root 下 overlay 可能 `EPERM`（即使有 `CAP_SYS_ADMIN`），
@@ -43,9 +43,9 @@ Ubuntu 26.04 非 root 下 overlay 可能 `EPERM`（即使有 `CAP_SYS_ADMIN`）�
 copy 模式每个工作区是一份完整树，按应用卷实际容量调整
 `max_active` / `warn_disk_bytes`。
 
-## 2. P36 如何使用本目录
+## 2. VM 平台如何使用本目录
 
-P36 的 one-click L1 构建会从 **p37 tag 源码包**的 `packaging/p36/` 取这些文件：
+VM 平台的 one-click L1 构建会从 **p37 tag 源码包**的 `packaging/p36/` 取这些文件：
 
 - `p37-run`
 - `p37-mcp`
@@ -54,16 +54,16 @@ P36 的 one-click L1 构建会从 **p37 tag 源码包**的 `packaging/p36/` 取�
 - `90-p37.conf`
 - `tmpfiles-p37.conf`
 
-P36 自己再生成 `p37-mcp-wrapper`、`p37-mount-local`，并把 p37 Release 里的
+VM 平台自己再生成 `p37-mcp-wrapper`、`p37-mount-local`，并把 p37 Release 里的
 `p37`、`p37d`、`manifest.json` 一起装进 L1。因此：
 
-- 改本目录会被 P36 下一次 L1 构建使用，但**必须发新的 p37 tag**；
-- 不要在 p37 里改文件名；P36 的 `p37build` 按固定清单提取；
-- P36 的 `p37repo.MinVersion` 应随 p37 最低版本同步提升。
+- 改本目录会被 VM 平台下一次 L1 构建使用，但**必须发新的 p37 tag**；
+- 不要在 p37 里改文件名；VM 平台的 `p37build` 按固定清单提取；
+- VM 平台的 `p37repo.MinVersion` 应随 p37 最低版本同步提升。
 
 ## 3. 应用卷生命周期（热插拔）
 
-P36 把每个应用卷做成 qcow2，热加给运行中的 VM，guest 内挂到
+VM 平台把每个应用卷做成 qcow2，热加给运行中的 VM，guest 内挂到
 `/srv/repos/<app>`。卷内就是 p37 repo 根（`.p37/`、`workspaces/` 等）。
 
 ```text
@@ -80,7 +80,7 @@ detach:
 ```
 
 `repo_register` 只注册完整仓库；半成品用 `repo_init(mode=repair)` 或
-`repo_init(mode=import)`。初始化失败时 P36 保持卷挂载、不删 `.p37`。
+`repo_init(mode=import)`。初始化失败时 VM 平台保持卷挂载、不删 `.p37`。
 
 ## 4. 发布与升级
 
@@ -90,7 +90,7 @@ make release VERSION=<version>
 # dist/p37-linux-amd64-<version>.tar.gz.sha256
 
 make p36-bootstrap
-# dist/p36-bootstrap/...（手工排查用；正式构建由 P36 控制面完成）
+# dist/p36-bootstrap/...（手工排查用；正式构建由 VM 平台控制面完成）
 ```
 
 发布 tar 根目录严格只有：
@@ -101,10 +101,10 @@ p37d
 manifest.json
 ```
 
-P36 升级 p37 的方式是**重建/重新选择 L1**：
+VM 平台升级 p37 的方式是**重建/重新选择 L1**：
 
 1. 发布新的 p37 Release；
-2. 在 P36 控制面重建默认 L1（或选择包含新 p37 的 L1）；
+2. 在 VM 平台控制面重建默认 L1（或选择包含新 p37 的 L1）；
 3. 对需要升级的实例重建/重新选择应用 L1；
 4. 旧实例不会自动切换；不要回退到不认识新仓库格式的旧 L1。
 
@@ -134,14 +134,14 @@ socket 权限 `0600`，MCP 客户端必须与 p37d 同 uid（默认都是 `p36`�
 
 退出码：`0=通过`、`1=必需项失败`、`2=用法`。auto 模式下 OverlayFS 不可用
 只产生 `WARN`；`p37 doctor` 在 copy 模式下会显示 `[FAIL] OverlayFS`，这是
-检查器的既有严格判定，不要据此判定 P36 部署失败。
+检查器的既有严格判定，不要据此判定 VM 平台部署失败。
 
 ## 7. 已知限制
 
 - 只发布 `linux/amd64`；`linux/arm64` 只做编译校验。
 - 在线 GC 未实现；GC/fsck/migrate 等写命令应在维护窗口停 daemon 后执行。
-- 旧 L1 回退可能读不了新格式仓库；P36 必须把最低 p37 版本作为硬门槛。
-- `repo_unregister` 不等待已进入执行中的 MCP 调用；detach 前应由 P36 在上层
+- 旧 L1 回退可能读不了新格式仓库；VM 平台必须把最低 p37 版本作为硬门槛。
+- `repo_unregister` 不等待已进入执行中的 MCP 调用；detach 前应由 VM 平台在上层
   确认应用空闲。
 - 应用卷删除只能走 `repo_unregister → guest umount → 宿主删卷`；不要对挂载点
   调用 `repo_delete`。

@@ -291,7 +291,7 @@ func TestP36TwoAgents(t *testing.T) {
 	t.Logf("acceptance: MATERIALIZE=%s keeper=%s agents=%v versions=%d", keeperMaterialize, keeperID, results, len(raw.Data))
 }
 
-// TestP36LegacyDefault 验证旧 /srv/repo 被原地注册为 default。
+// 验证旧 /srv/repo 被原地注册为 default。
 func TestP36LegacyDefault(t *testing.T) {
 	if os.Getenv("P37_ROOT") == "" {
 		t.Skip("P37_ROOT 未设置")
@@ -328,7 +328,7 @@ func TestP36LegacyDefault(t *testing.T) {
 	t.Fatalf("repo_list 没有 default: %s", txt)
 }
 
-// TestP36MultiRepoSession 在 P37_ROOT 模式下验证多仓库 + 会话 line 闭环。
+// 在 P37_ROOT 模式下验证多仓库 + 会话 line 闭环。
 // 运行前设置 P37_ROOT=/srv/repos（或测试用临时 root）。
 func TestP36MultiRepoSession(t *testing.T) {
 	if os.Getenv("P37_ROOT") == "" {
@@ -342,12 +342,12 @@ func TestP36MultiRepoSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := callTool(ctx, cs, "line_create", map[string]any{
-		"repo": name, "name": "p34/session/accept", "from": "mainline"}); err != nil {
+		"repo": name, "name": "agent/session/accept", "from": "mainline"}); err != nil {
 		t.Fatal(err)
 	}
 	env, err := callTool(ctx, cs, "ws_open", map[string]any{
 		"repo": name, "task": "accept",
-		"parent": map[string]any{"kind": "line", "id": "p34/session/accept"},
+		"parent": map[string]any{"kind": "line", "id": "agent/session/accept"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -371,12 +371,12 @@ func TestP36MultiRepoSession(t *testing.T) {
 	}
 	if _, err := callTool(ctx, cs, "ws_land", map[string]any{
 		"repo": name, "ws_id": wsID,
-		"target": map[string]any{"kind": "line", "id": "p34/session/accept"},
+		"target": map[string]any{"kind": "line", "id": "agent/session/accept"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	env, err = callTool(ctx, cs, "version_tree", map[string]any{
-		"repo": name, "ref": "line:p34/session/accept", "recursive": true,
+		"repo": name, "ref": "line:agent/session/accept", "recursive": true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -388,7 +388,7 @@ func TestP36MultiRepoSession(t *testing.T) {
 
 	// path 指向目录时只返回该目录子树（回归：曾经返回父目录同级项）。
 	env, err = callTool(ctx, cs, "version_tree", map[string]any{
-		"repo": name, "ref": "line:p34/session/accept", "path": "sub", "recursive": true,
+		"repo": name, "ref": "line:agent/session/accept", "path": "sub", "recursive": true,
 	})
 	if err != nil {
 		t.Fatal(err)

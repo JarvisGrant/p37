@@ -49,7 +49,7 @@ type Report struct {
 
 // Options 控制检查严格度。
 type Options struct {
-	// Strict 为真时把 P36 的部署硬要求（ext4）视为必需项。
+	// Strict 为真时把 VM 平台的部署硬要求（ext4）视为必需项。
 	Strict bool
 }
 
@@ -129,7 +129,7 @@ func Check(root string, opt Options) Report {
 		add("同一文件系统", StatusSkip, "仓库目录不存在", true)
 	}
 
-	// 文件系统类型（P36 的目标是 ext4）。
+	// 文件系统类型（VM 平台的目标是 ext4）。
 	if repoOK {
 		fs, err := fsType(p37)
 		switch {
@@ -145,10 +145,10 @@ func Check(root string, opt Options) Report {
 			add("文件系统类型", StatusOK, "ext4", opt.Strict)
 		case opt.Strict:
 			add("文件系统类型", StatusFail,
-				fmt.Sprintf("%s（P36 要求 ext4）", fs), true)
+				fmt.Sprintf("%s（VM 平台要求 ext4）", fs), true)
 		default:
 			add("文件系统类型", StatusWarn,
-				fmt.Sprintf("%s（P36 部署要求 ext4；开发环境可用非 strict）", fs),
+				fmt.Sprintf("%s（VM 平台部署要求 ext4；开发环境可用非 strict）", fs),
 				false)
 		}
 	} else {

@@ -57,7 +57,7 @@ type Options struct {
 	// ForceHash 为真时禁用 (mtime_ns, size, inode) 快路径，所有文件都读内容。
 	//
 	// 用于 mtime 粒度粗于纳秒的文件系统（部分 CI 的 /tmp、容器 overlay），
-	// 或者调试。生产 P36 ext4 不需要开；由环境变量 P37_FORCE_HASH=1 接线。
+	// 或者调试。生产 VM 平台 ext4 不需要开；由环境变量 P37_FORCE_HASH=1 接线。
 	ForceHash bool
 }
 
