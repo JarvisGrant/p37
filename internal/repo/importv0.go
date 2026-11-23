@@ -70,6 +70,12 @@ func nonDefaultLines(db *meta.DB, def string) ([]string, error) {
 //   - 有历史版本/非默认 line      -> repo_history_not_empty（force 也不行）
 //   - 有活跃工作区/租约           -> repo_busy（force 也不行）
 func (r *Repo) ImportV0(srcDir string, force bool) (*ImportV0Result, error) {
+	// 导入同样会写对象并推进 head：与 land/GC 共用 landMu，再取 objMu 的
+	// 写锁，避免 GC 在“对象已写、v0 尚未提交”时把它们回收。
+	r.landMu.Lock()
+	defer r.landMu.Unlock()
+	r.objMu.Lock()
+	defer r.objMu.Unlock()
 	if srcDir == "" {
 		srcDir = r.Root
 	}

@@ -1,4 +1,4 @@
-# 当前状态（v0.7.3）
+# 当前状态（v0.7.4）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.7.3` |
+| 发布版本 | `v0.7.4` |
 | 仓库格式 | `format_ver = 3` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -15,6 +15,11 @@
 
 `format_ver=3` 在 v2 基础上把对象地址改为 `(type,id)` 复合 key，版本 id 不变；
 v1/v2 仓库首次被新二进制打开时会自动迁移并备份，见 [`format-v3.md`](format-v3.md)。
+
+**v0.7.4 重点（`format_ver=3`）**：把 `sync push/pull/fetch` 也纳入 GC 的
+互斥范围（锁序 `syncMu → landMu → objMu`），并让 `repo_import` 与
+`ws_sync/ws_diff` 一样持对象锁；至此 GC 不会在「对象已写、ref/op 未提交」
+的窗口里删除任何写入路径刚产生的对象。
 
 **v0.7.3 重点（`format_ver=3`）**：并发与崩溃恢复收尾。外部 `ws_sync`/
 `ws_diff` 与 GC 通过读写锁互斥，避免 GC 删除采集刚写入、尚未被 op 引用的

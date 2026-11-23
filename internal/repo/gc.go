@@ -73,10 +73,16 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	// GC 会删对象，必须与 land **互斥**（而不只是限流）：land 正在拼树时把
 	// 它要读的对象扫掉就完了。整条 land 流水线共用一把 landMu（§7.4），
 	// 这里也拿它。
+	// 锁序（全仓统一）：syncMu -> landMu -> objMu。
+	//   - syncMu 挡住 sync push/pull/fetch：它们会写对象并推进 ref/head；
+	//   - landMu 挡住 land/pack/import；
+	//   - objMu 挡住外部 ws_sync/ws_diff（采集先写对象、后写 op，GC 若只看
+	//     索引会在两步之间把它们判成不可达）。
+	// land 内部的采集已被 landMu 挡住，因此不再取 objMu。
+	r.syncMu.Lock()
+	defer r.syncMu.Unlock()
 	r.landMu.Lock()
 	defer r.landMu.Unlock()
-	// 与外部 ws_sync/ws_diff 互斥：采集先写对象、后写 op，GC 若只看索引
-	// 会在两步之间把它们判成不可达。land 内部采集已被 landMu 挡住。
 	r.objMu.Lock()
 	defer r.objMu.Unlock()
 

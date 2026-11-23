@@ -40,6 +40,13 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.7.4 GC 覆盖全部对象写入路径
+
+- GC 统一按 `syncMu → landMu → objMu` 取锁：`sync push/pull/fetch`、land、
+  pack/import、外部 ws_sync/ws_diff 都与 GC 互斥，覆盖“对象已写、ref/op
+  尚未提交”的所有窗口。
+- `repo_import` 也持 `landMu + objMu`，不再与 GC 并发写对象。
+
 ## v0.7.3 并发、崩溃恢复与 drain 超时
 
 - `Repo.objMu`：外部 `ws_sync`/`ws_diff` 持读锁，GC 在 `landMu` 之后持写锁，
