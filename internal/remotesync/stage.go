@@ -34,6 +34,9 @@ func ImportDir(r *repo.Repo, dir string) (*Manifest, int, error) {
 	if err := pm.apply(r); err != nil {
 		return nil, n, err
 	}
+	if err := r.Store.Flush(); err != nil {
+		return nil, n, err
+	}
 	return m, n, nil
 }
 

@@ -19,6 +19,24 @@
 }
 ```
 
+## 本版重点（v0.7.2）
+
+v0.7.1 的收尾补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0，
+不需要重建 L1。
+
+- `object_index` 批量登记：capture 一次写入几千个对象时不再逐条开 SQLite
+  写事务；`FlushIndex` 在写 `stat_cache` 前落库，避免崩溃后缓存指针指向
+  未登记对象。
+- `stat_cache` 清理：整个目录/文件被删除后，旧缓存行不再永久残留；GC 前先
+  flush 对象索引，保证对象清单与活跃 op 引用一致。
+- `ws_disk_usage` 批量统计：复用一份工作区元数据，只遍历目录，不再逐台
+  读取 ops/冲突/租约。
+- Hub 调用引用计数与 drain：`repo_quiesce` / `repo_unregister` /
+  `repo_delete` 会拦住新调用并等待正在执行的 MCP 调用结束，避免中途关闭
+  SQLite / 卸载 overlay；draining 期间新调用返回可重试的 `repo_busy`。
+- 冲突解决 `both` / `custom` 先按 Before/Remove/After 锚点定位；前序 hunk
+  造成整体位移时不会插到错误位置。
+
 ## 本版重点（v0.7.1）
 
 v0.7.0 的小补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0。
@@ -514,8 +532,8 @@ v0.6.0 的小补丁，**`format_ver` 仍为 2**，P36/P34 最低版本仍为 0.6
 - 多 line push 当前每次生成全量 checkpoint；单 line 可增量。
 - `sync_restore` 不恢复 workspace/lease；P34 重新 `ws_open`。
 - 同一 `remote_prefix` 只支持单写者；P34 需串行化同一 app 的 push。
-- `repo_unregister` 不等待已经进入执行中的 MCP 调用结束；detach 前由上层确认
-  应用空闲。
+- `repo_unregister` 会等待 MCP 调用结束（v0.7.2 起）；如果调用长时间不返回，
+  detach 会一直阻塞，需要上层先停止业务请求。
 - `p37d --check --repo` 有写探测，不适合在线高频探针；`--check --root` 只做
   registry/DB/line 检查，也不应高频轮询。
 - copy 模式下 `p37 doctor` 仍会把 OverlayFS 标成 `FAIL`；完整部署门禁用

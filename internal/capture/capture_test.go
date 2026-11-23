@@ -303,3 +303,32 @@ func TestIgnoreNewIgnore(t *testing.T) {
 		t.Fatal("builtin=false 时不应有内置规则")
 	}
 }
+
+// TestBuildPrunesStatCacheForDeletedPaths 断言整个目录/文件被删掉后，
+// stat_cache 里的旧行会被清理，而不是无界保留。
+func TestBuildPrunesStatCacheForDeletedPaths(t *testing.T) {
+	e := newEnv(t)
+	e.write("keep.txt", "keep\n")
+	e.write("gone.txt", "gone\n")
+	e.write("gone-dir/x.txt", "x\n")
+	e.write("gone-dir/deep/y.txt", "y\n")
+	e.build()
+	for _, p := range []string{"keep.txt", "gone.txt", "gone-dir/x.txt", "gone-dir/deep/y.txt"} {
+		if _, ok := e.stat.Get("ws_1", p); !ok {
+			t.Fatalf("前置条件：%s 应有缓存", p)
+		}
+	}
+
+	e.remove("gone.txt")
+	e.remove("gone-dir")
+	e.build()
+
+	if _, ok := e.stat.Get("ws_1", "keep.txt"); !ok {
+		t.Fatal("keep.txt 的缓存不应被删")
+	}
+	for _, p := range []string{"gone.txt", "gone-dir/x.txt", "gone-dir/deep/y.txt"} {
+		if _, ok := e.stat.Get("ws_1", p); ok {
+			t.Fatalf("%s 已被删除，缓存行应清理", p)
+		}
+	}
+}

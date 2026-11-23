@@ -107,7 +107,7 @@ func PlaceAll(hunks []Hunk, target [][]byte, maxMatches int) (out [][]byte, fail
 	cur := target
 	for i := range hunks {
 		h := &hunks[i]
-		next, ok := Place(h, cur, h.StartHint, maxMatches)
+		next, ok := Place(h, cur, h.StartHint-len(h.Before), maxMatches)
 		if !ok {
 			return cur, i
 		}

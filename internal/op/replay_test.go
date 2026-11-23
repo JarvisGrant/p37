@@ -409,3 +409,26 @@ func TestModifyReplayIsIdempotentWhenTargetAlreadyNew(t *testing.T) {
 		t.Fatalf("目标已是本侧内容时不应冲突: %+v", res.Conflicts)
 	}
 }
+
+// TestApplyResolutionAnchorShift 回归：both/custom 不能直接按 StartHint 落位。
+// 目标内容在前面的 hunk 处理后整体位移时，必须按锚点找到冲突行。
+func TestApplyResolutionAnchorShift(t *testing.T) {
+	// StartHint=1 是记录冲突时的行号；目标现在前面多了两行。
+	placed := lines("z0", "z1", "a", "B", "c")
+	h := &Hunk{
+		Before: lines("a"), Remove: lines("B"), After: lines("c"),
+		StartHint: 1, Insert: lines("U"),
+	}
+
+	got := applyResolution(Resolution{Kind: ResolveBoth}, placed, h)
+	want := lines("z0", "z1", "a", "U", "B", "c")
+	if !eqLines(got, want) {
+		t.Fatalf("both = %v，期望 %v", strs(got), strs(want))
+	}
+
+	got = applyResolution(Resolution{Kind: ResolveCustom, Content: lines("CU")}, placed, h)
+	want = lines("z0", "z1", "a", "CU", "c")
+	if !eqLines(got, want) {
+		t.Fatalf("custom = %v，期望 %v", strs(got), strs(want))
+	}
+}

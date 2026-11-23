@@ -48,6 +48,7 @@ type ObjectIndex interface {
 	Type(id hash.ID) (uint8, error)
 	Types(id hash.ID) ([]uint8, error)
 	Add(id hash.ID, typ uint8, size, rawSize int64) error
+	AddMany(entries []IndexEntry) error
 	Remove(id hash.ID) error
 	RemoveType(id hash.ID, typ uint8) error
 	Iterate(fn func(id hash.ID, typ uint8, size, rawSize int64) error) error
@@ -61,6 +62,13 @@ type ObjectIndex interface {
 type ObjectKey struct {
 	ID   hash.ID
 	Type uint8
+}
+
+// IndexEntry 是批量登记一条对象索引所需的字段。
+type IndexEntry struct {
+	Key     ObjectKey
+	Size    int64
+	RawSize int64
 }
 
 // Store 是带类型的对象存储，在 BlobStore 之上实现：
@@ -80,6 +88,11 @@ type Store struct {
 	verify VerifyMode
 	// reads 用于 sample 模式下的抽样计数。
 	reads atomic.Uint64
+
+	// 对象索引批量登记：capture 一次写几千个对象，逐条 Add 会产生同样
+	// 数量的 SQLite 写事务。Flush 时一次 AddMany。
+	pendingMu sync.Mutex
+	pending   map[ObjectKey]IndexEntry
 }
 
 // VerifyMode 是读时校验策略。
@@ -137,16 +150,62 @@ func (s *Store) shouldVerify(rawLen int) bool {
 
 // NewStore 组合 BlobStore 与 ObjectIndex。
 func NewStore(bs BlobStore, idx ObjectIndex) *Store {
-	return &Store{bs: bs, idx: idx}
+	return &Store{bs: bs, idx: idx, pending: map[ObjectKey]IndexEntry{}}
 }
 
 // BlobStore 返回底层后端。
 func (s *Store) BlobStore() BlobStore { return s.bs }
 
-// Flush 确保此前写入的全部对象已持久化。
+// FlushIndex 把本批次累积的对象索引登记落库，但不 fsync 对象字节。
+//
+// capture.Build 在写 stat 缓存之前调用：stat_cache 的 ObjectID 会被后续采集
+// 直接信任，如果索引还在内存里而进程崩溃，下一次采集就会拿着未登记的 id
+// 去读对象，得到「key 不存在」。字节持久化仍由 Flush 负责。
+func (s *Store) FlushIndex() error {
+	s.pendingMu.Lock()
+	if len(s.pending) == 0 {
+		s.pendingMu.Unlock()
+		return nil
+	}
+	entries := make([]IndexEntry, 0, len(s.pending))
+	for _, e := range s.pending {
+		entries = append(entries, e)
+	}
+	s.pending = map[ObjectKey]IndexEntry{}
+	s.pendingMu.Unlock()
+	if err := s.idx.AddMany(entries); err != nil {
+		// 登记失败时把批次放回去，避免这些对象在内存里彻底丢失；
+		// 下一次 Flush 重试，调用方也会收到错误。
+		s.pendingMu.Lock()
+		for _, e := range entries {
+			if _, ok := s.pending[e.Key]; !ok {
+				s.pending[e.Key] = e
+			}
+		}
+		s.pendingMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// Flush 确保此前写入的全部对象与索引已持久化。
 //
 // 调用方**必须**在推进主干 head 之前调用它（§7.3）。
-func (s *Store) Flush() error { return s.bs.Flush() }
+func (s *Store) Flush() error {
+	if err := s.FlushIndex(); err != nil {
+		return err
+	}
+	return s.bs.Flush()
+}
+
+func (s *Store) addPending(id hash.ID, typ uint8, size, rawSize int64) error {
+	s.pendingMu.Lock()
+	s.pending[ObjectKey{ID: id, Type: typ}] = IndexEntry{
+		Key: ObjectKey{ID: id, Type: typ}, Size: size, RawSize: rawSize,
+	}
+	s.pendingMu.Unlock()
+	return nil
+}
 
 // keyFor 返回 v2 legacy 对象的 BlobStore key。
 func keyFor(id hash.ID) string { return "objects/" + id.String() }
@@ -205,7 +264,7 @@ func (s *Store) put(typ uint8, raw []byte) (hash.ID, error) {
 	// 避免升级后重复写一份 typed 副本。
 	if oldType, ok := s.legacyType(id); ok && oldType == typ {
 		stored := encodeStored(typ, raw)
-		if err := s.idx.Add(id, typ, int64(len(stored)), int64(len(raw))); err != nil {
+		if err := s.addPending(id, typ, int64(len(stored)), int64(len(raw))); err != nil {
 			return hash.ID{}, err
 		}
 		return id, nil
@@ -216,7 +275,7 @@ func (s *Store) put(typ uint8, raw []byte) (hash.ID, error) {
 		return hash.ID{}, err
 	}
 	// 索引在对象落盘之后登记；即使此处崩溃，索引也可由扫描重建。
-	if err := s.idx.Add(id, typ, int64(len(stored)), int64(len(raw))); err != nil {
+	if err := s.addPending(id, typ, int64(len(stored)), int64(len(raw))); err != nil {
 		return hash.ID{}, err
 	}
 	return id, nil
@@ -282,6 +341,12 @@ func (s *Store) Has(id hash.ID) (bool, error) {
 
 // HasType 报告指定类型的对象是否已在本地。
 func (s *Store) HasType(id hash.ID, typ uint8) (bool, error) {
+	s.pendingMu.Lock()
+	_, pending := s.pending[ObjectKey{ID: id, Type: typ}]
+	s.pendingMu.Unlock()
+	if pending {
+		return true, nil
+	}
 	if ok, err := s.idx.HasType(id, typ); err != nil || ok {
 		return ok, err
 	}
@@ -294,10 +359,34 @@ func (s *Store) HasType(id hash.ID, typ uint8) (bool, error) {
 	return false, nil
 }
 
+// typesOf 合并「已 flush 的索引」与「本批次尚未 flush 的 pending 索引」。
+func (s *Store) typesOf(id hash.ID) ([]uint8, error) {
+	seen := map[uint8]bool{}
+	s.pendingMu.Lock()
+	for k := range s.pending {
+		if k.ID == id {
+			seen[k.Type] = true
+		}
+	}
+	s.pendingMu.Unlock()
+	ts, err := s.idx.Types(id)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range ts {
+		seen[t] = true
+	}
+	out := make([]uint8, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	return out, nil
+}
+
 // Get 读取对象原文与类型。对象缺失或校验失败返回 ErrNotExist / ErrCorrupt。
 // 同一 id 有多个类型时返回 ErrAmbiguousType；调用方应使用 GetTyped。
 func (s *Store) Get(id hash.ID) (uint8, []byte, error) {
-	types, err := s.idx.Types(id)
+	types, err := s.typesOf(id)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -579,7 +668,7 @@ type ObjectInfo struct {
 // Head 只读取对象的**类型与存储长度**，不解压、不校验内容哈希。
 // 同一 id 有多个类型时返回 ErrAmbiguousType；GC 应使用 ListObjects。
 func (s *Store) Head(id hash.ID) (uint8, int64, error) {
-	types, err := s.idx.Types(id)
+	types, err := s.typesOf(id)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -650,6 +739,9 @@ func (s *Store) ListObjects() ([]ObjectInfo, error) {
 
 // DeleteObjectTyped 删除指定类型并同步从索引中摘除。
 func (s *Store) DeleteObjectTyped(typ uint8, id hash.ID) error {
+	s.pendingMu.Lock()
+	delete(s.pending, ObjectKey{ID: id, Type: typ})
+	s.pendingMu.Unlock()
 	if err := s.idx.RemoveType(id, typ); err != nil {
 		return err
 	}
@@ -668,6 +760,13 @@ func (s *Store) DeleteObjectTyped(typ uint8, id hash.ID) error {
 
 // DeleteObject 删除一个对象的全部类型并同步从索引中摘除。
 func (s *Store) DeleteObject(id hash.ID) error {
+	s.pendingMu.Lock()
+	for k := range s.pending {
+		if k.ID == id {
+			delete(s.pending, k)
+		}
+	}
+	s.pendingMu.Unlock()
 	types, _ := s.idx.Types(id)
 	if err := s.idx.Remove(id); err != nil {
 		return err
@@ -685,7 +784,7 @@ func (s *Store) DeleteObject(id hash.ID) error {
 
 // GetStored 返回对象的**存储字节**（0x01||type||zstd(raw)），不解压。
 func (s *Store) GetStored(id hash.ID) ([]byte, error) {
-	types, _ := s.idx.Types(id)
+	types, _ := s.typesOf(id)
 	if len(types) == 1 {
 		return s.GetStoredTyped(types[0], id)
 	}
@@ -738,12 +837,12 @@ func (s *Store) PutStored(id hash.ID, stored []byte) error {
 		return nil
 	}
 	if old, ok := s.legacyType(id); ok && old == typ {
-		return s.idx.Add(id, typ, int64(len(stored)), int64(len(raw)))
+		return s.addPending(id, typ, int64(len(stored)), int64(len(raw)))
 	}
 	if err := s.bs.PutIfAbsent(typedKeyFor(typ, id), bytes.NewReader(stored), int64(len(stored))); err != nil && !errors.Is(err, ErrExists) {
 		return err
 	}
-	return s.idx.Add(id, typ, int64(len(stored)), int64(len(raw)))
+	return s.addPending(id, typ, int64(len(stored)), int64(len(raw)))
 }
 
 // PackLoose 把松散的小对象合并进 pack（§9 P2）。仅在带打包装饰层时可用。

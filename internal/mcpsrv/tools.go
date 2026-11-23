@@ -40,7 +40,7 @@ func (s *Server) registerRead() {
 		"返回仓库与（可选）工作区的当前状态，含租约列表。",
 		`{"type":"object","properties":{"ws":{"type":"string","description":"工作区 id"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -96,7 +96,7 @@ func (s *Server) registerRead() {
 		"按 ref（line/mainline/version）返回版本列表；默认 default line。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500},"before_ts":{"type":"integer"},"before_id":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -133,7 +133,7 @@ func (s *Server) registerRead() {
 		"返回单个版本的详情（含相对父版本的文件级统计）。",
 		`{"type":"object","properties":{"version_id":{"type":"string"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -154,7 +154,7 @@ func (s *Server) registerRead() {
 		"返回两个版本之间的差异；B 省略时相对指定 parent_index。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"},"parent_index":{"type":"integer","minimum":0},"path":{"type":"string"},"stat_only":{"type":"boolean"}},"required":["repo","a"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -197,7 +197,7 @@ func (s *Server) registerRead() {
 		"查询若干路径上的租约（改动前自查，§4.5）。",
 		`{"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -229,7 +229,7 @@ func (s *Server) registerRead() {
 		"行/hunk 级归因：返回每一行由哪个版本、哪个 agent、哪次任务引入（§12.2）。",
 		`{"type":"object","properties":{"path":{"type":"string"},"range":{"type":"array","items":{"type":"integer"}},"version_id":{"type":"string"},"granularity":{"type":"string","enum":["line","hunk"]}},"required":["path"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -311,7 +311,7 @@ func (s *Server) registerWorkspace() {
 		   "idempotency_key":{"type":"string"}
 		 },"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -369,7 +369,7 @@ func (s *Server) registerWorkspace() {
 		   "idempotency_key":{"type":"string"}
 		 },"required":["repo","name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -423,7 +423,7 @@ func (s *Server) registerWorkspace() {
 		   "dropped_within":{"type":"string"}
 		 },"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -508,7 +508,7 @@ func (s *Server) registerWorkspace() {
 		"返回单个工作区的状态。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -537,7 +537,7 @@ func (s *Server) registerWorkspace() {
 		"登记或解除路径租约（建议性，§4.5）。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"add":{"type":"array","items":{"type":"string"}},"release":{"type":"array","items":{"type":"string"}},"mode":{"type":"string","enum":["shared","exclusive"]}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -583,7 +583,7 @@ func (s *Server) registerWorkspace() {
 		"强制采集：把磁盘变更结算为 op（§5.2）。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -632,7 +632,7 @@ func (s *Server) registerWorkspace() {
 		"放弃工作区；cascade 决定是否连子工作区一起处理（§11.4）。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"cascade":{"type":"boolean"},"keep_dir":{"type":"boolean"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -688,7 +688,7 @@ func (s *Server) registerWorkspace() {
 		"返回工作区配额用量（max_active / 隐藏 / 栈深 / fanout），供调用方做准入限流。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -699,7 +699,7 @@ func (s *Server) registerWorkspace() {
 		"把工作区对齐到父/line/version 的最新基准（§4.9.2）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"to":{"type":["object","string"]}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -742,7 +742,7 @@ func (s *Server) registerConflict() {
 		"列出某工作区的冲突。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"include_resolved":{"type":"boolean"}},"required":["ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -760,7 +760,7 @@ func (s *Server) registerConflict() {
 		"按 key 返回冲突详情（含两侧任务描述与候选解）。",
 		`{"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -785,7 +785,7 @@ func (s *Server) registerConflict() {
 		"记录一条冲突解决；同 key 重复写入视为成功（§6.4）。",
 		`{"type":"object","properties":{"key":{"type":"string"},"resolution":{"type":"object","properties":{"kind":{"type":"string","enum":["take_lower","take_upper","both","custom"]},"content":{"type":"array","items":{"type":"string"}}},"required":["kind"]}},"required":["key","resolution"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -828,7 +828,7 @@ func (s *Server) registerConflict() {
 		"按策略一次性解决某工作区的全部未决冲突。",
 		`{"type":"object","properties":{"ws_id":{"type":"string"},"policy":{"type":"string","enum":["prefer_lower","prefer_upper","abort"]}},"required":["ws_id","policy"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -876,7 +876,7 @@ func (s *Server) registerLand() {
 		"预演 land：target.kind=line|workspace；只读，冲突会持久化供 conflict_resolve。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"},"expected_parent_tree":{"type":"string"},"expected_child_tree":{"type":"string"},"expected_base_tree":{"type":"string"},"allowed_paths":{"type":"array","items":{"type":"string"}},"allowed_prefixes":{"type":"array","items":{"type":"string"}},"merge_policy":{"type":"string","enum":["auto","strict"]}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -941,7 +941,7 @@ func (s *Server) registerLand() {
 		"把工作区落地到命名 line 或直接父工作区。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"target":{"type":["object","string"]},"fold":{"type":"string","enum":["self","stack"]},"drop_workspace":{"type":"boolean"},"expected_head":{"type":"string"},"expected_ws_tree":{"type":"string"},"expected_ws_ops_epoch":{"type":"integer"},"expected_parent_tree":{"type":"string"},"preview_id":{"type":"string"},"idempotency_key":{"type":"string"},"task":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1003,7 +1003,9 @@ func (s *Server) registerLand() {
 				return nil, err
 			}
 			if cfg, err := config.Load(rr.Root); err == nil && cfg.Remote.AutoPush {
-				go func() { _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
+				if release, ok := s.holdRepo(rr); ok {
+					go func() { defer release(); _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
+				}
 			}
 			return landView2(rr, res), nil
 		})
@@ -1012,7 +1014,7 @@ func (s *Server) registerLand() {
 		"把子工作区并入直接父工作区（三方合并；默认只写子改动路径）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"parent_ws_id":{"type":"string"},"expected_parent_tree":{"type":"string"},"expected_child_tree":{"type":"string"},"expected_base_tree":{"type":"string"},"allowed_paths":{"type":"array","items":{"type":"string"}},"allowed_prefixes":{"type":"array","items":{"type":"string"}},"merge_policy":{"type":"string","enum":["auto","strict"]},"preview":{"type":"boolean"},"preview_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","ws_id","parent_ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1057,7 +1059,7 @@ func (s *Server) registerLand() {
 		"读取最近 30 天的 land 幂等/审计记录（按时间倒序）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1079,7 +1081,7 @@ func (s *Server) registerLand() {
 		"以新版本承载对某个版本的逆变更（可指定目标 line）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"version_id":{"type":"string"},"target_line":{"type":"string"},"expected_head":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","version_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1148,7 +1150,7 @@ func (s *Server) registerSync() {
 		"返回本地与远端同步状态：local_head / remote_head / 待上传包 / ahead-behind。远端 push/fetch 只通过 CLI 执行。",
 		`{"type":"object","additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -1177,7 +1179,7 @@ func (s *Server) registerSync() {
 		"生成一个增量包到本地 outbox（只暂存、不上传）。force 忽略阈值，full 强制 checkpoint。",
 		`{"type":"object","properties":{"force":{"type":"boolean"},"full":{"type":"boolean"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -1208,7 +1210,7 @@ func (s *Server) registerSync() {
 		"列出本地暂存的同步包（等待上传）。",
 		`{"type":"object","additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}
@@ -1227,7 +1229,7 @@ func (s *Server) registerSync() {
 		"查看一个暂存包的清单；verify 为真时全量校验分片与对象。",
 		`{"type":"object","properties":{"id":{"type":"string"},"verify":{"type":"boolean"}},"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, rerr := s.repoFor(repoArg(raw))
+			rr, rerr := s.repoFor(ctx, repoArg(raw))
 			if rerr != nil {
 				return nil, rerr
 			}

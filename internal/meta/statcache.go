@@ -128,6 +128,26 @@ func (s *StatCache) Load(wsID string) (map[string]capture.StatEntry, error) {
 	return out, rows.Err()
 }
 
+// DeleteMany 实现 capture.StatCache：一个事务删除一批已经消失的路径。
+func (s *StatCache) DeleteMany(wsID string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	return s.db.withWrite(func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(`DELETE FROM stat_cache WHERE ws_id = ? AND path = ?`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, p := range paths {
+			if _, err := stmt.Exec(wsID, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // DeleteUnder 实现 capture.StatCache。
 func (s *StatCache) DeleteUnder(wsID, prefix string) {
 	_ = s.db.withWrite(func(tx *sql.Tx) error {

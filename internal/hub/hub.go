@@ -39,6 +39,7 @@ var (
 	ErrRegistryBusy       = errors.New("hub: registry 忙")
 	ErrRepoLocked         = errors.New("hub: repo 锁被其它进程持有")
 	ErrRepoQuiesced       = errors.New("hub: repo 已 quiesce，需要 repo_resume")
+	ErrRepoDraining       = errors.New("hub: repo 有正在执行的调用，正在等待收敛")
 )
 
 // BusyError 描述 unregister 被活跃工作区/租约挡住的具体原因。
@@ -103,6 +104,17 @@ type Hub struct {
 	// quiesced 记录 repo_quiesce 后的 repo；任何读/写工具都不得把它重新打开
 	// （尤其不能重新 remount overlay），直到 repo_resume/unregister。
 	quiesced map[string]bool
+
+	// refs 记录每个 repo 正在执行的 MCP 调用数；draining 在 Quiesce/
+	// Unregister/Delete 前置位，拦住新调用并等待 refs 归零，避免在
+	// ws_sync/ws_land 中途关闭 DB、卸载 overlay。
+	refs     map[string]int
+	draining map[string]bool
+	cond     *sync.Cond
+	// drainMu 串行化 Quiesce/Unregister/Delete/CloseRepo。持有顺序固定为
+	// drainMu -> mu：等待 refs 归零时 cond.Wait 会释放 mu，但不会释放
+	// drainMu，因此不会有两个生命周期操作同时等在同一个 repo 上。
+	drainMu sync.Mutex
 
 	// mountProbe 可注入，单测不需要真实挂载点。默认使用 mountmgr.IsMountPoint。
 	mountProbe func(string) bool
@@ -181,9 +193,12 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	h := &Hub{root: root, cfg: cfg, socket: config.SocketPath(root, cfg),
 		db: db, repos: map[string]*repo.Repo{}, locks: map[string]*repolock.Lock{},
 		quiesced:           map[string]bool{},
+		refs:               map[string]int{},
+		draining:           map[string]bool{},
 		mountProbe:         mountmgr.IsMountPoint,
 		allowNonPersistent: os.Getenv("P37_ALLOW_NONPERSISTENT") == "1",
 		healthCache:        map[string]healthCacheEntry{}}
+	h.cond = sync.NewCond(&h.mu)
 	h.recoverRegistry()
 	h.loadQuiesced()
 	return h, nil
@@ -427,6 +442,11 @@ func (h *Hub) Open(ref string) (*repo.Repo, error) {
 	// 而不是第二个去抢 repolock 然后报「正被另一个进程持有」。
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// draining 只拦外部新调用；Quiesce/Unregister 内部还需要 openLocked
+	// 读取工作区与租约，因此检查放在这里而不是 openLocked 里。
+	if e, err := h.lookupLocked(ref); err == nil && h.draining[e.ID] {
+		return nil, fmt.Errorf("%w: %s", ErrRepoDraining, e.Name)
+	}
 	return h.openLocked(ref, true)
 }
 
@@ -485,6 +505,58 @@ func (h *Hub) openLocked(ref string, remount bool) (*repo.Repo, error) {
 // OpenEntry 按 registry 行打开。
 func (h *Hub) OpenEntry(e *Entry) (*repo.Repo, error) { return h.Open(e.ID) }
 
+// Acquire 标记一次 in-flight 调用。调用方必须用 Release 配对（通常 defer）。
+//
+// MCP 工具每次调用 repoFor 都会 Acquire；Quiesce/Unregister/Delete 会先置
+// draining 并等待全部引用归零，再关闭 DB/overlay/flock。没有引用的 CLI 路径
+// 不受影响。
+func (h *Hub) Acquire(ref string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, err := h.lookupLocked(ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrRepoNotFound, ref)
+	}
+	if err != nil {
+		return err
+	}
+	if h.draining[e.ID] {
+		return fmt.Errorf("%w: %s", ErrRepoDraining, e.Name)
+	}
+	h.refs[e.ID]++
+	return nil
+}
+
+// Release 释放 Acquire 的引用；多余/未知的 Release 会被忽略。
+func (h *Hub) Release(ref string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, err := h.lookupLocked(ref)
+	if err != nil {
+		return
+	}
+	if h.refs[e.ID] == 0 {
+		return
+	}
+	h.refs[e.ID]--
+	if h.refs[e.ID] == 0 {
+		h.cond.Broadcast()
+	}
+}
+
+// beginDrainLocked 拦住新调用并等到当前调用全部结束；返回的函数负责解除
+// draining 标记。必须在持有 h.mu 时调用；等待期间 cond 会临时释放锁。
+func (h *Hub) beginDrainLocked(e *Entry) func() {
+	h.draining[e.ID] = true
+	for h.refs[e.ID] > 0 {
+		h.cond.Wait()
+	}
+	return func() {
+		delete(h.draining, e.ID)
+		h.cond.Broadcast()
+	}
+}
+
 func (h *Hub) markDegraded(id string, cause error) {
 	msg := ""
 	if cause != nil {
@@ -495,12 +567,16 @@ func (h *Hub) markDegraded(id string, cause error) {
 
 // CloseRepo 关闭并移除缓存（不删数据）。
 func (h *Hub) CloseRepo(ref string) error {
+	h.drainMu.Lock()
+	defer h.drainMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	e, err := h.lookupLocked(ref)
 	if err != nil {
 		return err
 	}
+	done := h.beginDrainLocked(e)
+	defer done()
 	return h.dropCachedLocked(e)
 }
 
@@ -528,6 +604,8 @@ func (h *Hub) dropCachedLocked(e *Entry) error {
 // 全程持 h.mu：否则 Get→Open→CloseRepo→rename 之间可能插入新的 Open，
 // 请求拿到 *repo.Repo 后目录被 rename 走，DB/CAS 路径分裂。
 func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
+	h.drainMu.Lock()
+	defer h.drainMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	e, err := h.getEnrichedLocked(ref)
@@ -541,6 +619,8 @@ func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 	if err := h.guardDeletePath(e.Path); err != nil {
 		return nil, err
 	}
+	done := h.beginDrainLocked(e)
+	defer done()
 	r, oerr := h.openLocked(e.ID, false)
 	if oerr != nil && !force {
 		return nil, oerr

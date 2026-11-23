@@ -82,6 +82,16 @@ func (mi *MemIndex) Add(id hash.ID, typ uint8, size, rawSize int64) error {
 	return nil
 }
 
+// AddMany 实现 ObjectIndex。
+func (mi *MemIndex) AddMany(entries []IndexEntry) error {
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	for _, e := range entries {
+		mi.m[e.Key] = objInfo{size: e.Size, rawSize: e.RawSize}
+	}
+	return nil
+}
+
 // Remove 实现 ObjectIndex：删除该 id 的全部类型。
 func (mi *MemIndex) Remove(id hash.ID) error {
 	mi.mu.Lock()

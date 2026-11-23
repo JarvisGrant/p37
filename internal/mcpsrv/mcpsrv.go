@@ -158,8 +158,23 @@ func repoArg(raw json.RawMessage) string {
 	return a.Repo
 }
 
+// callRefs 记录一次工具调用通过 repoFor 取得的 in-flight 引用。
+type callRefs struct{ refs []string }
+
+type callRefsKey struct{}
+
+func callRefsFrom(ctx context.Context) *callRefs {
+	if v, ok := ctx.Value(callRefsKey{}).(*callRefs); ok {
+		return v
+	}
+	return nil
+}
+
 // repoFor 解析工具调用里的 repo 参数。单仓库模式可省略。
-func (s *Server) repoFor(ref string) (*repo.Repo, error) {
+//
+// 多仓库模式下同时向 Hub 登记一次 in-flight 引用，由工具调用结束时统一
+// Release；repo_quiesce/unregister 会等这些调用结束再关闭仓库。
+func (s *Server) repoFor(ctx context.Context, ref string) (*repo.Repo, error) {
 	if ref == "" {
 		if s.R != nil {
 			return s.R, nil
@@ -188,7 +203,53 @@ func (s *Server) repoFor(ref string) (*repo.Repo, error) {
 			return nil, err
 		}
 	}
+	if s.Hub != nil && ref != "" {
+		if err := s.Hub.Acquire(ref); err != nil {
+			if errors.Is(err, hub.ErrRepoDraining) || errors.Is(err, hub.ErrRepoBusy) {
+				return nil, codedDetail("repo_busy",
+					map[string]any{"repo": ref, "reason": "repo_draining", "retryable": true},
+					"仓库 %q 正在 detach/回收，请稍后重试", ref)
+			}
+			return nil, err
+		}
+		if tr := callRefsFrom(ctx); tr != nil {
+			tr.refs = append(tr.refs, ref)
+		} else {
+			// 没有登记上下文（非 MCP 调用路径）：立即归还，避免永久占用。
+			s.Hub.Release(ref)
+		}
+	}
 	return r, nil
+}
+
+// holdRepo 为后台任务额外登记一次 in-flight 引用，返回释放函数。
+//
+// 异步 export / auto-push 在工具返回后仍在用 *repo.Repo；不持有引用时
+// repo_quiesce 会把它脚下的 DB/overlay 关掉。ok=false 表示仓库正在 drain，
+// 调用方不要启动新的后台任务。
+func (s *Server) holdRepo(r *repo.Repo) (release func(), ok bool) {
+	if s.Hub == nil || r == nil {
+		return func() {}, true
+	}
+	e, err := s.Hub.GetByPath(r.Root)
+	if err != nil {
+		return func() {}, false
+	}
+	if err := s.Hub.Acquire(e.ID); err != nil {
+		return func() {}, false
+	}
+	return func() { s.Hub.Release(e.ID) }, true
+}
+
+// releaseCallRefs 归还本次工具调用取得的全部 in-flight 引用。
+func (s *Server) releaseCallRefs(tr *callRefs) {
+	if s.Hub == nil || tr == nil {
+		return
+	}
+	for _, ref := range tr.refs {
+		s.Hub.Release(ref)
+	}
+	tr.refs = nil
 }
 
 // Handler 返回可直接挂到 HTTP/unix socket 上的 Streamable HTTP handler。
@@ -212,7 +273,7 @@ func (s *Server) register(name, desc, schema string, fn toolFunc) {
 		InputSchema: fullSchema,
 	}
 	allowed, strict := schemaKeys(fullSchema)
-	s.Srv.AddTool(t, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.Srv.AddTool(t, func(ctx context.Context, req *mcp.CallToolRequest) (res *mcp.CallToolResult, err error) {
 		// CallToolRequest.Params.Arguments 已经是 json.RawMessage。
 		raw := req.Params.Arguments
 		if len(raw) == 0 {
@@ -226,6 +287,10 @@ func (s *Server) register(name, desc, schema string, fn toolFunc) {
 					strings.Join(unknown, ", "))), nil
 			}
 		}
+
+		tr := &callRefs{}
+		ctx = context.WithValue(ctx, callRefsKey{}, tr)
+		defer s.releaseCallRefs(tr)
 
 		data, err := fn(ctx, raw)
 		if err != nil {

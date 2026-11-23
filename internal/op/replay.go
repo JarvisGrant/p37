@@ -627,6 +627,10 @@ func (c *replayCtx) rebuildModifiedFile(o *Op) (hash.ID, error) {
 //	both        在冲突位置**之前**插入本侧内容，保留当前内容。
 //	custom      在冲突位置用给定内容替换等长的当前行。
 //
+// both/custom 也必须先按 Before/Remove/After 锚点定位：StartHint 是记录冲突时
+// 的行号，目标内容可能已经因为前面的 hunk/自动合并而整体位移；直接拿
+// StartHint 落位会把内容插到错误的位置。锚点失效时才退回 hint。
+//
 // 之所以允许在锚点失效时按 hint 落位：真正的语义保真由 ConflictKey 承担
 // —— 只要目标当前内容与记录 resolution 时不同，key 就会变化，冲突会自动
 // 重新浮现，交回给调用方决策。
@@ -640,12 +644,25 @@ func applyResolution(r Resolution, placed [][]byte, h *Hunk) [][]byte {
 		}
 		return spliceAt(placed, h.StartHint, len(h.Remove), h.Insert)
 	case ResolveBoth:
-		return spliceAt(placed, h.StartHint, 0, h.Insert)
+		start, _ := resolutionSpan(h, placed)
+		return spliceAt(placed, start, 0, h.Insert)
 	case ResolveCustom:
-		return spliceAt(placed, h.StartHint, len(h.Remove), r.Content)
+		start, end := resolutionSpan(h, placed)
+		return spliceAt(placed, start, end-start, r.Content)
 	default:
 		return placed
 	}
+}
+
+// resolutionSpan 返回 hunk 在 placed 中对应的 [start,end)：优先按锚点定位，
+// 锚点失效时退回 StartHint 并做钳制。
+func resolutionSpan(h *Hunk, placed [][]byte) (int, int) {
+	if _, rs, re, ok := Locate(h, placed, h.StartHint-len(h.Before), DefaultMaxMatches); ok {
+		return rs, re
+	}
+	start := clamp(h.StartHint, 0, len(placed))
+	end := min(len(placed), start+len(h.Remove))
+	return start, end
 }
 
 // spliceAt 把 placed[start:start+n] 替换为 ins；索引自动钳制。

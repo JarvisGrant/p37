@@ -446,6 +446,8 @@ func (h *Hub) stopWorkspacesLocked(e *Entry, force bool) (*repo.Repo, error) {
 
 // Unregister 关闭 repo 并把它从 registry 可见集合中移除（保留全部数据）。
 func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
+	h.drainMu.Lock()
+	defer h.drainMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -456,6 +458,8 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	done := h.beginDrainLocked(e)
+	defer done()
 	if _, err := h.stopWorkspacesLocked(e, force); err != nil {
 		return nil, err
 	}
@@ -488,6 +492,8 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 //
 // 这样即使 umount 因 busy 失败，也不会留下“VM 还在跑、repo 却 unregistered”的中间态。
 func (h *Hub) Quiesce(ref string, force bool) (*QuiesceResult, error) {
+	h.drainMu.Lock()
+	defer h.drainMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -498,6 +504,8 @@ func (h *Hub) Quiesce(ref string, force bool) (*QuiesceResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	done := h.beginDrainLocked(e)
+	defer done()
 	if _, err := h.stopWorkspacesLocked(e, force); err != nil {
 		return nil, err
 	}

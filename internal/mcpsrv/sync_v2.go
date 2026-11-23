@@ -23,7 +23,7 @@ func (s *Server) registerSyncV2() {
 	s.register("sync_push", "显式、持久地推送本地仓库到远端；成功返回 durable=true。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"all":{"type":"boolean"},"full":{"type":"boolean"},"lines":{"type":"array","items":{"type":"string"}},"expected_remote_generation":{"type":"integer"},"idempotency_key":{"type":"string"},"async":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -45,7 +45,14 @@ func (s *Server) registerSyncV2() {
 				if a.IdempotencyKey != "" {
 					return nil, coded("invalid_argument", "async=true 不支持 idempotency_key（结果无法持久化）")
 				}
+				release, ok := s.holdRepo(rr)
+				if !ok {
+					return nil, codedDetail("repo_busy",
+						map[string]any{"repo": repoArg(raw), "reason": "repo_draining", "retryable": true},
+						"仓库正在 detach/回收，稍后再试异步推送")
+				}
 				go func() {
+					defer release()
 					if _, err := pushRepo(context.Background(), rr, s.Hub, a.Full, 0); err != nil {
 						// 异步路径没有调用方等待；至少留下可诊断日志。
 						log.Printf("sync_push(async) repo=%s 失败: %v", rr.Root, err)
@@ -95,7 +102,7 @@ func (s *Server) registerSyncV2() {
 	s.register("sync_fetch", "下载远端对象与 refs；不移动本地 head。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -121,7 +128,7 @@ func (s *Server) registerSyncV2() {
 	s.register("sync_pull", "下载并快进本地 line；分叉时保留本地。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -324,7 +331,7 @@ func (s *Server) registerSyncV2() {
 	s.register("sync_prune", "回收远端旧包（保留最新 checkpoint 及后续 delta）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"dry_run":{"type":"boolean"},"remote":{"type":"boolean"},"local":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}

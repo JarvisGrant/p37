@@ -40,6 +40,21 @@ MCP 层有进程内端到端测试（`internal/mcpsrv`），覆盖工具清单�
 
 **真机验证清单见 [`VERIFY.md`](VERIFY.md)。**
 
+## v0.7.2 typed CAS 之后的性能与并发收尾
+
+- `cas.Store` 增加 `AddMany`/`IndexEntry`：capture 写入的对象索引先累积在
+  内存批次，`FlushIndex`/`Flush` 时一个 SQLite 事务登记；`build` 在写
+  `stat_cache` 之前先 flush 索引，避免缓存里的 ObjectID 指向未登记对象。
+- `stat_cache` 增加 `DeleteMany`；`capture.Build` 用本轮扫描快照做差集，
+  清理已删除文件/目录的旧缓存行（此前只在整个目录变空时才会 drop）。
+- `ws_disk_usage` 改用 `workspace.DiskUsages`：复用一份元数据，只遍历目录，
+  不再逐工作区 `Info`（省掉 ops/冲突/租约查询）。
+- Hub 增加 `Acquire`/`Release` 与 drain：MCP `repoFor` 每次调用登记引用，
+  `Quiesce`/`Unregister`/`Delete`/`CloseRepo` 置 draining 并等待引用归零；
+  `PlaceAll` 与冲突解决 `both`/`custom` 改用正确的锚点行号。
+- GC 在读取对象清单前 `FlushIndex`，对象统计与活跃 op 引用不会再漏掉
+  本批次尚未落库的对象。
+
 ## v0.4.7 detach 生命周期与 repo 注册可见性
 
 - 新增 MCP/CLI `repo_quiesce` / `repo_resume`：quiesce 关闭 repo 的

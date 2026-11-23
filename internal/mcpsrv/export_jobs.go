@@ -34,7 +34,7 @@ func newExportJobID() (string, error) {
 	return "exp_" + hex.EncodeToString(b[:]), nil
 }
 
-func (s *Server) startExportJob(r *repo.Repo, repoName, ref, dest string) (string, string) {
+func (s *Server) startExportJob(r *repo.Repo, repoName, ref, dest string, release func()) (string, string) {
 	now := nowMS()
 	s.exportMu.Lock()
 	s.pruneExportJobsLocked(now)
@@ -52,6 +52,7 @@ func (s *Server) startExportJob(r *repo.Repo, repoName, ref, dest string) (strin
 	s.exportMu.Unlock()
 
 	go func() {
+		defer release()
 		res, err := r.Export(ref, dest)
 		s.exportMu.Lock()
 		defer s.exportMu.Unlock()

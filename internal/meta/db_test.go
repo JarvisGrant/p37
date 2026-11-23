@@ -212,6 +212,9 @@ func TestObjectIndexAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	ok, err := db.ObjectIndex().Has(id)
 	if err != nil || !ok {
 		t.Fatalf("索引未登记: ok=%v err=%v", ok, err)

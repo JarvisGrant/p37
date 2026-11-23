@@ -105,6 +105,8 @@ type StatCache interface {
 	Load(wsID string) (map[string]StatEntry, error)
 	// DeleteUnder 删除 prefix 及其下的全部条目。
 	DeleteUnder(wsID, prefix string)
+	// DeleteMany 在一个事务里删除指定路径的条目（清理已消失的缓存行）。
+	DeleteMany(wsID string, paths []string) error
 }
 
 // ObjectWriter 是采集所需的写入能力，由 cas.Store 提供。
@@ -151,10 +153,20 @@ func Build(wsID, root string, ig *tree.Ignore, ow ObjectWriter,
 		return nil, err
 	}
 	// stat 缓存批量落库（单事务）。缓存写失败不影响正确性（下一轮会重算）。
+	//
+	// 顺序很重要：先把 CAS 对象索引 flush 出去，再写 stat_cache。stat_cache
+	// 里的 ObjectID 会被后续采集直接信任；若索引只留在内存里、进程随后崩溃，
+	// 下一轮采集就会拿未登记的 id 去读对象而报 key 不存在。
 	if b.stat != nil {
+		if f, ok := b.ow.(interface{ FlushIndex() error }); ok {
+			if err := f.FlushIndex(); err != nil {
+				return nil, err
+			}
+		}
 		if err := b.flushStat(); err != nil {
 			return nil, err
 		}
+		b.pruneStat()
 	}
 	return t, nil
 }
@@ -175,6 +187,44 @@ func (b *builder) flushStat() error {
 		b.pendingStat = b.pendingStat[n:]
 	}
 	return nil
+}
+
+// pruneStat 删除磁盘上已不存在的路径的缓存行。
+//
+// 上面的子树/文件遍历只会在「目录变空」时 dropStat；整个目录或文件被删掉时
+// 根本不会被访问，旧行会永久残留并让 stat_cache 无界增长。这里用本轮扫描
+// 的完整快照做一次差集，只保留仍然存在的路径。
+//
+// 缓存快照可能因为本轮没有命中而尚未载入；这里主动载入一次，保证工作区
+// 变成空目录时也能把旧行清掉。
+func (b *builder) pruneStat() {
+	if b.stat == nil {
+		return
+	}
+	b.loadCache()
+	if len(b.cache) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(b.cache))
+	for dir, items := range b.listing {
+		seen[dir] = struct{}{}
+		for _, it := range items {
+			seen[it.repoPath] = struct{}{}
+		}
+	}
+	stale := make([]string, 0)
+	for p := range b.cache {
+		if _, ok := seen[p]; !ok {
+			stale = append(stale, p)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	_ = b.stat.DeleteMany(b.wsID, stale)
+	for _, p := range stale {
+		delete(b.cache, p)
+	}
 }
 
 type builder struct {
@@ -741,6 +791,14 @@ func (m *MemStat) Load(wsID string) (map[string]StatEntry, error) {
 		}
 	}
 	return out, nil
+}
+
+// DeleteMany 实现 StatCache。
+func (m *MemStat) DeleteMany(wsID string, paths []string) error {
+	for _, p := range paths {
+		delete(m.M, memKey(wsID, p))
+	}
+	return nil
 }
 
 // DeleteUnder 实现 StatCache。

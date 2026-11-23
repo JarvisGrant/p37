@@ -156,7 +156,7 @@ func (s *Server) registerRepoLineRead() {
 					return out, nil
 				}
 			}
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -251,7 +251,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("repo_disk_usage", "返回仓库磁盘占用（实际块）。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -265,7 +265,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("repo_usage", "返回仓库只读用量快照（durable/objects/db/refs/workspaces）。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -319,7 +319,7 @@ func (s *Server) registerRepoLineRead() {
 					}
 				}
 			}
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -387,7 +387,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("repo_set_remote", "设置/更新仓库远端配置（凭证仍只从环境变量读）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"remote":{"type":"object"}},"required":["repo","remote"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -416,7 +416,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_create", "创建命名版本线。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"name":{"type":"string"},"from":{"type":"string"},"protected":{"type":"boolean"},"idempotency_key":{"type":"string"}},"required":["repo","name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -441,7 +441,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_list", "列出全部命名线。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -471,7 +471,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_info", "返回一条命名线的详情。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"name":{"type":"string"}},"required":["repo","name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -487,7 +487,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_delete", "删除命名线（不删版本）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"name":{"type":"string"},"force":{"type":"boolean"},"idempotency_key":{"type":"string"}},"required":["repo","name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -513,7 +513,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_protect", "设置/取消命名线保护。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"name":{"type":"string"},"protected":{"type":"boolean"},"force":{"type":"boolean"}},"required":["repo","name","protected"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -534,7 +534,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_reset", "把 line head 移动到历史版本。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"name":{"type":"string"},"version":{"type":"string"},"force":{"type":"boolean"},"reason":{"type":"string"},"expected_head":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","name","version"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -567,7 +567,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_log", "返回命名线的祖先历史。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"name":{"type":"string"},"limit":{"type":"integer"},"before_ts":{"type":"integer"},"before_id":{"type":"string"}},"required":["repo","name"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -590,7 +590,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_compare", "比较两条命名线。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["repo","a","b"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -611,7 +611,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_graph", "返回版本 DAG 节点与边。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"lines":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -628,7 +628,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("line_merge", "把 source line 的成果并入 target line。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"source":{"type":"string"},"target":{"type":"string"},"preview":{"type":"boolean"},"no_ff":{"type":"boolean"},"merge_id":{"type":"string"},"expected_head":{"type":"string"},"expected_source_head":{"type":"string"},"task":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["repo","source","target"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -667,7 +667,9 @@ func (s *Server) registerRepoLineRead() {
 				return nil, err
 			}
 			if cfg, err := config.Load(rr.Root); err == nil && cfg.Remote.AutoPush {
-				go func() { _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
+				if release, ok := s.holdRepo(rr); ok {
+					go func() { defer release(); _, _ = pushRepo(context.Background(), rr, s.Hub, true, 0) }()
+				}
 			}
 			return mergeView(res), nil
 		})
@@ -676,7 +678,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("version_tree", "列出历史版本/命名线的目录树。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"path":{"type":"string"},"recursive":{"type":"boolean"},"limit":{"type":"integer"}},"required":["repo","ref"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -699,7 +701,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("version_file", "读取历史版本中的单个文件（base64）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"path":{"type":"string"},"max_bytes":{"type":"integer"}},"required":["repo","ref","path"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -717,7 +719,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("version_archive", "把历史版本的子树打包到 VM 内临时文件。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"path":{"type":"string"},"format":{"type":"string","enum":["tar.gz","zip"]}},"required":["repo","ref"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -735,7 +737,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("ws_diff", "返回工作区相对 base 的文件级差异。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ws_id":{"type":"string"}},"required":["repo","ws_id"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -762,7 +764,7 @@ func (s *Server) registerRepoLineRead() {
 	s.register("ws_reap", "清理过期/孤儿工作区，默认 dry-run。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"older_than":{"type":"string"},"state":{"type":"string"},"name_prefix":{"type":"string","description":"只过滤已符合回收条件的候选，不扩大回收范围"},"include_orphan_dirs":{"type":"boolean"},"dry_run":{"type":"boolean"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1147,7 +1149,7 @@ func (s *Server) registerVersionGraph() {
 	s.register("version_graph", "返回版本 DAG（line_graph 的别名）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"lines":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1163,7 +1165,7 @@ func (s *Server) registerVersionGraph() {
 	s.register("version_compare", "比较两个 ref（version/line/mainline）。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"a":{"type":"string"},"b":{"type":"string"}},"required":["repo","a","b"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1183,7 +1185,7 @@ func (s *Server) registerRepoExport() {
 		"把 line/version 物化到目录（迁移/部署导出）。async=true 时返回 job_id，用 repo_export_status 轮询。",
 		`{"type":"object","properties":{"repo":{"type":"string"},"ref":{"type":"string"},"dest_dir":{"type":"string"},"async":{"type":"boolean"}},"required":["repo","ref","dest_dir"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1202,7 +1204,11 @@ func (s *Server) registerRepoExport() {
 				return nil, coded("invalid_argument", "dest_dir 不能为空")
 			}
 			if a.Async {
-				id, state := s.startExportJob(rr, repoArg(raw), a.Ref, a.DestDir)
+				release, ok := s.holdRepo(rr)
+				if !ok {
+					return nil, coded("repo_busy", "仓库正在 detach/回收，稍后再试导出")
+				}
+				id, state := s.startExportJob(rr, repoArg(raw), a.Ref, a.DestDir, release)
 				return map[string]any{
 					"job_id": id, "state": state, "dest_dir": a.DestDir,
 				}, nil
@@ -1236,7 +1242,7 @@ func (s *Server) registerWSDiskUsage() {
 	s.register("ws_disk_usage", "按工作区返回磁盘占用。",
 		`{"type":"object","properties":{"repo":{"type":"string"}},"required":["repo"],"additionalProperties":false}`,
 		func(ctx context.Context, raw json.RawMessage) (any, error) {
-			rr, err := s.repoFor(repoArg(raw))
+			rr, err := s.repoFor(ctx, repoArg(raw))
 			if err != nil {
 				return nil, err
 			}
@@ -1244,16 +1250,14 @@ func (s *Server) registerWSDiskUsage() {
 			if err != nil {
 				return nil, err
 			}
-			out := make([]map[string]any, 0, len(all))
+			usages := rr.WS.DiskUsages(all)
+			out := make([]map[string]any, 0, len(usages))
 			var total int64
-			for i := range all {
-				st, err := rr.WS.Info(all[i].ID)
-				if err != nil {
-					continue
-				}
-				total += st.DiskBytes
-				out = append(out, map[string]any{"ws_id": st.ID, "disk_bytes": st.DiskBytes,
-					"materialize": st.Materialize, "hidden": st.Hidden})
+			for i := range usages {
+				u := &usages[i]
+				total += u.DiskBytes
+				out = append(out, map[string]any{"ws_id": u.ID, "disk_bytes": u.DiskBytes,
+					"materialize": u.Materialize, "hidden": u.Hidden})
 			}
 			return map[string]any{"workspaces": out, "total_bytes": total}, nil
 		})

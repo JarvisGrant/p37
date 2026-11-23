@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenyiwen/p37/internal/config"
 	"github.com/chenyiwen/p37/internal/hub"
@@ -86,6 +87,49 @@ func TestQuiesceKeepsRegistryAndResume(t *testing.T) {
 	}
 	if e, err := h.Get("app-q"); err != nil || e.ID != before.ID {
 		t.Fatalf("resume 后 repo 应可用: e=%+v err=%v", e, err)
+	}
+}
+
+// TestQuiesceWaitsForInflightCalls 断言 quiesce 会拦住新调用并等待正在执行的
+// 调用结束，而不是把 DB/overlay 从调用脚下关掉。
+func TestQuiesceWaitsForInflightCalls(t *testing.T) {
+	h, root := newHub(t)
+	path := filepath.Join(root, "app-drain")
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.RegisterPath("app-drain", path, hub.RegisterOptions{InitIfMissing: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Acquire("app-drain"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.Quiesce("app-drain", false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("调用尚未结束时 quiesce 不应返回: err=%v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := h.Open("app-drain"); !errors.Is(err, hub.ErrRepoDraining) {
+		t.Fatalf("draining 期间新 Open 应返回 ErrRepoDraining，得到 %v", err)
+	}
+
+	h.Release("app-drain")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("quiesce: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Release 之后 quiesce 仍未完成")
+	}
+	if _, err := h.Open("app-drain"); !errors.Is(err, hub.ErrRepoQuiesced) {
+		t.Fatalf("quiesce 完成后 Open 应返回 ErrRepoQuiesced，得到 %v", err)
 	}
 }
 

@@ -280,7 +280,11 @@ func expandRaw(e tree.Entry, path string, out *[]change, asOld bool) error {
 }
 
 func loadTree(ow ObjectWriter, id hash.ID) (*tree.Tree, error) {
-	return ow.GetTree(id)
+	t, err := ow.GetTree(id)
+	if err != nil {
+		return nil, fmt.Errorf("capture: 读取树 %s: %w", id, err)
+	}
+	return t, nil
 }
 
 func join(prefix, name string) string {
@@ -294,11 +298,11 @@ func join(prefix, name string) string {
 func modifyOp(wsID string, ch change, ow ObjectWriter, opt Options, nextSeq func() int64) (op.Op, error) {
 	newData, err := ow.ReadFileData(ch.new.ID)
 	if err != nil {
-		return op.Op{}, err
+		return op.Op{}, fmt.Errorf("capture: 读取新内容 %s（%s）: %w", ch.new.ID, ch.path, err)
 	}
 	oldData, err := ow.ReadFileData(ch.old.ID)
 	if err != nil {
-		return op.Op{}, err
+		return op.Op{}, fmt.Errorf("capture: 读取旧内容 %s（%s）: %w", ch.old.ID, ch.path, err)
 	}
 
 	// 权限位（可执行位）变化而内容不变 -> attr（§5.1 的属性变更）。

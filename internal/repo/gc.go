@@ -177,6 +177,11 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	rep.VersionKeep, rep.VersionDrop = len(keepVersions), len(dropVersions)
 
 	// -- 2. 对象清单（只读头部，不解压） ------------------------------------
+	// 采集产生的索引可能还在内存批次里；先落库，否则会把已存在但未登记的对象
+	// 当成“不在清单里”，活跃 op 的引用检查也会漏掉它们。
+	if err := r.Store.FlushIndex(); err != nil {
+		return nil, err
+	}
 	objects, err := r.Store.ListObjects()
 	if err != nil {
 		return nil, err

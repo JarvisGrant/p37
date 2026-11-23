@@ -91,6 +91,29 @@ func (o *ObjectIndex) Add(id hash.ID, typ uint8, size, rawSize int64) error {
 	})
 }
 
+// AddMany 实现 cas.ObjectIndex：一个事务批量 upsert。
+func (o *ObjectIndex) AddMany(entries []cas.IndexEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	return o.db.withWrite(func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(
+			`INSERT INTO object_index(id, type, size, raw_size) VALUES(?,?,?,?)
+			 ON CONFLICT(id, type) DO UPDATE SET size=excluded.size,
+			                               raw_size=excluded.raw_size`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = stmt.Close() }()
+		for _, e := range entries {
+			if _, err := stmt.Exec(e.Key.ID.String(), int(e.Key.Type), e.Size, e.RawSize); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // Remove 实现 cas.ObjectIndex：删除该 id 的全部类型。
 func (o *ObjectIndex) Remove(id hash.ID) error {
 	return o.db.withWrite(func(tx *sql.Tx) error {

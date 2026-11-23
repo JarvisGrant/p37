@@ -777,7 +777,7 @@ func (m *Manager) syncLocked(wsID string, strict bool) error {
 	if copt.MaterializedNS > 0 {
 		ids, err := m.flattenTreeIDs(w.BaseTree)
 		if err != nil {
-			return err
+			return fmt.Errorf("展开基准树 %s 失败: %w", w.BaseTree, err)
 		}
 		copt.BaseEntries = ids
 	}
@@ -786,7 +786,7 @@ func (m *Manager) syncLocked(wsID string, strict bool) error {
 		capture.InodeReliable(m.opt.InodeReliable), copt)
 	m.setLastUnstable(wsID, skipped)
 	if err != nil {
-		return err
+		return fmt.Errorf("采集 %s: %w", wsID, err)
 	}
 
 	// 2. 与基准树求差。
@@ -796,7 +796,7 @@ func (m *Manager) syncLocked(wsID string, strict bool) error {
 	}
 	ops, err := capture.Diff(wsID, baseTree, nowTree, m.store, m.opt.Capture)
 	if err != nil {
-		return err
+		return fmt.Errorf("比对 %s: %w", wsID, err)
 	}
 
 	// 3. 整体替换 op-log（同一事务内推进 ops_epoch 并清掉有效树缓存）。
@@ -1028,18 +1028,7 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 		NeedsRepair:   needsRepair,
 		BrokenReason:  brokenReason,
 	}
-	if dir := m.mm.WorkspaceDir(wsID); dirExists(dir) {
-		_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
-			if err == nil && info != nil && !info.IsDir() {
-				if sys, ok := info.Sys().(*syscall.Stat_t); ok && sys.Blocks > 0 {
-					st.DiskBytes += sys.Blocks * 512
-				} else {
-					st.DiskBytes += info.Size()
-				}
-			}
-			return nil
-		})
-	}
+	st.DiskBytes = dirDiskBytes(m.mm.WorkspaceDir(wsID))
 	if w.BaseLine != "" {
 		if h, err := m.db.LineHead(w.BaseLine); err == nil && h != w.BaseVersion {
 			st.BaseStale = true
@@ -1050,6 +1039,52 @@ func (m *Manager) Info(wsID string) (*Status, error) {
 		}
 	}
 	return st, nil
+}
+
+// DiskUsage 是 ws_disk_usage 的轻量视图：只走目录，不读 ops/冲突/租约。
+type DiskUsage struct {
+	ID          string `json:"ws_id"`
+	DiskBytes   int64  `json:"disk_bytes"`
+	Materialize string `json:"materialize"`
+	Hidden      bool   `json:"hidden"`
+}
+
+// DiskUsages 批量统计工作区磁盘占用。
+//
+// ws_disk_usage / repo_health 会遍历全部工作区；逐台调用 Info 会为每个工作区
+// 重复读取 workspace 行、数 op、数冲突、列租约，而展示只需要目录大小。
+// 这里只复用 List() 已经取到的元数据，每个工作区仅剩一次目录遍历。
+func (m *Manager) DiskUsages(list []meta.Workspace) []DiskUsage {
+	out := make([]DiskUsage, 0, len(list))
+	for i := range list {
+		w := &list[i]
+		out = append(out, DiskUsage{
+			ID:          w.ID,
+			DiskBytes:   dirDiskBytes(m.mm.WorkspaceDir(w.ID)),
+			Materialize: w.Materialize,
+			Hidden:      w.Hidden,
+		})
+	}
+	return out
+}
+
+// dirDiskBytes 递归统计目录下普通文件占用的磁盘块；目录不存在时返回 0。
+func dirDiskBytes(dir string) int64 {
+	if !dirExists(dir) {
+		return 0
+	}
+	var n int64
+	_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() {
+			if sys, ok := info.Sys().(*syscall.Stat_t); ok && sys.Blocks > 0 {
+				n += sys.Blocks * 512
+			} else {
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return n
 }
 
 // FillRevisions 计算并填充有效树 / 父树（只读，不触发采集）。
