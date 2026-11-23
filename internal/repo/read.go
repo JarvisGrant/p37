@@ -37,6 +37,10 @@ type TreeEntry struct {
 func (r *Repo) ResolveVersionRef(ref string) (hash.ID, error) { return r.resolveRef(ref, false) }
 
 // resolveTreeAt 返回版本在 path 处的树与可选的条目。
+//
+// 语义：p 为空 → 根树；p 指向文件/符号链接 → 父树 + 该条目；
+// p 指向目录 → **该目录的子树** + 目录条目。调用方（version_tree /
+// version_archive）直接遍历返回的树，因此目录必须返回子树，不能返回父树。
 func (r *Repo) resolveTreeAt(ref, p string) (*tree.Tree, *tree.Entry, error) {
 	id, err := r.resolveRef(ref, false)
 	if err != nil {
@@ -72,7 +76,14 @@ func (r *Repo) resolveTreeAt(ref, p string) (*tree.Tree, *tree.Entry, error) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrPathNotFound, p)
 		}
 		if i == len(segs)-1 {
-			return cur, ent, nil
+			if ent.Kind != codec.EntryTree {
+				return cur, ent, nil
+			}
+			sub, err := r.Store.GetTree(ent.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			return sub, ent, nil
 		}
 		if ent.Kind != codec.EntryTree {
 			return nil, nil, fmt.Errorf("%w: %s", ErrPathNotFound, p)
@@ -99,7 +110,7 @@ func (r *Repo) VersionTree(ref, p string, recursive bool, limit int) ([]TreeEntr
 		return nil, false, err
 	}
 	if ent != nil && ent.Kind != codec.EntryTree {
-		e, err := r.entryView(p, ent)
+		e, err := r.entryView(strings.Trim(p, "/"), ent)
 		return []TreeEntry{e}, false, err
 	}
 	if limit <= 0 {
@@ -108,7 +119,7 @@ func (r *Repo) VersionTree(ref, p string, recursive bool, limit int) ([]TreeEntr
 	if limit > 10000 {
 		limit = 10000
 	}
-	var out []TreeEntry
+	out := make([]TreeEntry, 0)
 	truncated := false
 	var walk func(prefix string, t *tree.Tree) error
 	walk = func(prefix string, t *tree.Tree) error {
