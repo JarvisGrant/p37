@@ -100,8 +100,6 @@ max_package_bytes = 536870912
 | `files.max_file_size` | 2 GiB | 单文件上限 |
 | `files.max_text_size` | 4 MiB | 文本 diff/行视图上限 |
 | `files.binary_probe_bytes` | 8000 | 二进制探测字节数 |
-| `files.max_path_bytes` | 4096 | 路径总长度上限 |
-| `files.max_segment_bytes` | 255 | 单段路径长度上限 |
 | `workspace.materialize` | `auto` | `auto` / `overlay` / `copy` |
 | `workspace.base_cache_bytes` | 4 GiB | overlay 基底缓存上限 |
 | `workspace.scan_interval` | `30s` | 周期扫描间隔；多工作区轮转 |

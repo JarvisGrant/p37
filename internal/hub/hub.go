@@ -150,11 +150,14 @@ func New(root string, cfg config.Config) (*Hub, error) {
 	  created_ts    INTEGER NOT NULL,
 	  deleted_ts    INTEGER NOT NULL DEFAULT 0,
 	  degraded      INTEGER NOT NULL DEFAULT 0,
-	  degraded_msg  TEXT NOT NULL DEFAULT ''
+	  degraded_msg  TEXT NOT NULL DEFAULT '',
+	  quiesced_ts   INTEGER NOT NULL DEFAULT 0
 	)`); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	// 老 registry 补列；SQLite 重复 ALTER 会报错，忽略即可。
+	_, _ = db.Exec(`ALTER TABLE repo ADD COLUMN quiesced_ts INTEGER NOT NULL DEFAULT 0`)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS init_idempotency (
 	  key          TEXT PRIMARY KEY,
 	  path         TEXT NOT NULL,
@@ -182,7 +185,23 @@ func New(root string, cfg config.Config) (*Hub, error) {
 		allowNonPersistent: os.Getenv("P37_ALLOW_NONPERSISTENT") == "1",
 		healthCache:        map[string]healthCacheEntry{}}
 	h.recoverRegistry()
+	h.loadQuiesced()
 	return h, nil
+}
+
+func (h *Hub) loadQuiesced() {
+	rows, err := h.db.Query(`SELECT id, name FROM repo WHERE quiesced_ts<>0 AND deleted_ts=0`)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err == nil {
+			h.quiesced[id] = true
+			h.quiesced[name] = true
+		}
+	}
 }
 
 // SetAllowNonPersistent 放宽持久挂载点检查（测试/开发机用）。

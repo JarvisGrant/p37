@@ -19,6 +19,18 @@
 }
 ```
 
+## 本版重点（v0.7.1）
+
+v0.7.0 的小补丁，**`format_ver` 仍为 3**，P36/P34 最低版本仍为 0.7.0。
+
+- fsnotify `ErrEventOverflow` 会把全部工作区标脏，交给 debounce + 周期扫描。
+- 监听 Add 失败后 reconcile 会重试根目录。
+- 单仓库 `repo_health` 遵守 `with_quota=false`。
+- 移除未接线的 `files.max_path_bytes` / `files.max_segment_bytes` 配置，避免
+  “配置写了不生效”。
+- `repo_quiesce` 持久化 `repo.quiesced_ts`；daemon 重启后不会自动重挂已 quiesce
+  的卷，直到 `repo_resume` 或 `repo_unregister`。
+
 ## 本版重点（v0.7.0）
 
 这是 **`format_ver=3`** 的 typed object 版本。版本 id 不变；对象地址从

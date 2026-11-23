@@ -184,6 +184,15 @@ func (w *Watcher) loop() {
 				return
 			}
 			w.logf("fs 监听错误: %v", err)
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				// 内核队列溢出后事件不可恢复；把所有工作区标脏，交给
+				// debounce 采集 + 周期扫描兜底。
+				now := time.Now()
+				for _, st := range w.ws {
+					st.dirty = true
+					st.due = now.Add(w.opt.Debounce)
+				}
+			}
 		case id := <-w.touches:
 			if st, ok := w.ws[id]; ok {
 				st.dirty = true
@@ -248,7 +257,14 @@ func (w *Watcher) reconcile() {
 	}
 
 	for id, dir := range live {
-		if _, ok := w.ws[id]; ok {
+		if st, ok := w.ws[id]; ok {
+			// 之前 Add 失败（例如 inotify 额度耗尽）时在这里重试。
+			if _, watched := w.byDir[dir]; !watched {
+				if err := w.addRecursive(id, dir); err != nil {
+					w.logf("重试监听 %s 失败: %v", id, err)
+				}
+			}
+			_ = st
 			continue
 		}
 		st := &wsState{id: id, dir: dir}

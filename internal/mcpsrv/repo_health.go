@@ -48,7 +48,7 @@ func (s *Server) registerRepoHealth() {
 				in := repo.IntegrityOpen(s.R)
 				out := healthBase(in, nil, s.R.Root)
 				out["registered"] = true
-				if in.Initialized {
+				if in.Initialized && withQuota {
 					s.addHealthDetails(out, s.R, nil)
 				}
 				return out, nil

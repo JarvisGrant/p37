@@ -49,8 +49,6 @@ type FilesConfig struct {
 	MaxFileSize      int64 `toml:"max_file_size"`
 	MaxTextSize      int64 `toml:"max_text_size"`
 	BinaryProbeBytes int   `toml:"binary_probe_bytes"`
-	MaxPathBytes     int   `toml:"max_path_bytes"`
-	MaxSegmentBytes  int   `toml:"max_segment_bytes"`
 }
 
 // WorkspaceConfig 对应 [workspace]。
@@ -153,8 +151,6 @@ func Default() Config {
 			MaxFileSize:      2 << 30,
 			MaxTextSize:      4 << 20,
 			BinaryProbeBytes: tree.DefaultBinaryProbeBytes,
-			MaxPathBytes:     4096,
-			MaxSegmentBytes:  255,
 		},
 		Workspace: WorkspaceConfig{
 			Materialize:    string(mountmgr.ModeAuto),

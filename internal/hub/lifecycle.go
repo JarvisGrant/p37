@@ -469,7 +469,7 @@ func (h *Hub) Unregister(ref string, force bool) (*UnregisterResult, error) {
 	// 可见，调用方可以安全重试。
 	err = h.registryTx(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`UPDATE repo SET deleted_ts=?, degraded=0, degraded_msg='' WHERE id=? AND deleted_ts=0`,
+			`UPDATE repo SET deleted_ts=?, degraded=0, degraded_msg='', quiesced_ts=0 WHERE id=? AND deleted_ts=0`,
 			time.Now().UnixMilli(), e.ID)
 		return wrapRegistryErr(err)
 	})
@@ -506,6 +506,7 @@ func (h *Hub) Quiesce(ref string, force bool) (*QuiesceResult, error) {
 	}
 	h.quiesced[e.ID] = true
 	h.quiesced[e.Name] = true
+	_, _ = h.db.Exec(`UPDATE repo SET quiesced_ts=? WHERE id=?`, time.Now().UnixMilli(), e.ID)
 	return &QuiesceResult{Entry: e}, nil
 }
 
@@ -524,10 +525,12 @@ func (h *Hub) Resume(ref string) (*Entry, error) {
 	}
 	delete(h.quiesced, e.ID)
 	delete(h.quiesced, e.Name)
+	_, _ = h.db.Exec(`UPDATE repo SET quiesced_ts=0 WHERE id=?`, e.ID)
 	if h.repos[e.ID] == nil {
 		if _, err := h.openLocked(e.ID, true); err != nil {
 			// 打开失败时恢复 quiesce 标记，避免半状态被后续调用当作可用。
 			h.quiesced[e.ID] = true
+			_, _ = h.db.Exec(`UPDATE repo SET quiesced_ts=? WHERE id=?`, time.Now().UnixMilli(), e.ID)
 			h.quiesced[e.Name] = true
 			return nil, err
 		}

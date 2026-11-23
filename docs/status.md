@@ -1,4 +1,4 @@
-# 当前状态（v0.7.0）
+# 当前状态（v0.7.1）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.7.0` |
+| 发布版本 | `v0.7.1` |
 | 仓库格式 | `format_ver = 3` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -15,6 +15,12 @@
 
 `format_ver=3` 在 v2 基础上把对象地址改为 `(type,id)` 复合 key，版本 id 不变；
 v1/v2 仓库首次被新二进制打开时会自动迁移并备份，见 [`format-v3.md`](format-v3.md)。
+
+**v0.7.1 重点（`format_ver=3`）**：typed CAS 之后的收尾：fsnotify 溢出会把
+全部工作区标脏并交回采集；Add 失败会在 reconcile 重试；单仓库 `repo_health`
+遵守 `with_quota=false`；移除未接线的 `files.max_path_bytes` /
+`files.max_segment_bytes` 配置；`repo_quiesce` 状态持久化到 registry，
+daemon 重启后不会自动重挂已 quiesce 的卷。
 
 **v0.7.0 重点（`format_ver=3`）**：对象存储改为 typed key + `(id,type)` 复合
 索引，彻底消除“同一 raw 既是 Tree 又是 Blob”的地址歧义；旧 `objects/<id>`
