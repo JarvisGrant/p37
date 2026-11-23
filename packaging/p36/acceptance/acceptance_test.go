@@ -360,6 +360,12 @@ func TestP36MultiRepoSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "accept.txt"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "nested.txt"), []byte("nested\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := callTool(ctx, cs, "ws_sync", map[string]any{"repo": name, "ws_id": wsID}); err != nil {
 		t.Fatal(err)
 	}
@@ -378,5 +384,31 @@ func TestP36MultiRepoSession(t *testing.T) {
 	items, _ := env.Data["items"].([]any)
 	if len(items) == 0 {
 		t.Fatalf("version_tree 为空: %v", env.Data)
+	}
+
+	// path 指向目录时只返回该目录子树（回归：曾经返回父目录同级项）。
+	env, err = callTool(ctx, cs, "version_tree", map[string]any{
+		"repo": name, "ref": "line:p34/session/accept", "path": "sub", "recursive": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subItems, _ := env.Data["items"].([]any)
+	if len(subItems) == 0 {
+		t.Fatalf("version_tree(path=sub) 为空: %v", env.Data)
+	}
+	foundNested := false
+	for _, raw := range subItems {
+		item, _ := raw.(map[string]any)
+		path, _ := item["path"].(string)
+		if path == "accept.txt" {
+			t.Fatalf("version_tree(path=sub) 泄漏了父目录同级项: %v", env.Data)
+		}
+		if path == "sub/nested.txt" {
+			foundNested = true
+		}
+	}
+	if !foundNested {
+		t.Fatalf("version_tree(path=sub) 未包含 sub/nested.txt: %v", env.Data)
 	}
 }

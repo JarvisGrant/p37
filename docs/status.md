@@ -1,4 +1,4 @@
-# 当前状态（v0.5.0）
+# 当前状态（v0.5.1）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.5.0` |
+| 发布版本 | `v0.5.1` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,12 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.5.1 重点（不改 `format_ver`）**：修复 `version_tree` / `version_archive`
+在 `path` 指向目录时的 off-by-one：此前会列出父目录的同级项（并按 path
+前缀拼接），归档目录时也会把同级文件带进去。现在目录路径返回该目录自身的
+子树，文件路径仍返回单条；空目录返回 `[]` 而不是 `null`。同时提升
+P36/P34 最低 p37 版本到 0.5.1，旧 L1 需要重建。
 
 **v0.5.0 重点（不改 `format_ver`）**：以正确性/恢复能力为主。修复 land
 提交点（refs 权威）与 integrating 孤儿；GC 先清 `stat_cache`/`ws_effective_tree`
