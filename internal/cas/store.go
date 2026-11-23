@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
@@ -18,15 +19,21 @@ import (
 // MaxObjectRawSize 是单个对象解压后的字节上限（§13：防解压炸弹）。
 const MaxObjectRawSize = 64 << 20
 
-// zstdEnc 是共享的编码器。EncodeAll 可并发调用。
-var zstdEnc, _ = zstd.NewWriter(nil,
-	zstd.WithEncoderLevel(zstd.SpeedDefault),
-	zstd.WithEncoderConcurrency(1))
+// zstd 编解码器用池管理。单个实例内部是容量 1 的 channel，直接共享会
+// 把多核并发读写串行化；池让每个 goroutine 拿到独立实例。
+var zstdEncPool = sync.Pool{New: func() any {
+	w, _ := zstd.NewWriter(nil,
+		zstd.WithEncoderLevel(zstd.SpeedDefault),
+		zstd.WithEncoderConcurrency(1))
+	return w
+}}
 
-// zstdDec 是共享的解码器。
-var zstdDec, _ = zstd.NewReader(nil,
-	zstd.WithDecoderConcurrency(1),
-	zstd.WithDecoderMaxMemory(MaxObjectRawSize*2))
+var zstdDecPool = sync.Pool{New: func() any {
+	r, _ := zstd.NewReader(nil,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(MaxObjectRawSize*2))
+	return r
+}}
 
 // contentETag 返回内容的 BLAKE3 十六进制（用于非对象 key，如 refs）。
 func contentETag(b []byte) string { return hash.Sum(b).String() }
@@ -136,7 +143,9 @@ const storedFormat = 0x01
 
 // encodeStored 把 raw 编成自描述的存储字节。
 func encodeStored(typ uint8, raw []byte) []byte {
-	comp := zstdEnc.EncodeAll(raw, make([]byte, 0, len(raw)/2+16))
+	enc := zstdEncPool.Get().(*zstd.Encoder)
+	comp := enc.EncodeAll(raw, make([]byte, 0, len(raw)/2+16))
+	zstdEncPool.Put(enc)
 	out := make([]byte, 0, len(comp)+2)
 	out = append(out, storedFormat, typ)
 	return append(out, comp...)
@@ -154,7 +163,9 @@ func decodeStored(b []byte) (uint8, []byte, error) {
 	if typ < codec.TypeBlob || typ > codec.TypeVersionMerge {
 		return 0, nil, fmt.Errorf("cas: 未知对象类型 0x%02x", typ)
 	}
-	raw, err := zstdDec.DecodeAll(b[2:], make([]byte, 0, 4096))
+	dec := zstdDecPool.Get().(*zstd.Decoder)
+	raw, err := dec.DecodeAll(b[2:], make([]byte, 0, 4096))
+	zstdDecPool.Put(dec)
 	if err != nil {
 		return 0, nil, fmt.Errorf("cas: 解压失败: %w", err)
 	}

@@ -174,7 +174,10 @@ func runRootCheck(root string, jsonOut, strict bool, out, errw io.Writer) int {
 		fmt.Fprintf(errw, "p37d: 读取配置失败: %v\n", err)
 		return 1
 	}
-	_ = cfg
+	if cfg.Daemon.ListenHTTP && cfg.Daemon.AuthToken == "" {
+		fmt.Fprintln(errw, "p37d: listen_http=true 但未配置 daemon.auth_token")
+		return 1
+	}
 	h, err := hub.New(root, cfg)
 	if err != nil {
 		fmt.Fprintf(errw, "p37d: 打开 registry 失败: %v\n", err)

@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"sort"
 	"sync"
 )
 
@@ -83,23 +82,19 @@ func (m *Manager) LockWorkspace(wsID string) func() { return m.wsLocks.lock(wsID
 // RLockWorkspace 取工作区读锁，返回解锁函数。
 func (m *Manager) RLockWorkspace(wsID string) func() { return m.wsLocks.rlock(wsID) }
 
-// LockWorkspaces 按 ws_id 升序取多把写锁，返回按相反顺序释放的函数。
+// LockWorkspaces 按调用方给定顺序取多把写锁，返回按相反顺序释放的函数。
 //
-// 固定升序可以避免「两个调用方各持一把、互相等待」的死锁。栈 land 需要同时
-// 锁住折叠集合里的全部工作区，避免 ws_rebase 在中途改写 op-log。
+// 全仓库统一使用「后代 → 祖先」的锁序：land_into、Rebase 都是先锁 child
+// 再读/锁 parent。栈 land 必须把折叠集合从 leaf 往 root 传入；按 ws_id
+// 字典序排序会与 land_into 形成 ABBA 死锁。
 func (m *Manager) LockWorkspaces(ids []string) func() {
 	seen := make(map[string]bool, len(ids))
-	uniq := make([]string, 0, len(ids))
+	unlocks := make([]func(), 0, len(ids))
 	for _, id := range ids {
 		if id == "" || seen[id] {
 			continue
 		}
 		seen[id] = true
-		uniq = append(uniq, id)
-	}
-	sort.Strings(uniq)
-	unlocks := make([]func(), 0, len(uniq))
-	for _, id := range uniq {
 		unlocks = append(unlocks, m.wsLocks.lock(id))
 	}
 	return func() {

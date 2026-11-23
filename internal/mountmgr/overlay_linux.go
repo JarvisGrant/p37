@@ -110,12 +110,28 @@ func (m *Manager) Relower(wsID string, newBase hash.ID, src ContentSource) error
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", base, m.upperDir(wsID), work)
 	if err := syscall.Mount("overlay", dir, "overlay", 0, opts); err != nil {
 		m.releaseBaseTree(newBase)
+		// 失败时尽量把旧 lower 挂回去，避免工作区停在“未挂载”状态；
+		// 调用方（rebase）不能再退化成往裸目录整树覆写。
+		if oldAny, ok := baseRefs.Load(wsID); ok {
+			if oldID, ok := oldAny.(hash.ID); ok {
+				if oldPath, ok := m.cachedBasePath(oldID); ok {
+					_ = m.mountWithLower(wsID, oldID, oldPath)
+				}
+			}
+		}
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	// 释放旧基底的引用，改记新的。
 	m.releaseBase(wsID)
 	baseRefs.Store(wsID, newBase)
 	return nil
+}
+
+func (m *Manager) cachedBasePath(id hash.ID) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.bases[id]
+	return p, ok
 }
 
 // IsMounted 报告工作区目录当前是否为挂载点。

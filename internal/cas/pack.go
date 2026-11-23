@@ -638,7 +638,13 @@ func (ps *PackStore) PackLoose(opt PackOptions) (PackResult, error) {
 		if _, packed, err := ps.lookup(id); err != nil {
 			return res, err
 		} else if packed {
-			continue // 已在 pack 里：松散副本留给后面的清理
+			// 已在有效 pack 里：松散副本是上次“pack 成功但删松散前崩溃”
+			// 的残留，直接清掉，否则会永久保留。
+			if err := ps.base.Delete(st.Key); err != nil && !errors.Is(err, ErrNotExist) {
+				return res, err
+			}
+			res.LooseRemoved++
+			continue
 		}
 		if st.Size > opt.MaxObjectBytes {
 			res.SkippedLarge++
@@ -743,6 +749,12 @@ func (ps *PackStore) hasPackLocked(pid hash.ID) bool {
 }
 
 // baseHeadType 读取松散对象头部的类型字节。
+// IsPacked 报告对象当前是否只存在于 pack 中。
+func (ps *PackStore) IsPacked(id hash.ID) (bool, error) {
+	_, ok, err := ps.lookup(id)
+	return ok, err
+}
+
 func (ps *PackStore) baseHeadType(key string) (uint8, error) {
 	hdr, err := ps.base.GetRange(key, 0, 2)
 	if err != nil {

@@ -331,9 +331,10 @@ func (w *Watcher) fireDue(now time.Time) {
 		if !st.dirty || now.Before(st.due) {
 			continue
 		}
-		st.dirty = false
-		st.scanned = now
-		w.dispatch(st)
+		if w.dispatch(st) {
+			st.dirty = false
+			st.scanned = now
+		}
 	}
 }
 
@@ -358,18 +359,19 @@ func (w *Watcher) scanRoundRobin(now time.Time) {
 		if now.Sub(st.scanned) < per {
 			continue
 		}
-		st.scanned = now
-		w.dispatch(st)
+		if w.dispatch(st) {
+			st.scanned = now
+		}
 		return
 	}
 }
 
 // dispatch 在后台跑一次采集；同一工作区同时只允许一个在途采集。
-func (w *Watcher) dispatch(st *wsState) {
+func (w *Watcher) dispatch(st *wsState) bool {
 	w.mu.Lock()
 	if w.closed || w.inflight[st.id] {
 		w.mu.Unlock()
-		return
+		return false
 	}
 	w.inflight[st.id] = true
 	// Add 与 closed 检查同在 mu 保护下，因此 Add 必然发生在 Close 的 Wait 之前。
@@ -395,6 +397,7 @@ func (w *Watcher) dispatch(st *wsState) {
 			w.opt.OnSync(st.id, time.Since(start))
 		}
 	}()
+	return true
 }
 
 func (w *Watcher) logf(format string, args ...any) {

@@ -247,9 +247,11 @@ func (r *Repo) landToLocked(wsID string, opt LandOptions, commit bool) (*LandRes
 
 	// 折叠集合可能包含多个工作区：按 ws_id 升序一次性锁住，避免 rebase 在
 	// 「采集 → 读有效树 → 读 ops」之间改写。
+	// 折叠集合是 [root ... leaf]；锁序统一为 leaf → root，与 land_into /
+	// Rebase（child → parent）一致，避免 ABBA 死锁。
 	lockIDs := make([]string, 0, len(fold))
-	for _, fw := range fold {
-		lockIDs = append(lockIDs, fw.ID)
+	for i := len(fold) - 1; i >= 0; i-- {
+		lockIDs = append(lockIDs, fold[i].ID)
 	}
 	unlockFold := r.WS.LockWorkspaces(lockIDs)
 	defer unlockFold()

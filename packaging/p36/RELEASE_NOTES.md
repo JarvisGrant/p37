@@ -19,6 +19,38 @@
 }
 ```
 
+## 本版重点（v0.6.0）
+
+这是 v0.5.2 之后的正确性/性能收敛版本，**`format_ver` 仍为 2**；已有仓库无需
+迁移。P36 最低 p37 版本提升到 **0.6.0**。
+
+### 同步与 GC
+
+- `VersionChain` 改为完整 DAG 遍历，merge 的第二父不再被 sync status/prepare/GC 丢掉。
+- GC 版本行改为流式遍历，不再受固定 100 万行 LIMIT 影响。
+- GC 区分 loose/packed：packed 对象只由 `SweepPacks` 整包回收，`drop_bytes`
+  不再把不可单独删除的 packed 字节算进去；回收后清理空分片目录。
+- `PackLoose` 会清掉“已在 pack 里”的残留松散副本。
+- S3/Dir `UpdateRef` 使用调用方 ETag/generation 做 CAS；Dir 远端残留锁超过
+  2 分钟可接管。
+- 多 line `sync_pull` 会跳过本地已有全部版本的包。
+
+### 并发与工作区
+
+- watcher 在 in-flight 时不再清 dirty/推进 scanned，慢采集期间的事件不会丢。
+- `mountmgr.Open` 失败时清理半棵树/半挂载与基底引用。
+- `Relower` 失败时尝试挂回旧 lower；rebase 不再退化为往未挂载裸目录覆写。
+- 多工作区锁统一 child→parent 顺序，消除 `Rebase` 与 stack land 的 ABBA 死锁。
+- `Hub.Delete` 全程持 hub 锁，避免与并发 Open/Close 竞态。
+
+### 接口与性能
+
+- `version_compare` 对 version ref 直接按版本祖先计算，不再降级成 line head。
+- `repo delete` 在 daemon 在线时走 daemon；root daemon 增加单实例锁。
+- `--check --root --strict` 使用只读 line 链检查，不再重挂/回收工作区。
+- zstd 编解码改为池；mountinfo 解析增加 mtime/size 缓存；diff 锚点选择只考虑
+  两侧都存在的行。
+
 ## 本版重点（v0.5.2）
 
 这是数据安全与 P36 L1 集成形态对齐版本，**`format_ver` 仍为 2**；已有仓库

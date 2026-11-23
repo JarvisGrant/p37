@@ -412,7 +412,7 @@ func routeRepoCommand(root, tool string, args any) (json.RawMessage, bool, error
 	if fi.Mode()&os.ModeSocket == 0 {
 		return nil, false, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	c, err := daemonclient.Connect(ctx, sock)
 	if err != nil {

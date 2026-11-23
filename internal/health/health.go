@@ -197,6 +197,11 @@ func Check(root string, opt Options) Report {
 
 	// daemon 状态：仅报告，不参与退出码。
 	checkDaemon(add, root, cfg)
+	if cfg.Daemon.ListenHTTP && cfg.Daemon.AuthToken == "" {
+		add("HTTP 鉴权", StatusFail, "listen_http=true 但未配置 daemon.auth_token", true)
+	} else {
+		add("HTTP 鉴权", StatusOK, "未启用 HTTP 或已配置 token", false)
+	}
 
 	rep.OK = true
 	for _, c := range rep.Checks {

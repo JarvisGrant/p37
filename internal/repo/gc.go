@@ -157,18 +157,21 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 			reachable[id] = true
 		}
 	}
-	rows, err := r.DB.ListVersions(1_000_000, 0)
-	if err != nil {
+	var allIDs []hash.ID
+	if err := r.DB.IterateVersionIDs(func(id hash.ID) error {
+		allIDs = append(allIDs, id)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	rep.VersionTotal = len(rows)
+	rep.VersionTotal = len(allIDs)
 	keepSet := reachable
 	var keepVersions, dropVersions []hash.ID
-	for _, row := range rows {
-		if keepSet[row.ID] {
-			keepVersions = append(keepVersions, row.ID)
+	for _, id := range allIDs {
+		if keepSet[id] {
+			keepVersions = append(keepVersions, id)
 		} else {
-			dropVersions = append(dropVersions, row.ID)
+			dropVersions = append(dropVersions, id)
 		}
 	}
 	rep.VersionKeep, rep.VersionDrop = len(keepVersions), len(dropVersions)
@@ -251,9 +254,23 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 			continue
 		}
 		drop = append(drop, o)
-		rep.DropBytes += o.StoredSize
 	}
 	rep.ObjectDrop = len(drop)
+	// packed 对象不能逐个删除：DeleteObject 只删松散副本。这里把 packed
+	// 的字节排除在 drop_bytes 之外，真正回收由 SweepPacks 按“整包全死”统计。
+	packed := map[hash.ID]bool{}
+	if ps, ok := r.Store.BlobStore().(*cas.PackStore); ok {
+		for _, o := range drop {
+			if isPacked, perr := ps.IsPacked(o.ID); perr == nil && isPacked {
+				packed[o.ID] = true
+			}
+		}
+	}
+	for _, o := range drop {
+		if !packed[o.ID] {
+			rep.DropBytes += o.StoredSize
+		}
+	}
 
 	if dryRun {
 		return rep, nil
@@ -281,6 +298,9 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 		rep.VersionsPruned++
 	}
 	for _, o := range drop {
+		if packed[o.ID] {
+			continue // 由 SweepPacks 整包回收并统计
+		}
 		if err := r.Store.DeleteObject(o.ID); err != nil {
 			return rep, err
 		}
@@ -296,6 +316,9 @@ func (r *Repo) GC(dryRun bool) (*GCReport, error) {
 	rep.PackObjectsDropped = sw.ObjectsDropped
 	rep.PackBytesReclaimed = sw.BytesReclaimed
 	rep.BytesReclaimed += sw.BytesReclaimed
+	if pr, ok := r.Store.BlobStore().(interface{ PruneEmptyDirs(string) error }); ok {
+		_ = pr.PruneEmptyDirs("objects/")
+	}
 
 	rep.Bootstrapped = true
 

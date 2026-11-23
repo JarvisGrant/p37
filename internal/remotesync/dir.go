@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // DirRemote 把「远端」实现为一个本地目录。
@@ -131,11 +132,25 @@ func (d *DirRemote) GetRef(ctx context.Context) (Ref, error) {
 // UpdateRef 实现 Remote：用 O_EXCL 锁文件把读-比较-写串行化。
 func (d *DirRemote) UpdateRef(ctx context.Context, expected, next Ref) error {
 	lock := filepath.Join(d.root, "refs", ".lock")
-	f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return ErrRemoteMoved
+	var f *os.File
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err = os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			break
 		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// 进程崩溃会留下 O_EXCL 锁文件；超过 2 分钟视为残留并接管。
+		// 正常 UpdateRef 是毫秒级，不会误删活跃锁。
+		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > 2*time.Minute {
+			_ = os.Remove(lock)
+			continue
+		}
+		return ErrRemoteMoved
+	}
+	if err != nil {
 		return err
 	}
 	_ = f.Close()
@@ -149,7 +164,8 @@ func (d *DirRemote) UpdateRef(ctx context.Context, expected, next Ref) error {
 		if !errors.Is(err, ErrNoRef) {
 			return ErrRemoteMoved
 		}
-	} else if err != nil || cur.Head != expected.Head {
+	} else if err != nil || cur.Head != expected.Head ||
+		(expected.Generation > 0 && cur.Generation != expected.Generation) {
 		return ErrRemoteMoved
 	}
 	tmp := d.refPath() + ".tmp"

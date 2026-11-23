@@ -202,13 +202,23 @@ func (m *Manager) Open(wsID string, baseTree hash.ID, src ContentSource,
 		}
 	}
 
+	cleanup := func(overlay bool) {
+		if overlay {
+			_ = m.unmountOverlay(wsID)
+			m.releaseBase(wsID)
+		}
+		_ = os.RemoveAll(m.wsMetaDir(wsID))
+		_ = os.RemoveAll(dir)
+	}
 	switch mode {
 	case ModeCopy:
 		if err := m.materializeInto(dir, baseTree, src); err != nil {
+			cleanup(false)
 			return "", err
 		}
 	case ModeOverlay:
 		if err := m.mountOverlay(wsID, baseTree, src); err != nil {
+			cleanup(false)
 			return "", err
 		}
 	case ModeAuto, "":
@@ -216,21 +226,26 @@ func (m *Manager) Open(wsID string, baseTree hash.ID, src ContentSource,
 			// 回退 copy：目录已建，先清空。
 			_ = os.RemoveAll(dir)
 			if err := os.MkdirAll(dir, 0o755); err != nil {
+				cleanup(false)
 				return "", err
 			}
 			if err2 := m.materializeInto(dir, baseTree, src); err2 != nil {
+				cleanup(false)
 				return "", errors.Join(err, err2)
 			}
 			if err := m.writeState(wsID); err != nil {
+				cleanup(false)
 				return "", err
 			}
 			return ModeCopy, nil
 		}
 	default:
+		cleanup(false)
 		return "", fmt.Errorf("mountmgr: 未知物化模式 %q", mode)
 	}
 
 	if err := m.writeState(wsID); err != nil {
+		cleanup(mode != ModeCopy)
 		return "", err
 	}
 	if mode == ModeCopy {

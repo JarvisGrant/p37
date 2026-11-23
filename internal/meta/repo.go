@@ -356,3 +356,29 @@ func (d *DB) DeleteVersion(id hash.ID) error {
 		return err
 	})
 }
+
+// IterateVersionIDs 流式遍历全部版本 id（按 ts 倒序）。
+//
+// GC 不能再用固定 LIMIT 的 ListVersions：超出上限的版本行既不会被标记，
+// 其对象又会被当成不可达删除，最终留下“版本行在、对象没了”的损坏仓库。
+func (d *DB) IterateVersionIDs(fn func(hash.ID) error) error {
+	rows, err := d.sql.Query(`SELECT id FROM version ORDER BY ts DESC, id DESC`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var idStr string
+		if err := rows.Scan(&idStr); err != nil {
+			return err
+		}
+		id, err := hash.Parse(idStr)
+		if err != nil {
+			return err
+		}
+		if err := fn(id); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}

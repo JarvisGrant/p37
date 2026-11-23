@@ -505,18 +505,26 @@ func (h *Hub) dropCachedLocked(e *Entry) error {
 }
 
 // Delete 删除一个 repo。默认硬删；有活跃工作区/租约时拒绝。
+//
+// 全程持 h.mu：否则 Get→Open→CloseRepo→rename 之间可能插入新的 Open，
+// 请求拿到 *repo.Repo 后目录被 rename 走，DB/CAS 路径分裂。
 func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
-	e, err := h.Get(ref)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, err := h.getEnrichedLocked(ref)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", ErrRepoNotFound, ref)
+		}
 		return nil, err
 	}
 	// 挂载点绝不能 rename；应用卷请走 repo_unregister + guest umount。
 	if err := h.guardDeletePath(e.Path); err != nil {
 		return nil, err
 	}
-	r, err := h.Open(e.ID)
-	if err != nil && !force {
-		return nil, err
+	r, oerr := h.openLocked(e.ID, false)
+	if oerr != nil && !force {
+		return nil, oerr
 	}
 	if r != nil {
 		all, _ := r.WS.List()
@@ -536,7 +544,7 @@ func (h *Hub) Delete(ref string, force bool) (*Entry, error) {
 	// 先关闭缓存/flock，再写 tombstone，最后移目录。反过来 tombstone 会让
 	// CloseRepo 的 lookupLocked(deleted_ts=0) 找不到行，DB handle 和 flock
 	// 会永久残留，旧名字仍能解析到已删除的 repo。
-	if err := h.CloseRepo(e.ID); err != nil && !errors.Is(err, ErrRepoNotFound) {
+	if err := h.dropCachedLocked(e); err != nil {
 		return nil, err
 	}
 	_, _ = h.db.Exec(`UPDATE repo SET deleted_ts=? WHERE id=?`, time.Now().UnixMilli(), e.ID)

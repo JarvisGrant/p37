@@ -91,19 +91,24 @@ func findAnchor(a2, b2 [][]byte, maxChain int) (int, int, bool) {
 	for _, l := range a2 {
 		cntA[string(l)]++
 	}
+	cntB := make(map[string]int, len(b2))
+	for _, l := range b2 {
+		cntB[string(l)]++
+	}
+	// 最稀有行必须是**两侧都存在**的行。此前用 A 侧全局最小计数，
+	// 删除一个只存在于 A 的唯一行时会让 minCnt=1，而所有公共行都出现
+	// 2 次以上，最终找不到锚点、整文件退化成 replace。
 	minCnt := len(a2) + 1
-	for _, l := range a2 {
-		if c := cntA[string(l)]; c < minCnt {
+	for s, c := range cntA {
+		if _, inB := cntB[s]; !inB {
+			continue
+		}
+		if c < minCnt {
 			minCnt = c
 		}
 	}
 	if minCnt > maxChain {
 		return 0, 0, false
-	}
-
-	cntB := make(map[string]int, len(b2))
-	for _, l := range b2 {
-		cntB[string(l)]++
 	}
 	firstB := make(map[string]int, len(b2))
 	for i, l := range b2 {

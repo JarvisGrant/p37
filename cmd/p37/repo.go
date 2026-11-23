@@ -155,6 +155,24 @@ func cmdRepo(root string, args []string, out, errw io.Writer) int {
 			fmt.Fprintln(errw, "repo delete 需要 <id|name>")
 			return 2
 		}
+		// 有 daemon 时必须走 daemon：--force 直接 rename 一个运行中的
+		// repo 目录会让 daemon 的 DB/CAS 路径分裂。
+		if data, routed, rerr := routeRepoCommand(root, "repo_delete", map[string]any{
+			"repo": ref, "force": force,
+		}); routed {
+			if rerr != nil {
+				return fail(errw, rerr)
+			}
+			var resp map[string]any
+			if json.Unmarshal(data, &resp) == nil {
+				if id, _ := resp["id"].(string); id != "" {
+					fmt.Fprintf(out, "deleted %s (%s)\n", resp["name"], id)
+				} else {
+					fmt.Fprintln(out, "deleted")
+				}
+			}
+			return 0
+		}
 		e, err := h.Delete(ref, force)
 		if err != nil {
 			return fail(errw, err)

@@ -243,15 +243,66 @@ func (r *Repo) CompareLines(a, b string) (*LineCompare, error) {
 	if err != nil {
 		return nil, err
 	}
-	as, err := r.DB.Ancestors(la.Head)
+	return r.compareHeads(a, b, la.Head, lb.Head)
+}
+
+// CompareRefs 比较任意两个 ref（version/line/mainline），而不是把 version
+// 先降级成“包含它的 line head”。version ref 直接按版本 id 计算祖先差。
+func (r *Repo) CompareRefs(a, b string) (*LineCompare, error) {
+	ah, al, err := r.compareRefHead(a)
 	if err != nil {
 		return nil, err
 	}
-	bs, err := r.DB.Ancestors(lb.Head)
+	bh, bl, err := r.compareRefHead(b)
 	if err != nil {
 		return nil, err
 	}
-	out := &LineCompare{A: a, B: b, AHead: la.Head, BHead: lb.Head}
+	return r.compareHeads(al, bl, ah, bh)
+}
+
+func (r *Repo) compareRefHead(ref string) (hash.ID, string, error) {
+	if ref == "" || ref == "mainline" {
+		def, err := r.DB.DefaultLine()
+		if err != nil {
+			return hash.ID{}, "", err
+		}
+		h, err := r.DB.LineHead(def)
+		return h, def, err
+	}
+	if len(ref) > 5 && ref[:5] == "line:" {
+		name := ref[5:]
+		h, err := r.DB.LineHead(name)
+		return h, name, err
+	}
+	if len(ref) > 8 && ref[:8] == "version:" {
+		ref = ref[8:]
+	}
+	if h, err := r.ResolveVersionRef(ref); err == nil {
+		return h, shortVersionLabel(ref), nil
+	}
+	if h, err := r.DB.LineHead(ref); err == nil {
+		return h, ref, nil
+	}
+	return hash.ID{}, "", fmt.Errorf("%w: %s", ErrVersionNotFound, ref)
+}
+
+func shortVersionLabel(ref string) string {
+	if len(ref) > 16 {
+		return ref[:16]
+	}
+	return ref
+}
+
+func (r *Repo) compareHeads(a, b string, aHead, bHead hash.ID) (*LineCompare, error) {
+	as, err := r.DB.Ancestors(aHead)
+	if err != nil {
+		return nil, err
+	}
+	bs, err := r.DB.Ancestors(bHead)
+	if err != nil {
+		return nil, err
+	}
+	out := &LineCompare{A: a, B: b, AHead: aHead, BHead: bHead}
 	for id := range as {
 		if !bs[id] {
 			out.Ahead++
@@ -262,7 +313,7 @@ func (r *Repo) CompareLines(a, b string) (*LineCompare, error) {
 			out.Behind++
 		}
 	}
-	base, all, err := r.DB.MergeBases(la.Head, lb.Head)
+	base, all, err := r.DB.MergeBases(aHead, bHead)
 	if err != nil {
 		return nil, err
 	}
@@ -272,14 +323,14 @@ func (r *Repo) CompareLines(a, b string) (*LineCompare, error) {
 	if !base.IsZero() {
 		if bv, err := r.DB.GetVersion(base); err == nil {
 			if bt, err := r.Store.GetTree(bv.Tree); err == nil {
-				if av, err := r.DB.GetVersion(la.Head); err == nil {
+				if av, err := r.DB.GetVersion(aHead); err == nil {
 					if at, err := r.Store.GetTree(av.Tree); err == nil {
 						if ops, err := capture.Diff("__cmp_a__", bt, at, r.Store, r.CaptureOpt); err == nil {
 							out.AChanged = summarize(ops)
 						}
 					}
 				}
-				if bv2, err := r.DB.GetVersion(lb.Head); err == nil {
+				if bv2, err := r.DB.GetVersion(bHead); err == nil {
 					if bt2, err := r.Store.GetTree(bv2.Tree); err == nil {
 						if ops, err := capture.Diff("__cmp_b__", bt, bt2, r.Store, r.CaptureOpt); err == nil {
 							out.BChanged = summarize(ops)

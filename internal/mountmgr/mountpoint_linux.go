@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -41,13 +42,35 @@ func IsMountPoint(path string) bool {
 	return devOf(fi) != devOf(pfi)
 }
 
+const mountInfoPath = "/proc/self/mountinfo"
+
+var mountInfoCache struct {
+	sync.Mutex
+	modTime int64
+	size    int64
+	set     map[string]bool
+}
+
 func mountinfoHas(want string) bool {
-	f, err := os.Open("/proc/self/mountinfo")
+	fi, statErr := os.Stat(mountInfoPath)
+	if statErr == nil {
+		mountInfoCache.Lock()
+		if mountInfoCache.set != nil && mountInfoCache.modTime == fi.ModTime().UnixNano() &&
+			mountInfoCache.size == fi.Size() {
+			ok := mountInfoCache.set[want]
+			mountInfoCache.Unlock()
+			return ok
+		}
+		mountInfoCache.Unlock()
+	}
+
+	f, err := os.Open(mountInfoPath)
 	if err != nil {
 		return false
 	}
 	defer func() { _ = f.Close() }()
 
+	set := map[string]bool{}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -56,12 +79,16 @@ func mountinfoHas(want string) bool {
 		if len(fields) < 5 {
 			continue
 		}
-		mp := unescapeMountField(fields[4])
-		if mp == want {
-			return true
-		}
+		set[unescapeMountField(fields[4])] = true
 	}
-	return false
+	if statErr == nil {
+		mountInfoCache.Lock()
+		mountInfoCache.modTime = fi.ModTime().UnixNano()
+		mountInfoCache.size = fi.Size()
+		mountInfoCache.set = set
+		mountInfoCache.Unlock()
+	}
+	return set[want]
 }
 
 // unescapeMountField 还原 mountinfo 里的八进制转义（空格等）。

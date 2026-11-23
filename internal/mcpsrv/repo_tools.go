@@ -1174,41 +1174,8 @@ func (s *Server) registerVersionGraph() {
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, coded("invalid_argument", "参数解析失败: %v", err)
 			}
-			la, err := refAsLine(rr, a.A)
-			if err != nil {
-				return nil, err
-			}
-			lb, err := refAsLine(rr, a.B)
-			if err != nil {
-				return nil, err
-			}
-			return rr.CompareLines(la, lb)
+			return rr.CompareRefs(a.A, a.B)
 		})
-}
-
-func refAsLine(r *repo.Repo, ref string) (string, error) {
-	if ref == "" || ref == "mainline" {
-		return r.DB.DefaultLine()
-	}
-	if len(ref) > 5 && ref[:5] == "line:" {
-		return ref[5:], nil
-	}
-	if len(ref) > 8 && ref[:8] == "version:" {
-		ref = ref[8:]
-	}
-	// version ref: 找到唯一包含它的 line；否则报错。
-	id, err := r.ResolveVersionRef(ref)
-	if err == nil {
-		ls, _ := r.Lines()
-		for i := range ls {
-			ok, _ := r.DB.IsAncestor(id, ls[i].Head)
-			if ok {
-				return ls[i].Name, nil
-			}
-		}
-		return "", coded("line_not_found", "版本 %s 不属于任何 line", ref)
-	}
-	return ref, nil
 }
 
 func (s *Server) registerRepoExport() {

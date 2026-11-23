@@ -165,6 +165,45 @@ func (s *Server) registerSyncV2() {
 			if err != nil {
 				return nil, err
 			}
+			// 先验证远端可读，再决定是否 force 删除本地仓库。否则 prefix
+			// 打错/凭证缺失会先把本地唯一副本 rename 进 trash，再失败。
+			preCfg, cerr := config.Load(rr.Root)
+			if cerr != nil {
+				return nil, cerr
+			}
+			preCfg.Remote.Enabled = true
+			if preCfg.Remote.Backend == "" {
+				preCfg.Remote.Backend = "s3"
+			}
+			if len(a.Remote) > 0 && string(a.Remote) != "null" {
+				if uerr := json.Unmarshal(a.Remote, &preCfg.Remote); uerr != nil {
+					return nil, coded("invalid_argument", "remote 配置解析失败: %v", uerr)
+				}
+			}
+			preCfg.Remote.RemoteKey = key
+			if base != "" {
+				preCfg.Remote.Prefix = base
+			}
+			if serr := config.Save(rr.Root, preCfg); serr != nil {
+				return nil, serr
+			}
+			preRemote, _, rerr := remoteFor(rr)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if preRemote == nil {
+				return nil, coded("sync_not_configured", "远端未启用")
+			}
+			preRef, gerr := preRemote.GetRef(ctx)
+			if gerr != nil {
+				if errors.Is(gerr, remotesync.ErrNoRef) {
+					return nil, coded("sync_remote_empty", "远端 prefix 下没有 refs/lines.json，拒绝恢复/删除本地仓库")
+				}
+				return nil, coded("sync_remote_unavailable", "读取远端 ref 失败，拒绝恢复/删除本地仓库: %v", gerr)
+			}
+			if preRef.Head == "" {
+				return nil, coded("sync_remote_empty", "远端 ref 没有 head，拒绝恢复/删除本地仓库")
+			}
 			if !isEmptyRepo(rr) {
 				if !a.Force {
 					return nil, coded("repo_busy", "仓库非空，需要 force=true")

@@ -1,4 +1,4 @@
-# 当前状态（v0.5.2）
+# 当前状态（v0.6.0）
 
 > 这是当前状态的唯一入口。按时间倒序的实现记录、缺陷复盘和设计修正见
 > [`../PROGRESS.md`](../PROGRESS.md)；发布说明见 `packaging/p36/RELEASE_NOTES.md`。
@@ -7,7 +7,7 @@
 
 | 项 | 值 |
 |---|---|
-| 发布版本 | `v0.5.2` |
+| 发布版本 | `v0.6.0` |
 | 仓库格式 | `format_ver = 2` |
 | MCP 工具 | 68 个（以 `internal/mcpsrv` 注册为准） |
 | 发布平台 | `linux/amd64` 静态发布物；`darwin/amd64`、`linux/amd64`、`linux/arm64` 做编译校验 |
@@ -16,6 +16,16 @@
 `format_ver=2` 相对 v1 增加多父 merge 版本、命名线、幂等和工作区扩展字段；
 线性版本的编码与 id 不变。v1 仓库首次被新二进制打开时会自动迁移并备份，见
 [`format-v2.md`](format-v2.md)。
+
+**v0.6.0 重点（不改 `format_ver`）**：在 v0.5.2 数据安全修复之上，完成
+GC/同步/并发/性能的一轮收敛：`VersionChain` 改为完整 DAG（merge 第二父不再
+丢）、GC 版本行流式遍历（不再有 100 万行截断）、packed 对象回收与统计修正、
+S3/Dir ref CAS 使用调用方 ETag/generation、目录远端残留锁 TTL、多 line pull
+跳过本地已有包、watcher in-flight 不再丢 dirty、mountmgr 失败清理、
+Relower 失败回滚旧 lower、统一 child→parent 锁序、`version_compare` 直接比较
+version ref、`repo delete` 走 daemon、root daemon 单实例锁、`--check` 只读
+line 检查、zstd 编解码池、mountinfo 缓存、diff 锚点选择修正。
+CAS typed object / `format_ver=3` 仍留到后续格式版本，不在本版混入。
 
 **v0.5.2 重点（不改 `format_ver`）**：以数据安全与 P36 L1 形态对齐为主。
 修复 daemon 重启后 `RemountAll` 把 `materialized_ts` 推到当前时刻导致离线改动

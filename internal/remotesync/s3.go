@@ -251,10 +251,16 @@ func (s *S3Remote) UpdateRef(ctx context.Context, expected, next Ref) error {
 			}
 			return err
 		}
-		if cur.Head != expected.Head {
+		if cur.Head != expected.Head ||
+			(expected.Generation > 0 && cur.Generation != expected.Generation) {
 			return ErrRemoteMoved
 		}
-		etag := cur.ETag
+		// 用调用方 GetRef 时拿到的 ETag 做 CAS；重新读到的 ETag 只能作为
+		// 旧调用方的回退。否则同一 head 的并发 line 更新会互相覆盖。
+		etag := expected.ETag
+		if etag == "" {
+			etag = cur.ETag
+		}
 		if etag == "" {
 			head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 				Bucket: aws.String(s.bucket), Key: aws.String(key),

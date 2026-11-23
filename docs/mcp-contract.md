@@ -816,7 +816,7 @@ not_dirty conflict land_queue_full invalid_path
 destination_not_empty path_not_found
 overlay_unavailable path_case_conflict
 version_not_found ambiguous_id
-sync_not_configured sync_in_progress sync_remote_moved sync_remote_unavailable
+sync_not_configured sync_in_progress sync_remote_moved sync_remote_unavailable sync_remote_empty
 corrupt_object file_too_large
 invalid_argument internal not_found
 ```

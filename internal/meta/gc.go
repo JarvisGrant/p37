@@ -15,33 +15,38 @@ import (
 // 而不是报错 —— 否则剪枝一次之后 WalkHead / blame 就全废了。
 func (d *DB) VersionChain(head hash.ID) ([]hash.ID, error) {
 	out := make([]hash.ID, 0, 64)
-	cur := head
-	seen := 0
-	for {
+	seen := map[hash.ID]bool{}
+	queue := []hash.ID{head}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.IsZero() || seen[cur] {
+			continue
+		}
+		seen[cur] = true
 		v, err := d.GetVersion(cur)
 		if err != nil {
 			if errors.Is(err, ErrNotExist) {
-				return out, nil // 剪枝边界
+				continue // 剪枝边界
 			}
 			return nil, err
 		}
 		out = append(out, cur)
-		if v.IsFirst() {
-			return out, nil
-		}
-		parent, err := d.GetVersion(v.Parent)
-		if err != nil {
-			if errors.Is(err, ErrNotExist) {
-				return out, nil // 父代已被剪枝
-			}
-			return nil, err
-		}
-		cur = parent.ID()
-		seen++
-		if seen > 10_000_000 {
+		if len(out) > 10_000_000 {
 			return nil, errors.New("meta: 版本链过长，疑似存在环")
 		}
+		// 多父 merge 的**所有**父都要走：只沿 first parent 会把另一条
+		// 分支从 sync status/prepare/GC 的可见集合里丢掉。
+		ps, perr := d.ParentIDs(cur)
+		if perr != nil {
+			continue
+		}
+		if len(ps) == 0 && !v.Parent.IsZero() {
+			ps = []hash.ID{v.Parent}
+		}
+		queue = append(queue, ps...)
 	}
+	return out, nil
 }
 
 // PruneVersion 删除一个版本及其血缘、归因缓存（§10.3）。

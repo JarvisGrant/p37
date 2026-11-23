@@ -1448,8 +1448,9 @@ func (m *Manager) Rebase(wsID string) (*RebaseResult, error) {
 func (m *Manager) rebaseWorkspace(wsID string, newBase hash.ID, target *tree.Tree) error {
 	if m.mm.IsMounted(wsID) {
 		if err := m.mm.Relower(wsID, newBase, m.store); err != nil {
-			// 换 lower 失败（例如内核不允许）：退化为整树覆写，宁可慢不能错。
-			return m.overwriteWorkspace(wsID, target)
+			// Relower 已经尝试把旧 lower 挂回；此时绝不能退化成往未挂载
+			// 的裸目录覆写（会写错位置并让 base_tree 分叉）。
+			return err
 		}
 		return m.applyDelta(wsID, newBase, target)
 	}
